@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/mrdhira/galahad/internal/protocol"
 	"github.com/mrdhira/galahad/internal/report"
 )
+
+var refDef = regexp.MustCompile(`^\s*(- |\| )?\[[.@]\]:`)
 
 func result(snippet, path string) *protocol.Result {
 	ev := protocol.Evidence{Path: path, Line: 3, Snippet: snippet}
@@ -47,6 +50,7 @@ func TestWrite(t *testing.T) {
 		// inputs
 		snippet string
 		path    string
+		reasons []string
 		// expectations
 		wantBoth       []string // in summary.md and report.html
 		wantMD         []string
@@ -89,6 +93,14 @@ func TestWrite(t *testing.T) {
 			wantMDAbsent:   []string{"](javascript", "](http"},
 		},
 		{
+			name:         "link reference definitions cannot turn defang markers into links",
+			snippet:      "![.] evil[.]test",
+			path:         "a.txt",
+			reasons:      []string{"[.]: //evil.test/t", "[@]: javascript:x"},
+			wantMD:       []string{`\[.]: //evil.test/t`, `\[@]: javascript:x`, `\![.] evil[.]test`},
+			wantMDAbsent: []string{"\n- [.]:", "\n- [@]:", " ![.]"},
+		},
+		{
 			name:           "www host and newline are neutralized",
 			snippet:        "www.evil.test\n# heading",
 			path:           "a.txt",
@@ -101,6 +113,9 @@ func TestWrite(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Given a result with untrusted text
 			res := result(tt.snippet, tt.path)
+			if tt.reasons != nil {
+				res.Reasons = tt.reasons
+			}
 			dir := filepath.Join(t.TempDir(), "out", "nested")
 
 			// When the reports are written
@@ -117,6 +132,11 @@ func TestWrite(t *testing.T) {
 			md, html := read(t, paths.Markdown), read(t, paths.HTML)
 			check(t, "summary.md", md, append(tt.wantBoth, tt.wantMD...), append(tt.wantNeitherHas, tt.wantMDAbsent...))
 			check(t, "report.html", html, append(tt.wantBoth, tt.wantHTML...), append(tt.wantNeitherHas, tt.wantHTMLAbsent...))
+			for _, l := range strings.Split(md, "\n") {
+				if refDef.MatchString(l) {
+					t.Errorf("summary.md line %q can define a link reference", l)
+				}
+			}
 			if runtime.GOOS != "windows" {
 				checkMode(t, dir, 0o750)
 				for _, p := range []string{paths.JSON, paths.Markdown, paths.HTML} {

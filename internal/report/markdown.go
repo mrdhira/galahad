@@ -15,7 +15,7 @@ const (
 
 // mdSpecial are the characters that can start Markdown constructs inside a line. <, > and & become
 // HTML entities instead, so raw markup never appears in the file.
-const mdSpecial = "\\`*_{}[]()|~"
+const mdSpecial = "\\`*_{}[]()|~!"
 
 // mdEscape defangs s and escapes Markdown-active characters so untrusted text cannot become a
 // link, image, code span, table cell break or raw HTML. The defang markers [.] and [@] stay as
@@ -31,7 +31,21 @@ func mdValue(s string) string {
 
 func mdEscapeClean(s string) string {
 	var b strings.Builder
+	atStart := true
 	for i := 0; i < len(s); i++ {
+		// A fragment starts a list item or table cell, so a leading "[" could begin a link
+		// reference definition ("[.]: url") that turns every defang marker into a link.
+		if s[i] != ' ' && s[i] != '[' {
+			atStart = false
+		}
+		if atStart && s[i] == '[' {
+			b.WriteString("\\[")
+			if strings.HasPrefix(s[i:], "[.]") || strings.HasPrefix(s[i:], "[@]") {
+				b.WriteString(s[i+1 : i+3])
+				i += 2
+			}
+			continue
+		}
 		if strings.HasPrefix(s[i:], "[.]") || strings.HasPrefix(s[i:], "[@]") {
 			b.WriteString(s[i : i+3])
 			i += 2
