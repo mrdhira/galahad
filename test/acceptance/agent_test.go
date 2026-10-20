@@ -23,12 +23,18 @@ type report struct {
 	} `json:"files"`
 	Findings []struct {
 		RuleID   string `json:"rule_id"`
+		Severity string `json:"severity"`
 		Analyzer string `json:"analyzer"`
 		Evidence []struct {
-			Path string `json:"path"`
-			Line int    `json:"line"`
+			Path    string `json:"path"`
+			Line    int    `json:"line"`
+			Snippet string `json:"snippet"`
 		} `json:"evidence"`
 	} `json:"findings"`
+	IOCs []struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	} `json:"iocs"`
 	Coverage struct {
 		FilesSeen     int `json:"files_seen"`
 		FilesAnalyzed int `json:"files_analyzed"`
@@ -38,6 +44,7 @@ type report struct {
 		} `json:"skipped"`
 	} `json:"coverage"`
 	Verdict         string   `json:"verdict"`
+	Score           int      `json:"score"`
 	ConfidenceLevel string   `json:"confidence_level"`
 	Reasons         []string `json:"reasons"`
 }
@@ -45,20 +52,36 @@ type report struct {
 // analyze runs "galahad-agent analyze" on target, expects exit code wantCode and returns the parsed report.
 func analyze(t *testing.T, target string, wantCode int) report {
 	t.Helper()
+	rep, _ := analyzeOut(t, target, wantCode)
+	return rep
+}
+
+// analyzeOut is analyze that also returns the output directory, for tests that read summary.md or report.html.
+func analyzeOut(t *testing.T, target string, wantCode int) (report, string) {
+	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
 	stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, target)
 	if code != wantCode {
 		t.Fatalf("analyze exit = %d, want %d\nstdout: %s\nstderr: %s", code, wantCode, stdout, stderr)
 	}
-	b, err := os.ReadFile(filepath.Join(out, "report.json"))
+	rep, err := readReport(filepath.Join(out, "report.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	return rep, out
+}
+
+// readReport parses the report.json at path.
+func readReport(path string) (report, error) {
 	var rep report
-	if err := json.Unmarshal(b, &rep); err != nil {
-		t.Fatalf("report.json: %v", err)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return rep, err
 	}
-	return rep
+	if err := json.Unmarshal(b, &rep); err != nil {
+		return rep, fmt.Errorf("%s: %w", path, err)
+	}
+	return rep, nil
 }
 
 // otherFindings returns the rule IDs of the findings that are not auto-execution
