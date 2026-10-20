@@ -81,8 +81,9 @@ func TestExtractLimits(t *testing.T) {
 
 // TestExtractScalesLinearly guards against quadratic matching on long lines.
 // It compares run times instead of using a fixed limit, so a slow or busy
-// machine (or the race detector) does not make it flaky: a 4x larger line must
-// take well under 16x as long, the ratio a quadratic scan would show.
+// machine (or the race detector) does not make it flaky: a 16x larger line must
+// take well under the 256x a quadratic scan would show (measured: about 16-27x
+// linear, 100x and more quadratic).
 func TestExtractScalesLinearly(t *testing.T) {
 	tests := []struct {
 		name string
@@ -91,7 +92,7 @@ func TestExtractScalesLinearly(t *testing.T) {
 		// expectations
 		wantMaxRatio float64
 	}{
-		{name: "4x larger mixed line costs well under 16x", small: 64 << 10, large: 256 << 10, wantMaxRatio: 10},
+		{name: "16x larger mixed line costs well under 256x", small: 32 << 10, large: 512 << 10, wantMaxRatio: 60},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
