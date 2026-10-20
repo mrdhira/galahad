@@ -1,8 +1,11 @@
 package binary_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -53,6 +56,7 @@ func TestAssess(t *testing.T) {
 		},
 		{name: "injection set with a wide suffix", ft: binary.Features{Imports: []string{"VirtualAllocExW", "WriteProcessMemory", "CreateRemoteThread"}}, wantRules: []string{"GAL-BIN-003"}},
 		{name: "process hollowing import", ft: binary.Features{Imports: []string{"NtUnmapViewOfSection"}}, wantRules: []string{"GAL-BIN-003"}},
+		{name: "process hollowing import, Zw form", ft: binary.Features{Imports: []string{"ZwUnmapViewOfSection"}}, wantRules: []string{"GAL-BIN-003"}},
 		{name: "partial injection set", ft: binary.Features{Imports: []string{"VirtualAllocEx", "WriteProcessMemory"}}},
 		{
 			name:        "keylogger hook set",
@@ -120,41 +124,86 @@ func selfBytes(t *testing.T) []byte {
 	return b
 }
 
+func elfExtendedCount() []byte {
+	b, shoff := buildELF([]elfSection{{name: ".text", typ: 1, flags: 6, data: []byte{1}}}, 0, nil)
+	le.PutUint16(b[60:], 0)
+	le.PutUint64(b[shoff+32:], 1<<20)
+	return b
+}
+
+func elfWith(secs []elfSection, shstrFlags uint64, shstr []byte) []byte {
+	b, _ := buildELF(secs, shstrFlags, shstr)
+	return b
+}
+
 func TestParse(t *testing.T) {
 	self := selfBytes(t)
+	text := elfSection{name: ".text", typ: 1, flags: 6, data: noise(8192)}
+	machoText := buildMachO("__TEXT", 5, []machoSection{{name: "__text", seg: "__TEXT", data: noise(8192)}})
 	tests := []struct {
 		name string
 		// inputs
 		data []byte
 		// expectations
-		wantErr      bool
-		wantSections bool
+		wantErr    bool
+		wantAnyErr bool // an error or success are both fine; it must not panic or hang
+		wantRules  []string
 	}{
-		{name: "the test binary itself", data: self, wantSections: true},
+		{name: "the test binary itself", data: self},
+		{name: "pe with packed sections", data: buildPE([]peSection{{name: "UPX0", chars: peData}, {name: ".text", chars: peExec, data: noise(8192)}}, -1), wantRules: []string{"GAL-BIN-001", "GAL-BIN-002"}},
+		{name: "pe with an ordinary data section", data: buildPE([]peSection{{name: ".data", chars: peData, data: noise(8192)}}, -1)},
+		{name: "elf with a packed executable section", data: elfWith([]elfSection{text, {name: "UPX1", typ: 1, flags: 2, data: []byte{1}}}, 0, nil), wantRules: []string{"GAL-BIN-001", "GAL-BIN-002"}},
+		{name: "mach-o text segment", data: machoText, wantRules: []string{"GAL-BIN-001"}},
+		{name: "mach-o custom executable segment", data: buildMachO("EVIL", 5, []machoSection{{name: "x", seg: "EVIL", data: noise(8192)}}), wantRules: []string{"GAL-BIN-001"}},
+		{name: "mach-o executable section flags", data: buildMachO("DATA", 3, []machoSection{{name: "x", seg: "DATA", data: noise(8192), flags: 0x80000400}}), wantRules: []string{"GAL-BIN-001"}},
+		{name: "mach-o data segment", data: buildMachO("__DATA", 3, []machoSection{{name: "__data", seg: "__DATA", data: noise(8192)}})},
+		{name: "fat mach-o reads the first architecture", data: buildFat(machoText, 19), wantRules: []string{"GAL-BIN-001"}},
 		{name: "plain text", data: []byte("hello world, not a binary"), wantErr: true},
-		{name: "empty", data: nil, wantErr: true},
+		{name: "empty", wantErr: true},
 		{name: "truncated header", data: self[:20], wantErr: true},
+		{name: "truncated in the middle", data: self[:len(self)/2], wantAnyErr: true},
 		{name: "mz without a pe header", data: append([]byte("MZ"), make([]byte, 100)...), wantErr: true},
-		{name: "garbage after elf magic", data: append([]byte("\x7fELF"), []byte(strings.Repeat("\xff", 200))...), wantErr: true},
-		{name: "garbage after macho magic", data: append([]byte{0xcf, 0xfa, 0xed, 0xfe}, []byte(strings.Repeat("\xff", 200))...), wantErr: true},
-		{name: "truncated in the middle", data: self[:len(self)/2]}, // may parse or fail; it must not panic
+		{name: "garbage after elf magic", data: append([]byte("\x7fELF"), bytes.Repeat([]byte{0xff}, 200)...), wantErr: true},
+		{name: "garbage after mach-o magic", data: append([]byte{0xcf, 0xfa, 0xed, 0xfe}, bytes.Repeat([]byte{0xff}, 200)...), wantErr: true},
+		{name: "pe with thousands of sections", data: buildPE(make([]peSection, 6000), -1), wantErr: true},
+		{name: "pe section count beyond the table", data: buildPE([]peSection{{name: ".text", chars: peExec}}, 257), wantErr: true},
+		{name: "pe relocation tables larger than the file", data: buildPE([]peSection{{name: "a", nreloc: 65535}, {name: "b", nreloc: 65535}}, -1), wantErr: true},
+		{name: "elf compressed section declaring 1 GiB", data: elfWith([]elfSection{{name: ".dynsym", typ: 11, flags: 0x800, data: chdr(1 << 30)}}, 0, nil), wantErr: true},
+		{name: "elf compressed section string table", data: elfWith(nil, 0x800, chdr(1<<30)), wantErr: true},
+		{name: "elf extended section count beyond the file", data: elfExtendedCount(), wantErr: true},
+		{name: "mach-o with hundreds of sections", data: buildMachO("__TEXT", 5, make([]machoSection, 300)), wantErr: true},
+		{name: "mach-o relocation tables larger than the file", data: buildMachO("__TEXT", 5, []machoSection{{nreloc: 1 << 20}, {nreloc: 1 << 20}}), wantErr: true},
+		{name: "fat mach-o pointing outside the file", data: buildFat(machoText, 1)[:30], wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ft, err := binary.Parse(tt.data)
+			ft, err := binary.Parse(context.Background(), tt.data)
 
-			if tt.name != "truncated in the middle" && (err != nil) != tt.wantErr {
+			if !tt.wantAnyErr && (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.wantSections {
-				if len(ft.Sections) == 0 {
-					t.Errorf("features = %+v, want sections", ft)
-				}
-				if got := binary.Assess(ft); len(got) != 0 {
-					t.Errorf("findings on a normal Go binary = %+v, want none", got)
-				}
+			if err != nil || tt.wantAnyErr {
+				return
+			}
+			var got []string
+			for _, f := range binary.Assess(ft) {
+				got = append(got, f.RuleID)
+			}
+			if !slices.Equal(got, tt.wantRules) {
+				t.Errorf("rules = %v, want %v (features %+v)", got, tt.wantRules, ft)
 			}
 		})
+	}
+}
+
+func TestParseCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := binary.Parse(ctx, buildPE([]peSection{{name: ".text", chars: peExec, data: noise(100)}}, -1))
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
 
