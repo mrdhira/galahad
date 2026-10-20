@@ -182,16 +182,16 @@ func (s *scanner) targetsAction(toks []token, j int) bool {
 				break
 			}
 		}
-		return s.holdsAction(toks[j:end], 0)
+		return s.holdsAction(toks[j:end])
 	}
 	if n, ok := refAt(toks, j); ok {
-		return s.objectIsAction(n, 0)
+		return s.objectIsAction(n)
 	}
 	return false
 }
 
 // holdsAction reports whether the tokens hold "/S /<action>" or a reference to an action.
-func (s *scanner) holdsAction(toks []token, depth int) bool {
+func (s *scanner) holdsAction(toks []token) bool {
 	for i, t := range toks {
 		if t.kind == tName && t.val == "S" && i+1 < len(toks) && toks[i+1].kind == tName && actionTypes[toks[i+1].val] {
 			return true
@@ -200,7 +200,7 @@ func (s *scanner) holdsAction(toks []token, depth int) bool {
 			if i > 0 && toks[i-1].kind == tName && skipRefKeys[toks[i-1].val] {
 				continue
 			}
-			if s.objectIsAction(n, depth+1) {
+			if s.objectIsAction(n) {
 				return true
 			}
 		}
@@ -209,8 +209,10 @@ func (s *scanner) holdsAction(toks []token, depth int) bool {
 }
 
 // objectIsAction reports whether object num is an action or refers to one. Each
-// object is examined once per file.
-func (s *scanner) objectIsAction(num, depth int) bool {
+// object is examined once per file, so the work is bounded by the object count
+// and the recursion depth by MaxObjects. A depth limit is deliberately absent:
+// it would make a memoized "no" depend on the path that reached the object.
+func (s *scanner) objectIsAction(num int) bool {
 	switch s.memo[num] {
 	case 1, 2:
 		return false
@@ -218,13 +220,13 @@ func (s *scanner) objectIsAction(num, depth int) bool {
 		return true
 	}
 	o := s.byNum[num]
-	if o == nil || depth > maxRefDepth || s.ctx.Err() != nil {
+	if o == nil || s.ctx.Err() != nil {
 		return false
 	}
 	s.memo[num] = 1
 	toks := s.tok(o.buf[o.ds:o.de])
 	isArray := len(toks) > 0 && toks[0].kind == tPunct && toks[0].val == "["
-	res := !isArray && s.holdsAction(toks, depth)
+	res := !isArray && s.holdsAction(toks)
 	s.memo[num] = 2
 	if res {
 		s.memo[num] = 3

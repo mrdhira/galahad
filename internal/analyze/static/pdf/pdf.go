@@ -35,7 +35,6 @@ const (
 
 const (
 	maxEvidence   = 3
-	maxRefDepth   = 256
 	maxInlineToks = 4096 // tokens examined for one inline action dictionary
 	maxSnippetRaw = 400
 )

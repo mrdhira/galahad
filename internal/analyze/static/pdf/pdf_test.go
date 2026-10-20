@@ -73,6 +73,23 @@ func TestAnalyze(t *testing.T) {
 		fan += obj(100+i, "<< /AA 2 0 R >>")
 	}
 
+	// chain links objects first..first+n-1 to each other and the last one to dest.
+	chain := func(first, n, dest int) string {
+		var sb strings.Builder
+		for i := range n {
+			next := first + i + 1
+			if i == n-1 {
+				next = dest
+			}
+			sb.WriteString(obj(first+i, fmt.Sprintf("<< /X %d 0 R >>", next)))
+		}
+		return sb.String()
+	}
+	uriAction := obj(10, "<< /S /URI /URI (http://a.test/) >>")
+	decoyDoc := func(n int) []byte {
+		return doc(obj(1, "<< /Type /Catalog /AA << /O 100 0 R >> /OpenAction 30 0 R >>"), chain(100, n, 30), obj(30, "<< /Next 10 0 R >>"), uriAction)
+	}
+
 	zeros := func(n int) []byte { return make([]byte, n) }
 	longURI := "http://a.test/" + strings.Repeat("a", pdf.MaxURILen)
 	objstm := func() string {
@@ -197,6 +214,20 @@ func TestAnalyze(t *testing.T) {
 			name: "reference cycle ends",
 			kind: ident.PDF,
 			data: doc(obj(1, "<< /OpenAction 2 0 R >>"), obj(2, "<< /Next 3 0 R >>"), obj(3, "<< /Next 2 0 R >>")),
+		},
+		{
+			name:      "decoy chain does not hide the OpenAction behind a shared object",
+			kind:      ident.PDF,
+			data:      decoyDoc(255),
+			wantRules: []string{"GAL-PDF-002", "GAL-PDF-005"},
+			wantIOCs:  []string{"url=http://a.test/"},
+		},
+		{
+			name:      "chain as long as the object limit still finds the action",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /OpenAction 100 0 R >>"), chain(100, pdf.MaxObjects-3, 10), uriAction),
+			wantRules: []string{"GAL-PDF-002", "GAL-PDF-005"},
+			wantIOCs:  []string{"url=http://a.test/"},
 		},
 		{
 			name: "OpenAction at the end of the data",
