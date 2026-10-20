@@ -20,7 +20,7 @@ const (
 	stampedCommit  = "0123456789ab"
 )
 
-var binPath string
+var binPath, agentPath string
 
 func TestMain(m *testing.M) {
 	os.Exit(testMain(m))
@@ -39,20 +39,26 @@ func testMain(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	name := "galahad"
+	exe := ""
 	if runtime.GOOS == "windows" {
-		name += ".exe"
+		exe = ".exe"
 	}
-	binPath = filepath.Join(tmp, name)
+	binPath = filepath.Join(tmp, "galahad"+exe)
+	agentPath = filepath.Join(tmp, "galahad-agent"+exe)
 
-	build := exec.Command("go", "build",
-		"-ldflags", "-X github.com/mrdhira/galahad/internal/cli.version="+stampedVersion+
-			" -X github.com/mrdhira/galahad/internal/cli.commit="+stampedCommit,
-		"-o", binPath, "./cmd/galahad")
-	build.Dir = root
-	if out, err := build.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "build failed: %v\n%s", err, out)
-		return 1
+	for _, b := range []struct{ pkg, out, module string }{
+		{"./cmd/galahad", binPath, "cli"},
+		{"./cmd/galahad-agent", agentPath, "agent"},
+	} {
+		build := exec.Command("go", "build",
+			"-ldflags", "-X github.com/mrdhira/galahad/internal/"+b.module+".version="+stampedVersion+
+				" -X github.com/mrdhira/galahad/internal/"+b.module+".commit="+stampedCommit,
+			"-o", b.out, b.pkg)
+		build.Dir = root
+		if out, err := build.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "build %s failed: %v\n%s", b.pkg, err, out)
+			return 1
+		}
 	}
 	return m.Run()
 }
@@ -74,12 +80,23 @@ func moduleRoot() (string, error) {
 	}
 }
 
-// run executes the built binary and returns stdout, stderr and the exit code.
+// run executes the built galahad binary and returns stdout, stderr and the exit code.
 func run(t *testing.T, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	return runBinary(t, binPath, args...)
+}
+
+// runAgent executes the built galahad-agent binary and returns stdout, stderr and the exit code.
+func runAgent(t *testing.T, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	return runBinary(t, agentPath, args...)
+}
+
+func runBinary(t *testing.T, path string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd := exec.CommandContext(ctx, path, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
