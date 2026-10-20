@@ -1,0 +1,11 @@
+From: "Example News" <news@news.example.test>
+To: reader@example.test
+Subject: Weekly digest
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body>
+<p>This week on the blog.</p>
+<p><a href="https://blog.example.test/weekly">blog.example.test</a></p>
+</body></html>

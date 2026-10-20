@@ -1,0 +1,18 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+endobj
+4 0 obj
+<< /Type /Action /S /URI /URI (http://statement.sinkhole.test/view) >>
+endobj
+trailer
+<< /Root 1 0 R /Size 5 >>
+startxref
+0
+%%EOF

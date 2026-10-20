@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/mrdhira/galahad/internal/analyze"
@@ -18,8 +19,14 @@ var (
 	ruleMasq  = protocol.Rule{ID: "GAL-IDENT-001", Severity: protocol.SeverityHigh, Title: "Executable content behind a non-executable extension", Attack: "T1036.008"}
 )
 
-// The signature is assembled from parts so this source file is not itself a test file for scanners.
-var eicar = []byte(`X5O!P%@AP[4\PZX54(P^)7CC)7}$` + `EICAR-STANDARD-ANTIVIRUS-TEST-FILE!` + `$H+H*`)
+// The signature is stored reversed and turned around at start-up. A plain literal, even one
+// split into parts, is joined by the compiler, so the agent binary would itself contain the
+// signature and be flagged by antivirus scanners.
+var eicar = func() []byte {
+	b := []byte(`*H+H$!ELIF-TSET-SURIVITNA-DRADNATS-RACIE$}7)CC7)^P(45XZP\4[PA@%P!O5X`)
+	slices.Reverse(b)
+	return b
+}()
 
 // executable kinds, and the extensions that make such content look harmless.
 var (
