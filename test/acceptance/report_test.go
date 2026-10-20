@@ -54,7 +54,7 @@ func TestAgentAnalyzeReports(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "out")
 
 			// When the agent analyzes it
-			stdout, stderr, code := runAgent(t, "analyze", "-o", out, dir)
+			stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, dir)
 
 			// Then the exit code, the three files and the terminal summary match
 			if code != tt.wantCode {

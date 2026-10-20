@@ -233,7 +233,7 @@ func TestRunAnalyze(t *testing.T) {
 			args, report := tt.setup(t, tmp)
 			var out, errb bytes.Buffer
 
-			code := agent.Run(args, &out, &errb)
+			code := agent.RunWithEnv(args, &out, &errb, agent.Env{DetectVM: func() (bool, string) { return true, "test" }})
 
 			if code != tt.wantCode {
 				t.Fatalf("exit = %d, want %d (stderr %q)", code, tt.wantCode, errb.String())
@@ -282,6 +282,68 @@ func TestRunAnalyze(t *testing.T) {
 				if st, err := os.Stat(report); err != nil || st.Mode().Perm() != 0o600 {
 					t.Errorf("report stat = %v, %v, want mode 0600", st, err)
 				}
+			}
+		})
+	}
+}
+
+func TestRunAnalyzeHostGuard(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		flags  []string
+		inVM   bool
+		reason string
+		// expectations
+		wantCode     int
+		wantStderr   []string // substrings; none means stderr must be empty
+		wantReport   bool
+		wantNoStdout bool
+	}{
+		{name: "in a VM proceeds silently", inVM: true, reason: "test vm", wantCode: agent.ExitClean, wantReport: true},
+		{
+			name: "not in a VM without the flag refuses", reason: "no virtualization detected",
+			wantCode:     agent.ExitUsage,
+			wantStderr:   []string{"refusing to analyze untrusted input outside a VM", "no virtualization detected", "--unsafe-host"},
+			wantNoStdout: true,
+		},
+		{
+			name: "not in a VM with the flag warns and proceeds", flags: []string{"--unsafe-host"}, reason: "no virtualization detected",
+			wantCode:   agent.ExitClean,
+			wantStderr: []string{"WARNING", "--unsafe-host"},
+			wantReport: true,
+		},
+		{name: "in a VM with the flag proceeds silently", flags: []string{"--unsafe-host"}, inVM: true, reason: "test vm", wantCode: agent.ExitClean, wantReport: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			target := filepath.Join(tmp, "a.txt")
+			mustWrite(t, target, "hello\n")
+			out := filepath.Join(tmp, "out")
+			args := append([]string{"analyze"}, tt.flags...)
+			args = append(args, "-o", out, target)
+			var stdout, stderr bytes.Buffer
+
+			code := agent.RunWithEnv(args, &stdout, &stderr, agent.Env{DetectVM: func() (bool, string) { return tt.inVM, tt.reason }})
+
+			if code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tt.wantCode, stderr.String())
+			}
+			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr %q missing %q", stderr.String(), want)
+				}
+			}
+			if tt.wantNoStdout && stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			_, err := os.Stat(filepath.Join(out, "report.json"))
+			if (err == nil) != tt.wantReport {
+				t.Errorf("report exists = %v, want %v", err == nil, tt.wantReport)
 			}
 		})
 	}

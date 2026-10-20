@@ -18,6 +18,10 @@ make build   # build bin/galahad
 make gate    # run the full quality gate
 ```
 
+### Running on the host
+
+`galahad-agent analyze` parses untrusted input, so it refuses to run unless it detects a VM (the Galahad guest or any other VM; containers do not count). Outside a VM it prints a refusal and exits with code 2. Pass `--unsafe-host` to run on the host anyway: it prints a warning and you accept the risk. Use harmless fixtures only.
+
 Set `SKIP_VULN=1` for `make gate` only where vuln.go.dev is unreachable.
 
 ## Security
