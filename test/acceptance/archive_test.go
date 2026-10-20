@@ -124,7 +124,7 @@ func TestArchive(t *testing.T) {
 			out := filepath.Join(root, "out")
 			// When the agent analyzes it
 			start := time.Now()
-			stdout, stderr, code := runAgent(t, "analyze", "-o", out, target)
+			stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, target)
 			elapsed := time.Since(start).Seconds()
 			// Then the exit code, findings and coverage match
 			if code != tt.wantCode {

@@ -245,12 +245,16 @@ func (u *unpack) tar(r io.Reader) error {
 		if stop {
 			return nil
 		}
-		switch {
-		case !ok:
-		case hdr.Typeflag == tar.TypeSymlink, hdr.Typeflag == tar.TypeLink:
-			u.link(hdr.Name, hdr.Linkname)
-		case hdr.Typeflag == tar.TypeReg:
-			if u.read(tr, hdr.Name) != nil {
+		// Extractors write every other type, such as contiguous ('7') and sparse
+		// ('S') files, as regular files, so they are read too.
+		switch hdr.Typeflag {
+		case tar.TypeDir, tar.TypeFifo, tar.TypeChar, tar.TypeBlock, tar.TypeXGlobalHeader:
+		case tar.TypeSymlink, tar.TypeLink:
+			if ok {
+				u.link(hdr.Name, hdr.Linkname)
+			}
+		default:
+			if ok && u.read(tr, hdr.Name) != nil {
 				return nil
 			}
 		}
@@ -265,11 +269,14 @@ func (u *unpack) compressed(suffix, tarSuffix string, open func(io.Reader) (io.R
 		return err
 	}
 	br := bufio.NewReaderSize(u.cap(dec), tarHeadLen)
-	inner := strings.TrimSuffix(u.f.Name, suffix)
+	lower := strings.ToLower(u.f.Name)
+	inner := u.f.Name
 	switch {
-	case strings.HasSuffix(strings.ToLower(u.f.Name), tarSuffix):
-		inner = u.f.Name[:len(u.f.Name)-len(tarSuffix)] + ".tar"
-	case inner == u.f.Name:
+	case strings.HasSuffix(lower, tarSuffix):
+		inner = inner[:len(inner)-len(tarSuffix)] + ".tar"
+	case strings.HasSuffix(lower, suffix):
+		inner = inner[:len(inner)-len(suffix)]
+	default:
 		inner += ".out"
 	}
 	head, err := br.Peek(tarHeadLen)
