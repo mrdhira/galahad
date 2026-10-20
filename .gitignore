@@ -1,0 +1,17 @@
+# build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# local job data and VM images
+/.galahad/
+*.img
+*.ext4
+*.vhdx
+
+# editors / OS
+.DS_Store
+.idea/
