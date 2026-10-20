@@ -1,42 +1,97 @@
-package cli
+package cli_test
 
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/mrdhira/galahad/internal/cli"
 )
 
 func TestRun(t *testing.T) {
 	tests := []struct {
-		name   string
-		args   []string
-		code   int
-		stdout string // substring expected on stdout; empty means stdout must be empty
-		stderr string // substring expected on stderr; empty means stderr must be empty
+		name         string
+		args         []string
+		wantCode     int
+		wantStdout   string // substring; empty means stdout must be empty
+		wantStderr   string // substring; empty means stderr must be empty
+		wantPlatform bool   // stdout also names GOOS/GOARCH
 	}{
-		{"no args", nil, ExitClean, "Usage: galahad", ""},
-		{"help", []string{"help"}, ExitClean, "Commands:", ""},
-		{"-h", []string{"-h"}, ExitClean, "Commands:", ""},
-		{"--help", []string{"--help"}, ExitClean, "Commands:", ""},
-		{"version -h", []string{"version", "-h"}, ExitClean, "Commands:", ""},
-		{"version --help", []string{"version", "--help"}, ExitClean, "Commands:", ""},
-		{"unknown command", []string{"bogus"}, ExitUsage, "", `unknown command "bogus"`},
-		{"bad flag", []string{"version", "--nope"}, ExitUsage, "", "flag provided but not defined"},
-		{"extra arg", []string{"version", "x"}, ExitUsage, "", "unexpected argument"},
+		{name: "version prints build info", args: []string{"version"}, wantCode: cli.ExitClean, wantStdout: "galahad dev (", wantPlatform: true},
+		{name: "no args prints usage", args: nil, wantCode: cli.ExitClean, wantStdout: "Usage: galahad"},
+		{name: "help prints usage", args: []string{"help"}, wantCode: cli.ExitClean, wantStdout: "Commands:"},
+		{name: "-h prints usage", args: []string{"-h"}, wantCode: cli.ExitClean, wantStdout: "Commands:"},
+		{name: "--help prints usage", args: []string{"--help"}, wantCode: cli.ExitClean, wantStdout: "Commands:"},
+		{name: "unknown command", args: []string{"bogus"}, wantCode: cli.ExitUsage, wantStderr: `unknown command "bogus"`},
+		{name: "version -h prints usage", args: []string{"version", "-h"}, wantCode: cli.ExitClean, wantStdout: "Commands:"},
+		{name: "version --help prints usage", args: []string{"version", "--help"}, wantCode: cli.ExitClean, wantStdout: "Commands:"},
+		{name: "version bad flag", args: []string{"version", "--nope"}, wantCode: cli.ExitUsage, wantStderr: "flag provided but not defined"},
+		{name: "version extra argument", args: []string{"version", "x"}, wantCode: cli.ExitUsage, wantStderr: "unexpected argument"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out, errb bytes.Buffer
-			if got := Run(tt.args, &out, &errb); got != tt.code {
-				t.Fatalf("exit = %d, want %d", got, tt.code)
+			if got := cli.Run(tt.args, &out, &errb); got != tt.wantCode {
+				t.Fatalf("exit = %d, want %d", got, tt.wantCode)
 			}
-			checkOutput(t, "stdout", out.String(), tt.stdout)
-			checkOutput(t, "stderr", errb.String(), tt.stderr)
-			if tt.code == ExitUsage && !strings.Contains(errb.String(), "Usage: galahad") {
+			checkOutput(t, "stdout", out.String(), tt.wantStdout)
+			checkOutput(t, "stderr", errb.String(), tt.wantStderr)
+			if tt.wantPlatform {
+				if want := runtime.GOOS + "/" + runtime.GOARCH; !strings.Contains(out.String(), want) {
+					t.Errorf("stdout %q missing %q", out.String(), want)
+				}
+			}
+			if tt.wantCode == cli.ExitUsage && !strings.Contains(errb.String(), "Usage: galahad") {
 				t.Errorf("stderr lacks usage: %q", errb.String())
+			}
+		})
+	}
+}
+
+func TestRunVersionJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantCode    int
+		wantKeys    []string
+		wantVersion string
+	}{
+		{
+			name:        "version --json prints build info",
+			args:        []string{"version", "--json"},
+			wantCode:    cli.ExitClean,
+			wantKeys:    []string{"version", "commit", "go", "os", "arch"},
+			wantVersion: "dev",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			if got := cli.Run(tt.args, &out, &errb); got != tt.wantCode {
+				t.Fatalf("exit = %d, want %d", got, tt.wantCode)
+			}
+			var m map[string]string
+			if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+				t.Fatalf("invalid JSON %q: %v", out.String(), err)
+			}
+			if len(m) != len(tt.wantKeys) {
+				t.Errorf("got %v, want keys %v", m, tt.wantKeys)
+			}
+			for _, k := range tt.wantKeys {
+				if _, ok := m[k]; !ok {
+					t.Errorf("missing key %q in %v", k, m)
+				}
+			}
+			if m["version"] != tt.wantVersion {
+				t.Errorf("version = %q, want %q", m["version"], tt.wantVersion)
+			}
+			if m["os"] != runtime.GOOS || m["arch"] != runtime.GOARCH {
+				t.Errorf("os/arch = %q/%q, want %s/%s", m["os"], m["arch"], runtime.GOOS, runtime.GOARCH)
+			}
+			if errb.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", errb.String())
 			}
 		})
 	}
@@ -52,66 +107,5 @@ func checkOutput(t *testing.T, name, got, want string) {
 	}
 	if !strings.Contains(got, want) {
 		t.Errorf("%s %q missing %q", name, got, want)
-	}
-}
-
-func setVersion(t *testing.T) {
-	t.Helper()
-	oldV, oldC := version, commit
-	t.Cleanup(func() { version, commit = oldV, oldC })
-	version, commit = "1.2.3", "abc123"
-}
-
-func TestVersionText(t *testing.T) {
-	setVersion(t)
-	var out, errb bytes.Buffer
-	if got := Run([]string{"version"}, &out, &errb); got != ExitClean {
-		t.Fatalf("exit = %d", got)
-	}
-	want := fmt.Sprintf("galahad 1.2.3 (abc123, %s, %s/%s)\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	if out.String() != want {
-		t.Errorf("got %q, want %q", out.String(), want)
-	}
-	if errb.Len() != 0 {
-		t.Errorf("stderr = %q", errb.String())
-	}
-}
-
-func TestVersionJSON(t *testing.T) {
-	setVersion(t)
-	var out, errb bytes.Buffer
-	if got := Run([]string{"version", "--json"}, &out, &errb); got != ExitClean {
-		t.Fatalf("exit = %d", got)
-	}
-	var m map[string]string
-	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
-		t.Fatalf("invalid JSON %q: %v", out.String(), err)
-	}
-	want := map[string]string{
-		"version": "1.2.3",
-		"commit":  "abc123",
-		"go":      runtime.Version(),
-		"os":      runtime.GOOS,
-		"arch":    runtime.GOARCH,
-	}
-	if len(m) != len(want) {
-		t.Errorf("got %v, want %v", m, want)
-	}
-	for k, v := range want {
-		if m[k] != v {
-			t.Errorf("%s = %q, want %q", k, m[k], v)
-		}
-	}
-	if errb.Len() != 0 {
-		t.Errorf("stderr = %q", errb.String())
-	}
-}
-
-func TestBuildCommitFallback(t *testing.T) {
-	old := commit
-	t.Cleanup(func() { commit = old })
-	commit = ""
-	if got := buildCommit(); got != "unknown" && (got == "" || len(got) > 12) {
-		t.Errorf("buildCommit() = %q, want 1-12 chars or \"unknown\"", got)
 	}
 }

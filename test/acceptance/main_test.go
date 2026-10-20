@@ -1,6 +1,6 @@
 // Package acceptance holds black-box tests that run the built galahad binary.
 // It must not import any internal package.
-package acceptance
+package acceptance_test
 
 import (
 	"bytes"
