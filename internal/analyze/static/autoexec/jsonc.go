@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // Limits of the JSON reader. The size limit is analyze.MaxConfigSize.
@@ -74,6 +76,92 @@ func StripJSONC(data []byte) []byte {
 		}
 	}
 	return out
+}
+
+// lexView returns data as a tolerant JSON reader sees it, for pattern
+// matching on a file that does not parse: comments blanked and string escapes
+// (\" \\ \/ \b \f \n \r \t and \uXXXX) decoded. offs holds, for every byte of
+// the text, the offset in data where it came from.
+func lexView(data []byte) (text string, offs []int) {
+	b := StripJSONC(data)
+	out := make([]byte, 0, len(b))
+	offs = make([]int, 0, len(b))
+	for i := 0; i < len(b); {
+		r, n := unescape(b[i:])
+		if n == 0 {
+			out, offs = append(out, b[i]), append(offs, i)
+			i++
+			continue
+		}
+		start := len(out)
+		out = utf8.AppendRune(out, r)
+		for range out[start:] {
+			offs = append(offs, i)
+		}
+		i += n
+	}
+	return string(out), offs
+}
+
+// unescape decodes the JSON escape at the start of b and returns the rune and
+// the number of bytes used, or 0 when b does not start with an escape.
+func unescape(b []byte) (rune, int) {
+	if len(b) < 2 || b[0] != '\\' {
+		return 0, 0
+	}
+	switch b[1] {
+	case '"', '\\', '/':
+		return rune(b[1]), 2
+	case 'b':
+		return '\b', 2
+	case 'f':
+		return '\f', 2
+	case 'n':
+		return '\n', 2
+	case 'r':
+		return '\r', 2
+	case 't':
+		return '\t', 2
+	case 'u':
+		r, ok := hex4(b[2:])
+		if !ok {
+			return 0, 0
+		}
+		if utf16.IsSurrogate(r) {
+			if len(b) >= 12 && b[6] == '\\' && b[7] == 'u' {
+				if lo, ok := hex4(b[8:]); ok {
+					if pair := utf16.DecodeRune(r, lo); pair != utf8.RuneError {
+						return pair, 12
+					}
+				}
+			}
+			return utf8.RuneError, 6
+		}
+		return r, 6
+	}
+	return 0, 0
+}
+
+// hex4 reads four hex digits at the start of b.
+func hex4(b []byte) (rune, bool) {
+	if len(b) < 4 {
+		return 0, false
+	}
+	var r rune
+	for _, c := range b[:4] {
+		switch {
+		case c >= '0' && c <= '9':
+			c -= '0'
+		case c >= 'a' && c <= 'f':
+			c -= 'a' - 10
+		case c >= 'A' && c <= 'F':
+			c -= 'A' - 10
+		default:
+			return 0, false
+		}
+		r = r<<4 | rune(c)
+	}
+	return r, true
 }
 
 // node is a parsed JSON value with the byte offset where it starts.

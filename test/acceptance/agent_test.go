@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,18 @@ func analyze(t *testing.T, target string, wantCode int) report {
 		t.Fatalf("report.json: %v", err)
 	}
 	return rep
+}
+
+// otherFindings returns the rule IDs of the findings that are not auto-execution
+// inventory (GAL-AUTOEXEC-006 to 008), which only list where automation exists.
+func otherFindings(rep report) []string {
+	var ids []string
+	for _, f := range rep.Findings {
+		if !slices.Contains([]string{"GAL-AUTOEXEC-006", "GAL-AUTOEXEC-007", "GAL-AUTOEXEC-008"}, f.RuleID) {
+			ids = append(ids, f.RuleID)
+		}
+	}
+	return ids
 }
 
 // hasFinding reports whether the report has a finding of rule with evidence at "path:line".

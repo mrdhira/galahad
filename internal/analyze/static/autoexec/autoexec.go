@@ -74,13 +74,19 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if len(dirs) > 0 {
 		parent = dirs[len(dirs)-1]
 	}
-	if slicesContains(dirs, "node_modules") {
+	toolBin := underDir(dirs, "node_modules", ".bin") || underDir(dirs, ".venv", "bin") || underDir(dirs, "venv", "bin") ||
+		underDir(dirs, ".venv", "scripts") || underDir(dirs, "venv", "scripts")
+	if slicesContains(dirs, "node_modules") && !toolBin {
 		return out, nil
 	}
-	s := &scan{f: f, out: &out}
+	s := &scan{ctx: ctx, f: f, out: &out, counts: map[string]int{}}
 
 	var run func()
 	switch {
+	case toolBin:
+		// Package manager output. repoPath exempts these paths from the settings check, so a script
+		// committed here is graded instead. A real venv's bin/python is a symlink, which is never read.
+		run = s.riskFile
 	case base == "tasks.json" && parent == ".vscode":
 		run = func() { s.json(s.tasks, s.tasksLexical) }
 	case strings.HasSuffix(base, ".code-workspace"):
@@ -125,6 +131,16 @@ func isWorkflow(dirs []string, base string) bool {
 	return n >= 2 && dirs[n-2] == ".github" && dirs[n-1] == "workflows" && (path.Ext(base) == ".yml" || path.Ext(base) == ".yaml")
 }
 
+// underDir reports whether dirs holds parent directly followed by child.
+func underDir(dirs []string, parent, child string) bool {
+	for i := 0; i+1 < len(dirs); i++ {
+		if dirs[i] == parent && dirs[i+1] == child {
+			return true
+		}
+	}
+	return false
+}
+
 func slicesContains(s []string, v string) bool {
 	for _, x := range s {
 		if x == v {
@@ -136,13 +152,40 @@ func slicesContains(s []string, v string) bool {
 
 // scan collects the findings of one file.
 type scan struct {
-	f   analyze.File
-	out *analyze.Output
+	ctx      context.Context
+	f        analyze.File
+	out      *analyze.Output
+	counts   map[string]int // findings built per rule ID
+	timedOut bool
+}
+
+// done reports whether the context has ended. The first time, it records a
+// timeout skip; the findings so far are kept.
+func (s *scan) done() bool {
+	if s.ctx.Err() == nil {
+		return false
+	}
+	if !s.timedOut {
+		s.timedOut = true
+		s.out.Skips = append(s.out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipTimeout})
+	}
+	return true
+}
+
+// emit records a finding of rule with the evidence ev returns. The engine keeps
+// only protocol.MaxFindingsPerRulePerFile findings per rule and file, so the
+// rest are not built: evidence costs a pass over the file each.
+func (s *scan) emit(r protocol.Rule, ev func() []protocol.Evidence) {
+	if s.counts[r.ID] >= protocol.MaxFindingsPerRulePerFile {
+		return
+	}
+	s.counts[r.ID]++
+	s.out.Findings = append(s.out.Findings, r.Finding(ev()...))
 }
 
 // add records a finding for rule at the byte offset.
 func (s *scan) add(r protocol.Rule, off int) {
-	s.out.Findings = append(s.out.Findings, r.Finding(analyze.EvidenceAt(s.f, off)))
+	s.emit(r, func() []protocol.Evidence { return []protocol.Evidence{analyze.EvidenceAt(s.f, off)} })
 }
 
 // risk grades a command that runs automatically. at maps an offset in text to
@@ -150,27 +193,28 @@ func (s *scan) add(r protocol.Rule, off int) {
 // config value the text came from.
 func (s *scan) risk(text string, at func(int) protocol.Evidence) {
 	for _, m := range signals.DecodeExec(text) {
-		s.out.Findings = append(s.out.Findings, ruleObfuscate.Finding(at(m.Start)))
+		s.emit(ruleObfuscate, func() []protocol.Evidence { return []protocol.Evidence{at(m.Start)} })
 	}
 	for _, m := range signals.DownloadExec(text) {
-		s.out.Findings = append(s.out.Findings, ruleDownload.Finding(at(m.Start)))
+		s.emit(ruleDownload, func() []protocol.Evidence { return []protocol.Evidence{at(m.Start)} })
 	}
 	secrets, network := signals.SecretRefs(text), signals.NetworkTools(text)
 	if len(secrets) == 0 || len(network) == 0 {
 		return
 	}
-	ev := []protocol.Evidence{at(secrets[0].Start)}
-	if n := at(network[0].Start); n.Line != ev[0].Line {
-		ev = append(ev, n)
-	}
-	s.out.Findings = append(s.out.Findings, ruleExfil.Finding(ev...))
+	s.emit(ruleExfil, func() []protocol.Evidence {
+		ev := []protocol.Evidence{at(secrets[0].Start)}
+		if n := at(network[0].Start); n.Line != ev[0].Line {
+			ev = append(ev, n)
+		}
+		return ev
+	})
 }
 
 // riskAt grades text that is not literally in the file (an unescaped JSON
 // string, a YAML value) and reports the line at off.
 func (s *scan) riskAt(text string, off int) {
-	ev := analyze.EvidenceAt(s.f, off)
-	s.risk(text, func(int) protocol.Evidence { return ev })
+	s.risk(text, func(int) protocol.Evidence { return analyze.EvidenceAt(s.f, off) })
 }
 
 // riskFile grades shell text that is the file itself, with comments blanked.
@@ -254,7 +298,11 @@ func (s *scan) tasks(holder *node) {
 			byLabel[l.str] = t
 		}
 	}
+	seen := map[*node]bool{} // shared, so a task that many tasks depend on is graded once
 	for _, t := range list.vals {
+		if s.done() {
+			return
+		}
 		if t.kind != 'o' {
 			continue
 		}
@@ -262,23 +310,44 @@ func (s *scan) tasks(holder *node) {
 			continue
 		}
 		s.add(ruleTask, commandOffset(t))
-		s.gradeTask(t, byLabel, map[*node]bool{})
+		s.gradeTask(t, byLabel, seen)
 	}
 }
 
 // gradeTask grades every string of a task that runs automatically, and of the
 // tasks it depends on.
 func (s *scan) gradeTask(t *node, byLabel map[string]*node, seen map[*node]bool) {
-	if seen[t] {
+	if seen[t] || s.done() {
 		return
 	}
 	seen[t] = true
 	s.riskAt(strings.Join(taskStrings(t, nil), " "), commandOffset(t))
-	for _, label := range strs(t.get("dependsOn"), nil) {
+	for _, label := range dependLabels(t.get("dependsOn"), nil) {
 		if dep := byLabel[label]; dep != nil {
 			s.gradeTask(dep, byLabel, seen)
 		}
 	}
+}
+
+// dependLabels appends the labels a dependsOn value names: a label, a task
+// identifier ({"type": ..., "task": label}) or an array of either.
+func dependLabels(n *node, dst []string) []string {
+	if n == nil {
+		return dst
+	}
+	switch n.kind {
+	case 's':
+		dst = append(dst, n.str)
+	case 'a':
+		for _, v := range n.vals {
+			dst = dependLabels(v, dst)
+		}
+	case 'o':
+		if v := n.get("task"); v != nil && v.kind == 's' {
+			dst = append(dst, v.str)
+		}
+	}
+	return dst
 }
 
 // commandOffset is where a task's command starts, or the task itself without one.
@@ -334,19 +403,23 @@ type lexRule struct {
 	re   *regexp.Regexp
 }
 
-// lexical reports each rule at every match of its pattern and, when there is
-// any match, grades the whole file once.
+// lexical reports each rule at every match of its pattern and grades the whole
+// file. It reads the file the way a tolerant JSON reader would: comments are
+// blank and string escapes are decoded, so neither hides a trigger.
 func (s *scan) lexical(rules ...lexRule) {
-	found := false
+	text, offs := lexView(s.f.Data)
+	at := func(off int) int {
+		if off < len(offs) {
+			return offs[off]
+		}
+		return 0
+	}
 	for _, r := range rules {
-		for _, loc := range r.re.FindAllIndex(s.f.Data, signals.MaxMatches) {
-			s.add(r.rule, loc[0])
-			found = true
+		for _, loc := range r.re.FindAllStringIndex(text, signals.MaxMatches) {
+			s.add(r.rule, at(loc[0]))
 		}
 	}
-	if found {
-		s.riskFile()
-	}
+	s.risk(text, func(off int) protocol.Evidence { return analyze.EvidenceAt(s.f, at(off)) })
 }
 
 func (s *scan) settings(root *node) {
@@ -378,13 +451,14 @@ func (s *scan) settings(root *node) {
 func repoPath(v string) bool {
 	v = strings.TrimSpace(v)
 	lower := strings.ToLower(strings.ReplaceAll(v, "\\", "/"))
-	if strings.HasPrefix(lower, "${workspacefolder}") || strings.HasPrefix(lower, "${workspaceroot}") || strings.HasPrefix(lower, "${filedirname}") {
-		return true
-	}
-	for _, seg := range strings.Split(lower, "/") {
+	// Cleaned first, so ".venv/../tools/x" is not taken for a virtualenv path.
+	for _, seg := range strings.Split(path.Clean(lower), "/") {
 		if seg == ".venv" || seg == "venv" || seg == "node_modules" {
 			return false
 		}
+	}
+	if strings.HasPrefix(lower, "${workspacefolder}") || strings.HasPrefix(lower, "${workspaceroot}") || strings.HasPrefix(lower, "${filedirname}") {
+		return true
 	}
 	switch {
 	case lower == "", strings.HasPrefix(lower, "/"), strings.HasPrefix(lower, "~"), strings.HasPrefix(lower, "${"):

