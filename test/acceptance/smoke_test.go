@@ -1,4 +1,4 @@
-package acceptance
+package acceptance_test
 
 import (
 	"encoding/json"
@@ -7,88 +7,73 @@ import (
 	"testing"
 )
 
-func TestSmokeVersionText(t *testing.T) {
-	// Given the binary built with a stamped version
-	// When running `galahad version`
-	stdout, _, code := run(t, "version")
-	// Then it exits 0 and prints version and platform
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0", code)
-	}
-	for _, want := range []string{"galahad " + stampedVersion, runtime.GOOS + "/" + runtime.GOARCH} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout %q missing %q", stdout, want)
-		}
-	}
-}
-
-func TestSmokeVersionJSON(t *testing.T) {
-	// Given the stamped binary
-	// When running `galahad version --json`
-	stdout, _, code := run(t, "version", "--json")
-	// Then it exits 0 with a JSON object holding all five keys
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0", code)
-	}
-	var got map[string]any
-	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
-		t.Fatalf("invalid JSON %q: %v", stdout, err)
-	}
-	for _, k := range []string{"version", "commit", "go", "os", "arch"} {
-		if _, ok := got[k]; !ok {
-			t.Errorf("missing key %q in %v", k, got)
-		}
-	}
-	if got["version"] != stampedVersion {
-		t.Errorf("version = %v, want %s", got["version"], stampedVersion)
-	}
-}
-
-func TestSmokeHelp(t *testing.T) {
-	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}, {}, {"version", "-h"}} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			// Given a help request or no arguments
-			// When running the binary
-			stdout, stderr, code := run(t, args...)
-			// Then usage goes to stdout, stderr is empty, exit 0
-			if code != 0 {
-				t.Errorf("exit = %d, want 0", code)
-			}
-			if !strings.Contains(stdout, "Usage") {
-				t.Errorf("stdout %q lacks Usage", stdout)
-			}
-			if stderr != "" {
-				t.Errorf("stderr = %q, want empty", stderr)
-			}
-		})
-	}
-}
-
-func TestSmokeUsageErrors(t *testing.T) {
+func TestSmoke(t *testing.T) {
+	platform := runtime.GOOS + "/" + runtime.GOARCH
 	tests := []struct {
-		name       string
-		args       []string
-		wantStderr string
+		name         string
+		args         []string
+		wantCode     int
+		wantStdout   string // substring; empty means stdout must be empty
+		wantStderr   string // substring; empty means stderr must be empty
+		wantPlatform bool   // stdout also names GOOS/GOARCH
+		wantKeys     []string
 	}{
-		{"unknown command", []string{"frobnicate"}, "frobnicate"},
-		{"bad flag", []string{"version", "--nope"}, ""},
-		{"extra arg", []string{"version", "extra"}, ""},
+		{name: "version prints stamped build info", args: []string{"version"}, wantCode: 0, wantStdout: "galahad " + stampedVersion + " (" + stampedCommit + ", ", wantPlatform: true},
+		{name: "no args prints usage", args: nil, wantCode: 0, wantStdout: "Usage"},
+		{name: "help prints usage", args: []string{"help"}, wantCode: 0, wantStdout: "Usage"},
+		{name: "-h prints usage", args: []string{"-h"}, wantCode: 0, wantStdout: "Usage"},
+		{name: "--help prints usage", args: []string{"--help"}, wantCode: 0, wantStdout: "Usage"},
+		{name: "unknown command", args: []string{"frobnicate"}, wantCode: 2, wantStderr: "frobnicate"},
+		{name: "version -h prints usage", args: []string{"version", "-h"}, wantCode: 0, wantStdout: "Usage"},
+		{name: "version --help prints usage", args: []string{"version", "--help"}, wantCode: 0, wantStdout: "Usage"},
+		{name: "version bad flag", args: []string{"version", "--nope"}, wantCode: 2, wantStderr: "flag provided but not defined"},
+		{name: "version extra argument", args: []string{"version", "extra"}, wantCode: 2, wantStderr: "unexpected argument"},
+		{name: "version --json prints stamped build info", args: []string{"version", "--json"}, wantCode: 0, wantStdout: `"version":"` + stampedVersion + `"`, wantKeys: []string{"version", "commit", "go", "os", "arch"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Given invalid input
-			// When running the binary
+			// Given the binary built with a stamped version
+			// When running it with the case's arguments
 			stdout, stderr, code := run(t, tt.args...)
-			// Then it exits 2 with a diagnostic on stderr and nothing on stdout
-			if code != 2 {
-				t.Errorf("exit = %d, want 2", code)
+			// Then exit code, stdout and stderr match
+			if code != tt.wantCode {
+				t.Errorf("exit = %d, want %d", code, tt.wantCode)
 			}
-			if stderr == "" || !strings.Contains(stderr, tt.wantStderr) {
-				t.Errorf("stderr = %q, want it to mention %q", stderr, tt.wantStderr)
+			checkOutput(t, "stdout", stdout, tt.wantStdout)
+			checkOutput(t, "stderr", stderr, tt.wantStderr)
+			if tt.wantPlatform && !strings.Contains(stdout, platform) {
+				t.Errorf("stdout %q missing %q", stdout, platform)
 			}
-			if stdout != "" {
-				t.Errorf("stdout = %q, want empty", stdout)
+			if tt.wantKeys != nil {
+				var got map[string]any
+				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+					t.Fatalf("invalid JSON %q: %v", stdout, err)
+				}
+				for _, k := range tt.wantKeys {
+					if _, ok := got[k]; !ok {
+						t.Errorf("missing key %q in %v", k, got)
+					}
+				}
+				if got["version"] != stampedVersion {
+					t.Errorf("version = %v, want %s", got["version"], stampedVersion)
+				}
+				if got["commit"] != stampedCommit {
+					t.Errorf("commit = %v, want %s", got["commit"], stampedCommit)
+				}
 			}
 		})
+	}
+}
+
+func checkOutput(t *testing.T, name, got, want string) {
+	t.Helper()
+	if want == "" {
+		if got != "" {
+			t.Errorf("%s = %q, want empty", name, got)
+		}
+		return
+	}
+	if !strings.Contains(got, want) {
+		t.Errorf("%s %q missing %q", name, got, want)
 	}
 }

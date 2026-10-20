@@ -20,6 +20,10 @@ make gate    # run the full quality gate
 
 Set `SKIP_VULN=1` for `make gate` only where vuln.go.dev is unreachable.
 
+## Security
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
