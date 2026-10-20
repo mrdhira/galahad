@@ -1,0 +1,389 @@
+// Package deps finds typosquatted dependency names and dependencies that come
+// from outside the default package registries. It reads package.json,
+// package-lock.json, yarn.lock and requirements*.txt.
+package deps
+
+import (
+	"bytes"
+	"context"
+	_ "embed" // popular package snapshots
+	"encoding/json"
+	"errors"
+	"io"
+	"net/url"
+	"regexp"
+	"strings"
+
+	"github.com/mrdhira/galahad/internal/analyze"
+	"github.com/mrdhira/galahad/internal/protocol"
+)
+
+var (
+	ruleTypo  = protocol.Rule{ID: "GAL-DEPS-001", Severity: protocol.SeverityHigh, Title: "Likely typosquat of a popular package", Attack: "T1195.001"}
+	ruleURL   = protocol.Rule{ID: "GAL-DEPS-002", Severity: protocol.SeverityMedium, Title: "Dependency from git or URL instead of the registry", Attack: "T1195.001"}
+	ruleLock  = protocol.Rule{ID: "GAL-DEPS-003", Severity: protocol.SeverityMedium, Title: "Lockfile resolves from a non-default host", Attack: "T1195.001"}
+	ruleIndex = protocol.Rule{ID: "GAL-DEPS-004", Severity: protocol.SeverityMedium, Title: "Custom Python package index", Attack: "T1195.001"}
+)
+
+// Snapshots of widely used packages; the source and date are in each file header.
+var (
+	//go:embed top-npm.txt
+	npmSnapshot string
+	//go:embed top-pypi.txt
+	pypiSnapshot string
+
+	topNpm  = load(npmSnapshot)
+	topPypi = load(pypiSnapshot)
+)
+
+const maxJSONDepth = 32
+
+var (
+	npmHosts  = map[string]bool{"registry.npmjs.org": true}
+	yarnHosts = map[string]bool{"registry.npmjs.org": true, "registry.yarnpkg.com": true}
+	pypiHosts = map[string]bool{"pypi.org": true, "files.pythonhosted.org": true}
+
+	depSections = map[string]bool{"dependencies": true, "devdependencies": true, "optionaldependencies": true, "peerdependencies": true}
+	npmShort    = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(#.*)?$`)
+	pyName      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
+	pyScheme    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+	errDepth    = errors.New("json nested too deeply")
+)
+
+type analyzer struct{}
+
+// New returns the dependency analyzer.
+func New() analyze.Analyzer { return analyzer{} }
+
+func (analyzer) Name() string { return "deps" }
+
+func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
+	var scan func(context.Context, analyze.File) ([]protocol.Finding, error)
+	name := strings.ToLower(f.Name)
+	switch {
+	case name == "package.json":
+		scan = packageJSON
+	case name == "package-lock.json":
+		scan = packageLock
+	case name == "yarn.lock":
+		scan = yarnLock
+	case strings.HasPrefix(name, "requirements") && strings.HasSuffix(name, ".txt"):
+		scan = requirements
+	default:
+		return analyze.Output{}, nil
+	}
+	var out analyze.Output
+	if len(f.Data) > analyze.MaxConfigSize {
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipTooLarge})
+		return out, nil
+	}
+	findings, err := scan(ctx, f)
+	out.Findings = findings
+	switch {
+	case ctx.Err() != nil:
+		return out, ctx.Err()
+	case errors.Is(err, errDepth):
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipDepth})
+	case err != nil:
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipParseError})
+	}
+	return out, nil
+}
+
+func packageJSON(_ context.Context, f analyze.File) ([]protocol.Finding, error) {
+	members, err := walkJSON(f.Data)
+	var found []protocol.Finding
+	for _, m := range members {
+		if len(m.path) != 2 || !depSections[strings.ToLower(m.path[0])] {
+			continue
+		}
+		name, spec := m.path[1], strings.TrimSpace(m.val)
+		lower := strings.ToLower(spec)
+		if strings.HasPrefix(lower, "file:") || strings.HasPrefix(lower, "workspace:") || strings.HasPrefix(lower, "link:") {
+			continue
+		}
+		ev := analyze.EvidenceAt(f, m.off)
+		if isNpmRemote(lower, spec) {
+			found = append(found, ruleURL.Finding(ev))
+		}
+		if topNpm.squat(npmName(name)) {
+			found = append(found, ruleTypo.Finding(ev))
+		}
+	}
+	return found, err
+}
+
+func packageLock(_ context.Context, f analyze.File) ([]protocol.Finding, error) {
+	members, err := walkJSON(f.Data)
+	var found []protocol.Finding
+	for _, m := range members {
+		if len(m.path) == 3 && m.path[0] == "packages" && m.path[2] == "resolved" && foreignHost(m.val, npmHosts) {
+			found = append(found, ruleLock.Finding(analyze.EvidenceAt(f, m.off)))
+		}
+	}
+	return found, err
+}
+
+func yarnLock(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
+	var found []protocol.Finding
+	err := eachLine(ctx, f, func(line string, off int) {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "resolved ")
+		if !ok {
+			return
+		}
+		val, _, _ := strings.Cut(strings.Trim(strings.TrimSpace(rest), `"`), "#")
+		if foreignHost(val, yarnHosts) {
+			found = append(found, ruleLock.Finding(analyze.EvidenceAt(f, off)))
+		}
+	})
+	return found, err
+}
+
+func requirements(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
+	var found []protocol.Finding
+	err := eachLine(ctx, f, func(line string, off int) {
+		s := strings.TrimSpace(line)
+		if i := strings.Index(s, " #"); i >= 0 {
+			s = strings.TrimSpace(s[:i])
+		}
+		if s == "" || s[0] == '#' {
+			return
+		}
+		ev := analyze.EvidenceAt(f, off)
+		if s[0] == '-' {
+			opt, val := splitOption(s)
+			switch opt {
+			case "-i", "--index-url", "--extra-index-url":
+				if foreignHost(val, pypiHosts) || !strings.Contains(val, "://") {
+					found = append(found, ruleIndex.Finding(ev))
+				}
+				return
+			case "-e", "--editable":
+				s = val
+			default:
+				return
+			}
+		}
+		found = append(found, requirement(s, ev)...)
+	})
+	return found, err
+}
+
+// requirement checks one requirement specifier: a URL requirement and the name.
+func requirement(s string, ev protocol.Evidence) []protocol.Finding {
+	var found []protocol.Finding
+	spec, name := strings.ToLower(s), ""
+	if !pyScheme.MatchString(s) && !strings.HasPrefix(spec, "git+") {
+		name = pyName.FindString(s)
+		spec = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s[len(name):]), "@")))
+		for _, ext := range []string{".whl", ".gz", ".zip"} {
+			if strings.HasSuffix(strings.ToLower(name), ext) {
+				name = "" // an archive file name, not a project name
+			}
+		}
+	}
+	if (strings.Contains(spec, "://") || strings.HasPrefix(spec, "git+")) && !strings.HasPrefix(spec, "file:") {
+		found = append(found, ruleURL.Finding(ev))
+	}
+	if name != "" && topPypi.squat(pypiName(name)) {
+		found = append(found, ruleTypo.Finding(ev))
+	}
+	return found
+}
+
+// splitOption splits "--opt value", "--opt=value" and "-o value".
+func splitOption(s string) (opt, val string) {
+	opt, _, _ = strings.Cut(s, " ")
+	opt, _, _ = strings.Cut(opt, "=")
+	val = strings.TrimSpace(s[len(opt):])
+	val = strings.TrimSpace(strings.TrimPrefix(val, "="))
+	return opt, val
+}
+
+// eachLine calls fn with every line and its byte offset, and stops when ctx is done.
+func eachLine(ctx context.Context, f analyze.File, fn func(line string, off int)) error {
+	off := 0
+	for len(f.Data) > off {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := bytes.IndexByte(f.Data[off:], '\n')
+		next := len(f.Data)
+		if end >= 0 {
+			next = off + end + 1
+			end += off
+		} else {
+			end = len(f.Data)
+		}
+		line := f.Data[off:end]
+		fn(string(line[:min(len(line), analyze.MaxLineScan)]), off)
+		off = next
+	}
+	return nil
+}
+
+// isNpmRemote reports whether an npm version spec points at git or a URL.
+func isNpmRemote(lower, spec string) bool {
+	for _, p := range []string{"git+", "git://", "git@", "github:", "gitlab:", "bitbucket:", "gist:", "http://", "https://", "ssh://"} {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return npmShort.MatchString(spec) && !strings.HasPrefix(spec, "@")
+}
+
+// foreignHost reports whether raw is a URL whose host is not in allowed.
+// Values that are not URLs (no scheme separator) are ignored.
+func foreignHost(raw string, allowed map[string]bool) bool {
+	if !strings.Contains(raw, "://") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err != nil || !allowed[strings.ToLower(u.Hostname())]
+}
+
+// npmName returns the name to compare: the bare name of a scoped package.
+func npmName(name string) string {
+	name = strings.ToLower(name)
+	if strings.HasPrefix(name, "@") {
+		if _, bare, ok := strings.Cut(name, "/"); ok {
+			return bare
+		}
+	}
+	return name
+}
+
+// pypiName applies the PEP 503 normalization.
+func pypiName(name string) string {
+	return strings.NewReplacer("_", "-", ".", "-").Replace(strings.ToLower(name))
+}
+
+// popular is a snapshot of well-known package names.
+type popular struct {
+	names    map[string]bool
+	stripped map[string]bool // names without - _ .
+	long     []string        // names of at least 5 characters
+}
+
+func load(snapshot string) popular {
+	p := popular{names: map[string]bool{}, stripped: map[string]bool{}}
+	for line := range strings.SplitSeq(snapshot, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		p.names[line] = true
+		p.stripped[strip(line)] = true
+		if len(line) >= 5 {
+			p.long = append(p.long, line)
+		}
+	}
+	return p
+}
+
+// squat reports whether name is not popular itself but looks like a popular
+// name: one edit away from a name of 5 or more characters, or the same once
+// separators are dropped.
+func (p popular) squat(name string) bool {
+	if p.names[name] {
+		return false
+	}
+	if p.stripped[strip(name)] {
+		return true
+	}
+	for _, n := range p.long {
+		if oneEdit(name, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func strip(s string) string {
+	return strings.NewReplacer("-", "", "_", "", ".", "").Replace(s)
+}
+
+// oneEdit reports whether a and b are at Damerau-Levenshtein distance exactly 1:
+// one insertion, deletion, substitution or swap of adjacent characters.
+func oneEdit(a, b string) bool {
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	if len(b)-len(a) > 1 {
+		return false
+	}
+	i := 0
+	for i < len(a) && a[i] == b[i] {
+		i++
+	}
+	switch {
+	case i == len(a):
+		return len(b) == len(a)+1
+	case len(b) > len(a):
+		return a[i:] == b[i+1:]
+	}
+	return a[i+1:] == b[i+1:] || (i+2 <= len(a) && a[i] == b[i+1] && a[i+1] == b[i] && a[i+2:] == b[i+2:])
+}
+
+// member is a string value in a JSON object: the keys leading to it and the
+// offset just after the last key.
+type member struct {
+	path []string
+	val  string
+	off  int
+}
+
+// walkJSON lists every string member of every object in data, in file order,
+// to a nesting depth of maxJSONDepth. On an error it returns what it read so far.
+func walkJSON(data []byte) ([]member, error) {
+	type frame struct{ obj, wantKey bool }
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var (
+		out    []member
+		stack  []frame
+		path   []string
+		keyOff []int
+	)
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			if len(stack) > 0 {
+				err = io.ErrUnexpectedEOF
+			} else {
+				return out, nil
+			}
+		}
+		if err != nil {
+			return out, err
+		}
+		inObj := len(stack) > 0 && stack[len(stack)-1].obj
+		switch v := tok.(type) {
+		case json.Delim:
+			if v == '{' || v == '[' {
+				if len(stack) >= maxJSONDepth {
+					return out, errDepth
+				}
+				stack = append(stack, frame{obj: v == '{', wantKey: v == '{'})
+				continue
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 && stack[len(stack)-1].obj {
+				path, keyOff = path[:len(path)-1], keyOff[:len(keyOff)-1]
+				stack[len(stack)-1].wantKey = true
+			}
+		default:
+			switch {
+			case inObj && stack[len(stack)-1].wantKey:
+				key, _ := tok.(string)
+				path, keyOff = append(path, key), append(keyOff, int(dec.InputOffset()))
+				stack[len(stack)-1].wantKey = false
+			case inObj:
+				if s, ok := tok.(string); ok {
+					out = append(out, member{path: append([]string(nil), path...), val: s, off: keyOff[len(keyOff)-1]})
+				}
+				path, keyOff = path[:len(path)-1], keyOff[:len(keyOff)-1]
+				stack[len(stack)-1].wantKey = true
+			}
+		}
+	}
+}
