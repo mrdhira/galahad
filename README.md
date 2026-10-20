@@ -10,12 +10,15 @@ It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archi
 
 Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum -c checksums.txt` and `gh attestation verify <file> --repo mrdhira/galahad`.
 
-## Build
+## Development
 
 ```sh
-go build -o bin/galahad ./cmd/galahad
-bin/galahad version
+make tools   # install golangci-lint, gosec, govulncheck at pinned versions
+make build   # build bin/galahad
+make gate    # run the full quality gate
 ```
+
+Set `SKIP_VULN=1` for `make gate` only where vuln.go.dev is unreachable.
 
 ## License
 
