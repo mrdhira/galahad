@@ -3,6 +3,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -55,6 +56,10 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(io.Discard)
 	asJSON := fs.Bool("json", false, "print as JSON")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stdout, usage)
+			return ExitClean
+		}
 		fmt.Fprintf(stderr, "galahad version: %v\n\n%s", err, usage)
 		return ExitUsage
 	}

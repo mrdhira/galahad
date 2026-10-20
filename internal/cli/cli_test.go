@@ -21,6 +21,8 @@ func TestRun(t *testing.T) {
 		{"help", []string{"help"}, ExitClean, "Commands:", ""},
 		{"-h", []string{"-h"}, ExitClean, "Commands:", ""},
 		{"--help", []string{"--help"}, ExitClean, "Commands:", ""},
+		{"version -h", []string{"version", "-h"}, ExitClean, "Commands:", ""},
+		{"version --help", []string{"version", "--help"}, ExitClean, "Commands:", ""},
 		{"unknown command", []string{"bogus"}, ExitUsage, "", `unknown command "bogus"`},
 		{"bad flag", []string{"version", "--nope"}, ExitUsage, "", "flag provided but not defined"},
 		{"extra arg", []string{"version", "x"}, ExitUsage, "", "unexpected argument"},
@@ -109,7 +111,7 @@ func TestBuildCommitFallback(t *testing.T) {
 	old := commit
 	t.Cleanup(func() { commit = old })
 	commit = ""
-	if buildCommit() == "" {
-		t.Error("buildCommit returned empty string")
+	if got := buildCommit(); got != "unknown" && (got == "" || len(got) > 12) {
+		t.Errorf("buildCommit() = %q, want 1-12 chars or \"unknown\"", got)
 	}
 }
