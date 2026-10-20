@@ -29,6 +29,9 @@ var (
 		`(?:`+envPrefix+`)(?:`+sensitiveVar+`)`,
 		// a .env file, but not process.env or .envrc
 		`(?:^|[^A-Za-z0-9_.])\.env(?:\.[A-Za-z]+)?(?:$|[^A-Za-z0-9_])`,
+		// a bulk dump of the environment
+		`(?:^|[\s;&|("'])(?:printenv|env)(?:\s+-0)?\s*(?:\||\n|;|\)|$)`,
+		`/proc/self/environ`,
 		`\.ssh[/\\]`,
 		`\bid_(?:rsa|dsa|ecdsa|ed25519)\b`,
 		`\.aws[/\\]credentials`,

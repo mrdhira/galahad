@@ -1,6 +1,7 @@
 package autoexec
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 )
@@ -23,6 +24,9 @@ func StripJSONC(data []byte) []byte {
 				out[i] = ' '
 			}
 		}
+	}
+	if bytes.HasPrefix(data, []byte("\xef\xbb\xbf")) {
+		blank(0, 3)
 	}
 	lastComma := -1 // offset of a comma not yet followed by a value
 	for i := 0; i < len(data); {
@@ -86,8 +90,9 @@ func (n *node) get(key string) *node {
 	if n == nil || n.kind != 'o' {
 		return nil
 	}
-	for i, k := range n.keys {
-		if k == key {
+	// With duplicate keys the last one wins, as in VS Code and Node.
+	for i := len(n.keys) - 1; i >= 0; i-- {
+		if n.keys[i] == key {
 			return n.vals[i]
 		}
 	}

