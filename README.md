@@ -6,6 +6,8 @@ It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archi
 
 > Status: early development. Do not rely on it yet.
 
+New to the security terms (IOC, defang, sandbox, zip-slip, ...)? See the [glossary](docs/glossary.md).
+
 ## Install
 
 Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum --ignore-missing -c checksums.txt` (macOS: `shasum -a 256 --ignore-missing -c checksums.txt`) and `gh attestation verify <file> --repo mrdhira/galahad`.
@@ -17,6 +19,10 @@ make tools   # install golangci-lint, gosec, govulncheck at pinned versions
 make build   # build bin/galahad
 make gate    # run the full quality gate
 ```
+
+### Running on the host
+
+`galahad-agent analyze` parses untrusted input, so it refuses to run unless it detects a VM (the Galahad guest or any other VM; containers do not count). Outside a VM it prints a refusal and exits with code 2. Pass `--unsafe-host` to run on the host anyway: it prints a warning and you accept the risk. Use harmless fixtures only.
 
 Set `SKIP_VULN=1` for `make gate` only where vuln.go.dev is unreachable.
 
