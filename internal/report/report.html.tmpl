@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Galahad report</title>
+<style>
+:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f24;--muted:#59636e;--line:#d0d7de;--clean:#1a7f37;--suspicious:#9a6700;--malicious:#cf222e}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--line:#30363d;--clean:#3fb950;--suspicious:#d29922;--malicious:#f85149}}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0 auto;max-width:1100px;padding:16px}
+h1,h2{line-height:1.2}
+.banner{border-left:8px solid var(--line);padding:8px 16px;margin-bottom:24px}
+.banner.clean{border-color:var(--clean)}.banner.suspicious{border-color:var(--suspicious)}.banner.malicious{border-color:var(--malicious)}
+.verdict{font-size:28px;font-weight:700;text-transform:uppercase}
+.muted{color:var(--muted)}
+table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+code{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;word-break:break-all}
+.sev{font-weight:700;text-transform:uppercase}
+.sev-critical,.sev-high{color:var(--malicious)}.sev-medium{color:var(--suspicious)}.sev-low,.sev-info,.sev-unknown{color:var(--muted)}
+</style>
+</head>
+<body>
+<h1>Galahad report</h1>
+<div class="banner {{.VerdictClass}}">
+<div class="verdict">{{.Verdict}}</div>
+<div>Score {{.Score}}/100, confidence {{.Confidence}}% ({{.ConfidenceLevel}})</div>
+{{if .Reasons}}<ul>{{range .Reasons}}<li>{{.}}</li>{{end}}</ul>{{end}}
+</div>
+
+<h2>Target</h2>
+<table>
+<tr><th>Name</th><td>{{.TargetName}}</td></tr>
+<tr><th>Kind</th><td>{{.Target.Kind}}</td></tr>
+<tr><th>SHA-256</th><td><code>{{.TargetSHA}}</code></td></tr>
+<tr><th>Size</th><td>{{.Target.Size}} bytes, {{.Target.FileCount}} files</td></tr>
+</table>
+
+<h2>Findings ({{len .Findings}})</h2>
+{{if .Findings}}<table>
+<tr><th>Severity</th><th>Rule</th><th>Title</th><th>ATT&amp;CK</th><th>Location</th><th>Snippet</th></tr>
+{{range .Findings}}<tr><td class="sev sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td><td>{{.Title}}</td><td>{{.Attack}}</td><td><code>{{.Location}}</code></td><td><code>{{.Snippet}}</code></td></tr>
+{{end}}</table>{{else}}<p class="muted">None.</p>{{end}}
+
+<h2>Auto-execution inventory ({{len .AutoExec}})</h2>
+{{if .AutoExec}}<table>
+<tr><th>Severity</th><th>Rule</th><th>Title</th><th>Location</th><th>Snippet</th></tr>
+{{range .AutoExec}}<tr><td class="sev sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td><td>{{.Title}}</td><td><code>{{.Location}}</code></td><td><code>{{.Snippet}}</code></td></tr>
+{{end}}</table>{{else}}<p class="muted">None.</p>{{end}}
+
+<h2>IOCs ({{len .IOCs}})</h2>
+<p class="muted">Defanged: not clickable, safe to copy into a ticket.</p>
+{{if .IOCs}}<table>
+<tr><th>Type</th><th>Value</th><th>Location</th></tr>
+{{range .IOCs}}<tr><td>{{.Type}}</td><td><code>{{.Value}}</code></td><td><code>{{.Location}}</code></td></tr>
+{{end}}</table>{{else}}<p class="muted">None.</p>{{end}}
+
+<h2>Coverage</h2>
+<p>Files analyzed: {{.Coverage.FilesAnalyzed}} of {{.Coverage.FilesSeen}} ({{.CoverageText}}).{{if .Coverage.Truncated}} The file or finding limit was reached.{{end}}</p>
+{{if .Skips}}<table>
+<tr><th>Skipped</th><th>Reason</th></tr>
+{{range .Skips}}<tr><td><code>{{.Path}}</code></td><td>{{.Reason}}</td></tr>
+{{end}}</table>{{else}}<p class="muted">Nothing skipped.</p>{{end}}
+</body>
+</html>

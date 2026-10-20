@@ -17,7 +17,9 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/static"
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/report"
 	"github.com/mrdhira/galahad/internal/scoring"
+	"golang.org/x/term"
 )
 
 // Exit codes, matching the host CLI. A scan exits with the code of its verdict:
@@ -40,7 +42,7 @@ const usage = `Usage: galahad-agent <command> [flags]
 
 Commands:
   analyze [-o dir] [-timeout d] <path>
-            Analyze a file or directory and write dir/report.json
+            Analyze a file or directory and write report.json, summary.md and report.html to dir
   version   Print version information
   help      Show this help
 `
@@ -157,35 +159,30 @@ func runAnalyze(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "galahad-agent analyze: invalid result: %v\n", err)
 		return ExitError
 	}
-	path, err := writeReport(*outDir, &res)
+	dir := *outDir
+	if dir == "" {
+		d, err := os.MkdirTemp("", "galahad-")
+		if err != nil {
+			fmt.Fprintf(stderr, "galahad-agent analyze: %v\n", err)
+			return ExitError
+		}
+		dir = d
+	}
+	paths, err := report.Write(dir, &res)
 	if err != nil {
 		fmt.Fprintf(stderr, "galahad-agent analyze: %v\n", err)
 		return ExitError
 	}
-	fmt.Fprintf(stdout, "report: %s\n", path)
+	report.Terminal(stdout, &res, paths, useColor(stdout))
 	return res.Verdict.ExitCode()
 }
 
-// writeReport writes report.json into dir, or into a new temporary directory when dir is empty.
-func writeReport(dir string, res *protocol.Result) (string, error) {
-	if dir == "" {
-		d, err := os.MkdirTemp("", "galahad-")
-		if err != nil {
-			return "", err
-		}
-		dir = d
-	} else if err := os.MkdirAll(dir, 0o750); err != nil {
-		return "", err
-	}
-	b, err := json.MarshalIndent(res, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "report.json")
-	return path, os.WriteFile(path, append(b, '\n'), 0o600)
+// useColor reports whether w is a terminal and NO_COLOR is unset.
+func useColor(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && os.Getenv("NO_COLOR") == "" && term.IsTerminal(int(f.Fd()))
 }
 
-// inside reports whether dir is target or below it, after resolving symlinks.
 func inside(target, dir string) bool {
 	rel, err := filepath.Rel(resolve(target), resolve(dir))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
