@@ -214,6 +214,14 @@ func TestAgentAnalyze(t *testing.T) {
 			wantLevel:      "high",
 			wantTargetKind: "dir",
 		},
+		{
+			name:           "the agent binary does not carry the EICAR signature",
+			setup:          func(*testing.T) string { return agentPath },
+			wantCode:       0,
+			wantVerdict:    "clean",
+			wantLevel:      "high",
+			wantTargetKind: "file",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
