@@ -16,6 +16,7 @@ Galahad is a Go CLI that inspects untrusted files, links and Git repositories in
 - No `Co-Authored-By` lines, no AI or tool attribution, no session links in commits, PR titles, PR bodies or docs.
 - Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `ci:`, `refactor:`.
 - One branch and one PR per task: `feat/T<id>-<slug>` (for example `feat/T1.5-autoexec`). Squash-merge when the workflow below passes.
+- `main` is protected: one approving review and green `gate`, `test (macos-latest)` and `test (windows-latest)` checks. The repository owner authorized merging with the owner bypass only when the reviewer agent approved, QA passed and all CI checks are green on the PR head. Never bypass on red CI or an open review finding.
 
 ## Workflow per task
 ```
