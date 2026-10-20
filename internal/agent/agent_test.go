@@ -268,11 +268,11 @@ func TestRunAnalyze(t *testing.T) {
 			if res.Tool.Name != "galahad-agent" || res.Verdict != tt.wantVerdict || len(res.Files) != tt.wantFiles {
 				t.Errorf("tool %q verdict %q files %d, want galahad-agent, %q, %d", res.Tool.Name, res.Verdict, len(res.Files), tt.wantVerdict, tt.wantFiles)
 			}
+			if res.Verdict == protocol.VerdictMalicious && tt.wantRule != "" && !strings.Contains(strings.Join(res.Reasons, "\n"), tt.wantRule) {
+				t.Errorf("reasons %q do not mention %s", res.Reasons, tt.wantRule)
+			}
 			if tt.wantRule != "" && (len(res.Findings) != 1 || res.Findings[0].RuleID != tt.wantRule) {
 				t.Errorf("findings = %+v, want one %s", res.Findings, tt.wantRule)
-			}
-			if tt.wantRule != "" && !strings.Contains(strings.Join(res.Reasons, "\n"), tt.wantRule) && res.Verdict == protocol.VerdictMalicious {
-				t.Errorf("reasons %q do not mention %s", res.Reasons, tt.wantRule)
 			}
 			if runtime.GOOS != "windows" {
 				if st, err := os.Stat(report); err != nil || st.Mode().Perm() != 0o600 {

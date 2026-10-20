@@ -87,6 +87,15 @@ func TestRun(t *testing.T) {
 			return analyze.Output{}, nil
 		}}
 	}
+	// sharedMembers returns members that together exceed MaxTotalBytes, all backed by one slice.
+	sharedMembers := func() []analyze.File {
+		shared := make([]byte, analyze.MaxFileSize+1) // too large to analyze, so only hashed
+		var kids []analyze.File
+		for i := range analyze.MaxTotalBytes / analyze.MaxFileSize {
+			kids = append(kids, analyze.File{Name: fmt.Sprintf("m%d", i), Data: shared})
+		}
+		return kids
+	}
 	nest := fake{name: "nest", fn: func(context.Context, analyze.File) (analyze.Output, error) {
 		return analyze.Output{Children: []analyze.File{{Name: "c", Data: []byte("x")}}}, nil
 	}}
@@ -151,6 +160,12 @@ func TestRun(t *testing.T) {
 			wantAnalyzerList: []string{"alpha", "zeta"},
 		},
 		{
+			name:      "nonexistent target",
+			setup:     func(_ *testing.T, dir string) string { return filepath.Join(dir, "missing") },
+			analyzers: []analyze.Analyzer{nothing},
+			wantErr:   true,
+		},
+		{
 			name: "file target records its sha256",
 			setup: func(t *testing.T, dir string) string {
 				return write(t, dir, "b.txt", []byte("hello\n"))
@@ -163,12 +178,6 @@ func TestRun(t *testing.T) {
 			wantSeen:       1, wantAnalyzed: 1,
 		},
 		{
-			name:      "nonexistent target",
-			setup:     func(_ *testing.T, dir string) string { return filepath.Join(dir, "missing") },
-			analyzers: []analyze.Analyzer{nothing},
-			wantErr:   true,
-		},
-		{
 			name: "directories nested deeper than MaxDirDepth are skipped",
 			setup: func(t *testing.T, dir string) string {
 				deep := strings.Repeat("d/", analyze.MaxDirDepth+1)
@@ -178,6 +187,17 @@ func TestRun(t *testing.T) {
 			analyzers:      []analyze.Analyzer{nothing},
 			wantTargetKind: protocol.TargetDir,
 			wantSkips:      []protocol.Skip{{Path: strings.TrimSuffix(strings.Repeat("d/", analyze.MaxDirDepth+1), "/"), Reason: protocol.SkipDepth}},
+		},
+		{
+			name: "cancelled job ends the walk and truncates",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.txt", []byte("x"))
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{nothing},
+			cancelled:      true,
+			wantTargetKind: protocol.TargetDir,
+			wantTruncated:  true,
 		},
 		{
 			name: "symlinks are not followed",
@@ -202,17 +222,6 @@ func TestRun(t *testing.T) {
 				{Path: "dirlink", Reason: protocol.SkipUnsupported},
 				{Path: "link.txt", Reason: protocol.SkipUnsupported},
 			},
-		},
-		{
-			name: "cancelled job ends the walk and truncates",
-			setup: func(t *testing.T, dir string) string {
-				write(t, dir, "a.txt", []byte("x"))
-				return dir
-			},
-			analyzers:      []analyze.Analyzer{nothing},
-			cancelled:      true,
-			wantTargetKind: protocol.TargetDir,
-			wantTruncated:  true,
 		},
 		{
 			name: "file over MaxFileSize is hashed and skipped as too_large",
@@ -304,6 +313,18 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
+			name: "member path over MaxPath is cut so the result still validates",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.zip", []byte("x"))
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{children("a.zip", analyze.File{Name: strings.Repeat("n", 1100), Data: []byte("x")})},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantFiles:      []string{"a.zip", ("a.zip!/" + strings.Repeat("n", 1100))[:protocol.MaxPath]},
+			wantSeen:       2, wantAnalyzed: 2,
+		},
+		{
 			name: "job timeout during dispatch drops the queued members and truncates",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a.zip", []byte("x"))
@@ -345,6 +366,19 @@ func TestRun(t *testing.T) {
 			wantFiles:      []string{"a", "a!/c", "a!/c!/c", "a!/c!/c!/c", "a!/c!/c!/c!/c"},
 			wantSeen:       analyze.MaxNesting + 2, wantAnalyzed: analyze.MaxNesting + 1,
 			wantSkips: []protocol.Skip{{Path: "a" + strings.Repeat("!/c", analyze.MaxNesting+1), Reason: protocol.SkipDepth}},
+		},
+		{
+			name: "member bytes over MaxTotalBytes become a budget skip and truncate",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.zip", []byte("x"))
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{children("a.zip", sharedMembers()...)},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantSeen:       analyze.MaxTotalBytes/analyze.MaxFileSize + 1, wantAnalyzed: 1,
+			wantSkips:     budgetSkips(),
+			wantTruncated: true,
 		},
 		{
 			name: "findings per rule and file are capped",
@@ -422,6 +456,9 @@ func TestRun(t *testing.T) {
 			var files []string
 			for _, f := range res.Files {
 				files = append(files, f.Path)
+				if len(f.Path) > protocol.MaxPath {
+					t.Errorf("path of %d bytes, max %d", len(f.Path), protocol.MaxPath)
+				}
 			}
 			if tt.wantFiles != nil && !slices.Equal(files, tt.wantFiles) {
 				t.Errorf("files = %q, want %q", files, tt.wantFiles)
@@ -458,4 +495,15 @@ func TestRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+// budgetSkips lists what the shared-members case skips: every member that fits
+// in the budget is too large to analyze, and the one after them hits the budget.
+func budgetSkips() []protocol.Skip {
+	const fit = analyze.MaxTotalBytes / (analyze.MaxFileSize + 1)
+	var skips []protocol.Skip
+	for i := range fit {
+		skips = append(skips, protocol.Skip{Path: fmt.Sprintf("a.zip!/m%d", i), Reason: protocol.SkipTooLarge})
+	}
+	return append(skips, protocol.Skip{Path: fmt.Sprintf("a.zip!/m%d", fit), Reason: protocol.SkipBudget})
 }
