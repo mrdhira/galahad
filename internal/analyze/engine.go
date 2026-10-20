@@ -320,6 +320,14 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 		c.Path = protocol.CleanPath(parent.Path + "!/" + c.Name)
 		c.Name = c.Name[strings.LastIndexByte(c.Name, '/')+1:]
 		c.Depth = parent.Depth + 1
+		if j.bytes+int64(len(c.Data)) > MaxTotalBytes {
+			// Queued members hold their bytes in memory, so they are charged here.
+			j.admit()
+			j.res.Coverage.Truncated = true
+			j.skip(c.Path, protocol.SkipBudget)
+			continue
+		}
+		j.bytes += int64(len(c.Data))
 		j.queue = append(j.queue, c)
 	}
 }
@@ -328,6 +336,7 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 func (j *job) drain(ctx context.Context) {
 	for len(j.queue) > 0 {
 		c := j.queue[0]
+		j.queue[0] = File{} // let the member's bytes go once it is analyzed
 		j.queue = j.queue[1:]
 		if ctx.Err() != nil {
 			j.res.Coverage.Truncated = true
@@ -341,11 +350,7 @@ func (j *job) drain(ctx context.Context) {
 		case !ok:
 		case c.Depth > MaxNesting:
 			j.skip(c.Path, protocol.SkipDepth)
-		case j.bytes+int64(len(c.Data)) > MaxTotalBytes:
-			j.res.Coverage.Truncated = true
-			j.skip(c.Path, protocol.SkipBudget)
 		default:
-			j.bytes += int64(len(c.Data))
 			sum := sha256.Sum256(c.Data)
 			if f, ok := j.accept(c.Path, c.Name, c.Depth, c.Data, int64(len(c.Data)), sum[:]); ok {
 				j.dispatch(ctx, f)

@@ -61,6 +61,7 @@ func zipOf(t *testing.T, entries ...entry) []byte {
 type tarEntry struct {
 	name, data, link string
 	typeflag         byte
+	raw              byte // when set, a regular entry whose type flag is patched to this value
 }
 
 func tarOf(t *testing.T, entries ...tarEntry) []byte {
@@ -68,14 +69,37 @@ func tarOf(t *testing.T, entries ...tarEntry) []byte {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, e := range entries {
-		h := &tar.Header{Name: e.name, Typeflag: e.typeflag, Linkname: e.link, Mode: 0o644}
-		if e.typeflag == tar.TypeReg {
+		typeflag := e.typeflag
+		if e.raw != 0 {
+			typeflag = tar.TypeReg
+		}
+		h := &tar.Header{Name: e.name, Typeflag: typeflag, Linkname: e.link, Mode: 0o644}
+		if typeflag == tar.TypeReg {
 			h.Size = int64(len(e.data))
 		}
+		start := buf.Len()
 		if err := tw.WriteHeader(h); err != nil {
 			t.Fatal(err)
 		}
-		if e.typeflag == tar.TypeReg {
+		if e.raw != 0 {
+			// The writer refuses these types, so patch the type flag and the checksum.
+			hdr := buf.Bytes()[start : start+512]
+			hdr[156] = e.raw
+			if e.raw == 'S' {
+				// One sparse region after a one byte hole, in the old GNU layout.
+				copy(hdr[257:265], "ustar  \x00")
+				copy(hdr[386:398], "00000000001\x00")
+				copy(hdr[398:410], fmt.Sprintf("%011o\x00", len(e.data)))
+				copy(hdr[483:495], fmt.Sprintf("%011o\x00", len(e.data)+1))
+			}
+			copy(hdr[148:156], "        ")
+			sum := 0
+			for _, b := range hdr {
+				sum += int(b)
+			}
+			copy(hdr[148:156], fmt.Sprintf("%06o\x00 ", sum))
+		}
+		if typeflag == tar.TypeReg {
 			if _, err := tw.Write([]byte(e.data)); err != nil {
 				t.Fatal(err)
 			}
@@ -136,6 +160,15 @@ func TestAnalyze(t *testing.T) {
 			data:         zipOf(t, entry{name: "d/", mode: fs.ModeDir | 0o755}, entry{name: "a.txt", data: "a"}, entry{name: "d/b.txt", data: "b"}),
 			wantChildren: []string{"a.txt", "d/b.txt"}},
 		{name: "zip that cannot be read", file: "in.zip", data: []byte("PK\x03\x04 truncated"), wantErr: true},
+		{name: "more entries than the limit", file: "in.zip", data: zipOf(t, many...),
+			wantChildren: func() []string {
+				var names []string
+				for i := range archive.MaxEntries {
+					names = append(names, fmt.Sprintf("f%d", i))
+				}
+				return names
+			}(),
+			wantSkips: []string{"in.zip budget"}},
 		{name: "parent segment", file: "in.zip", data: zipOf(t, entry{name: "../../evil.sh", data: "x"}),
 			wantFindings: []string{"GAL-ARCHIVE-001 in.zip!/../../evil.sh"}},
 		{name: "absolute path", file: "in.zip", data: zipOf(t, entry{name: "/etc/cron.d/x", data: "x"}),
@@ -156,15 +189,6 @@ func TestAnalyze(t *testing.T) {
 			wantFindings: []string{"GAL-ARCHIVE-003 in.zip"}, wantSkips: []string{"in.zip!/zeros budget"}},
 		{name: "entry above the file size limit", file: "in.zip", data: zipOf(t, entry{name: "big", raw: random}),
 			wantSkips: []string{"in.zip!/big too_large"}},
-		{name: "more entries than the limit", file: "in.zip", data: zipOf(t, many...),
-			wantChildren: func() []string {
-				var names []string
-				for i := range archive.MaxEntries {
-					names = append(names, fmt.Sprintf("f%d", i))
-				}
-				return names
-			}(),
-			wantSkips: []string{"in.zip budget"}},
 		{name: "tar members become children", file: "in.tar", data: tarOf(t, tarEntry{name: "d/", typeflag: tar.TypeDir}, tarEntry{name: "a.txt", data: "a", typeflag: tar.TypeReg}),
 			wantChildren: []string{"a.txt"}},
 		{name: "tar that cannot be read", file: "in.tar", data: bytes.Repeat([]byte("x"), 1024),
@@ -175,6 +199,12 @@ func TestAnalyze(t *testing.T) {
 			wantFindings: []string{"GAL-ARCHIVE-002 in.tar!/link"}},
 		{name: "tar hardlink", file: "in.tar", data: tarOf(t, tarEntry{name: "link", link: "a.txt", typeflag: tar.TypeLink}),
 			wantFindings: []string{"GAL-ARCHIVE-002 in.tar!/link"}},
+		{name: "tar contiguous file is read", file: "in.tar", data: tarOf(t, tarEntry{name: "c", data: "payload", raw: '7'}),
+			wantChildren: []string{"c"}},
+		{name: "tar sparse file is read", file: "in.tar", data: tarOf(t, tarEntry{name: "s", data: "payload", raw: 'S'}),
+			wantChildren: []string{"s"}},
+		{name: "tar entry of unknown type is read", file: "in.tar", data: tarOf(t, tarEntry{name: "z", data: "payload", raw: 'Z'}),
+			wantChildren: []string{"z"}},
 		{name: "tar fifo is ignored", file: "in.tar", data: tarOf(t, tarEntry{name: "pipe", typeflag: tar.TypeFifo}, tarEntry{name: "a", data: "a", typeflag: tar.TypeReg}),
 			wantChildren: []string{"a"}},
 		{name: "tgz expands its tar", file: "in.tgz", data: gzipOf(t, tarOf(t, tarEntry{name: "a.txt", data: "a", typeflag: tar.TypeReg})),
@@ -183,6 +213,8 @@ func TestAnalyze(t *testing.T) {
 			wantChildren: []string{"a.txt"}},
 		{name: "gz becomes one child without its suffix", file: "notes.txt.gz", data: gzipOf(t, []byte("hello\n")),
 			wantChildren: []string{"notes.txt"}},
+		{name: "gz suffix in capitals", file: "NOTES.GZ", data: gzipOf(t, []byte("hello\n")),
+			wantChildren: []string{"NOTES"}},
 		{name: "gz without a suffix", file: "notes", data: gzipOf(t, []byte("hello\n")),
 			wantChildren: []string{"notes.out"}},
 		{name: "gz bomb", file: "in.gz", data: gzipOf(t, bytes.Repeat([]byte{0}, 20<<20)),
