@@ -5,9 +5,11 @@
 package office
 
 import (
+	"bytes"
 	"context"
 	"net/url"
 	"regexp"
+	"strings"
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/ident"
@@ -24,7 +26,10 @@ var (
 
 var (
 	autoExecRE = regexp.MustCompile(`(?im)^[ \t]*(?:(?:public|private|friend)[ \t]+)?(?:sub|function)[ \t]+(?:autoopen|document_open|workbook_open|auto_open|autoexec)\b`)
-	shellRE    = regexp.MustCompile(`(?i)\b(?:shell|wscript\.shell|createobject|urldownloadtofile|powershell|msxml2\.xmlhttp)\b`)
+	remRE      = regexp.MustCompile(`(?i)^[ \t]*rem(?:[ \t]|\r?$)`)
+	shellRE    = regexp.MustCompile(`(?i)\b(?:urldownloadtofile|powershell)\b|` +
+		`\b(?:createobject|getobject)\s*\(\s*"(?:wscript\.shell|shell\.application|msxml2\.(?:server)?xmlhttp(?:\.\d\.\d)?|microsoft\.xmlhttp|winhttp\.winhttprequest(?:\.\d\.\d)?|adodb\.stream|scripting\.filesystemobject)|` +
+		`\b(?:vba\.|interaction\.)?shell\s*(?:\(|\s+["\w&])`)
 )
 
 type analyzer struct{}
@@ -41,7 +46,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	case ident.OOXML:
 		err = s.ooxml(f)
 	case ident.OLE:
-		s.project(f.Path, f.Data, false)
+		err = s.project(f.Path, f.Data, false)
 	}
 	return s.out, err
 }
@@ -57,6 +62,7 @@ func (s *scan) skip(path, reason string) {
 
 // ioc records an external target as a url indicator when it is a clean absolute URL.
 func (s *scan) ioc(target string, ev protocol.Evidence) {
+	target = strings.TrimSpace(target)
 	u, err := url.Parse(target)
 	if err != nil || u.Scheme == "" || u.Host == "" || protocol.CleanPath(target) != target {
 		return
@@ -66,26 +72,75 @@ func (s *scan) ioc(target string, ev protocol.Evidence) {
 
 // project scans the VBA project in a compound file. A vbaProject.bin member
 // (always) is reported as a macro container even if its content cannot be read.
-func (s *scan) project(path string, data []byte, always bool) {
+func (s *scan) project(path string, data []byte, always bool) error {
 	var mods []module
-	found := false
+	found, complete := false, true
 	c, err := openCFB(data)
 	if err == nil {
-		mods, found, err = vbaModules(c)
+		mods, found, complete, err = vbaModules(s.ctx, c)
+	}
+	if cerr := s.ctx.Err(); cerr != nil {
+		return cerr
 	}
 	if err != nil {
 		s.skip(path, protocol.SkipParseError)
+	}
+	if !complete {
+		s.skip(path, protocol.SkipDepth)
 	}
 	if found || always {
 		s.out.Findings = append(s.out.Findings, ruleVBA.Finding(protocol.Evidence{Path: path, Snippet: "VBA project"}))
 	}
 	for _, m := range mods {
+		if err := s.ctx.Err(); err != nil {
+			return err
+		}
 		mf := analyze.File{Path: protocol.CleanPath(path + "!/" + m.path), Data: m.source}
-		if loc := autoExecRE.FindIndex(mf.Data); loc != nil {
+		code := stripComments(m.source)
+		if loc := autoExecRE.FindIndex(code); loc != nil {
 			s.out.Findings = append(s.out.Findings, ruleAutoExec.Finding(analyze.EvidenceAt(mf, loc[0])))
 		}
-		if loc := shellRE.FindIndex(mf.Data); loc != nil {
+		if loc := shellRE.FindIndex(code); loc != nil {
 			s.out.Findings = append(s.out.Findings, ruleShell.Finding(analyze.EvidenceAt(mf, loc[0])))
+		}
+	}
+	return nil
+}
+
+// stripComments blanks VBA comments (a ' outside a string, or a line starting
+// with Rem) with spaces, so offsets and line numbers stay the same.
+func stripComments(src []byte) []byte {
+	out := append([]byte{}, src...)
+	for start := 0; start < len(out); {
+		end := bytes.IndexByte(out[start:], '\n')
+		if end < 0 {
+			end = len(out)
+		} else {
+			end += start
+		}
+		line := out[start:end]
+		if remRE.Match(line) {
+			blank(line)
+		}
+		inStr := false
+		for i, ch := range line {
+			if ch == '"' {
+				inStr = !inStr
+			}
+			if ch == '\'' && !inStr {
+				blank(line[i:])
+				break
+			}
+		}
+		start = end + 1
+	}
+	return out
+}
+
+func blank(b []byte) {
+	for i := range b {
+		if b[i] != '\r' {
+			b[i] = ' '
 		}
 	}
 }

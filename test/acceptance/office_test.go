@@ -63,7 +63,7 @@ func TestOffice(t *testing.T) {
 			tt.build(t, target)
 			// When the agent analyzes it
 			out := filepath.Join(t.TempDir(), "out")
-			stdout, stderr, code := runAgent(t, "analyze", "-o", out, target)
+			stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, target)
 			// Then the exit code, finding and indicators match
 			if code != tt.wantCode {
 				t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout, stderr)

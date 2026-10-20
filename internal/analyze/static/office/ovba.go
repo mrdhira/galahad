@@ -1,6 +1,7 @@
 package office
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"math/bits"
@@ -10,6 +11,7 @@ import (
 // Limits of one VBA project.
 const (
 	maxModules    = 1000
+	maxDirStreams = 16
 	maxDirRecords = 100000
 	maxVBABytes   = 16 << 20 // decompressed bytes over a whole project
 )
@@ -94,61 +96,98 @@ type module struct {
 	source []byte
 }
 
-// vbaModules finds the VBA project in c and decompresses its modules. found is
-// true when a VBA dir stream exists, even if its modules could not be read.
-func vbaModules(c *cfb) (mods []module, found bool, err error) {
-	all := c.streams()
-	byPath := make(map[string]dirEntry, len(all))
-	for _, m := range all {
-		byPath[strings.ToLower(m.path)] = m.e
+// project reads the modules of the VBA projects in one compound file under a
+// shared byte budget.
+type project struct {
+	c      *cfb
+	byPath map[string]dirEntry
+	raw    map[string][]byte // streams already read, by lower-case path
+	budget int               // bytes still allowed, raw and decompressed
+	mods   int               // module records seen
+}
+
+// vbaModules finds the VBA projects in c and decompresses their modules. found
+// is true when a VBA dir stream exists, even if its modules could not be read;
+// complete is false when the storage tree was too deep to list fully.
+func vbaModules(ctx context.Context, c *cfb) (mods []module, found, complete bool, err error) {
+	all, complete, err := c.streams(ctx)
+	if err != nil {
+		return nil, false, complete, err
 	}
-	budget := maxVBABytes
+	p := &project{c: c, byPath: make(map[string]dirEntry, len(all)), raw: map[string][]byte{}, budget: maxVBABytes}
 	for _, m := range all {
-		prefix, ok := strings.CutSuffix(m.path, "dir")
-		if !ok || (prefix != "VBA/" && !strings.HasSuffix(prefix, "/VBA/")) {
+		p.byPath[strings.ToLower(m.path)] = m.e
+	}
+	dirs := 0
+	for _, m := range all {
+		lower := strings.ToLower(m.path)
+		lp, ok := strings.CutSuffix(lower, "dir")
+		if !ok || (lp != "vba/" && !strings.HasSuffix(lp, "/vba/")) {
 			continue
 		}
 		found = true
-		raw, err := c.read(m.e)
-		if err != nil {
-			return mods, found, err
+		if dirs++; dirs > maxDirStreams {
+			return mods, found, complete, errOVBA
 		}
-		dir, err := decompress(raw, maxVBABytes)
+		prefix := m.path[:len(lp)]
+		dir, err := p.read(lower, 0)
 		if err != nil {
-			return mods, found, err
+			return mods, found, complete, err
 		}
 		for _, info := range parseDir(dir) {
-			if len(mods) >= maxModules {
-				return mods, found, nil
+			if err := ctx.Err(); err != nil {
+				return mods, found, complete, err
 			}
-			src, err := moduleSource(c, byPath, prefix+info.stream, info.offset, &budget)
+			if p.mods++; p.mods > maxModules {
+				return mods, found, complete, errOVBA
+			}
+			src, err := p.source(prefix+info.stream, info.offset)
 			if err != nil {
-				return mods, found, err
+				return mods, found, complete, err
 			}
 			if src != nil {
 				mods = append(mods, module{path: prefix + info.stream, source: src})
 			}
 		}
 	}
-	return mods, found, nil
+	return mods, found, complete, nil
 }
 
-// moduleSource reads and decompresses the module stream with the given path.
-func moduleSource(c *cfb, byPath map[string]dirEntry, path string, offset uint32, budget *int) ([]byte, error) {
-	e, ok := byPath[strings.ToLower(path)]
+// read returns a stream decompressed from offset, reading and charging the
+// stream's bytes only the first time it is used.
+func (p *project) read(lowerPath string, offset uint32) ([]byte, error) {
+	raw, ok := p.raw[lowerPath]
 	if !ok {
-		return nil, nil
+		e := p.byPath[lowerPath]
+		if uint64(p.budget) < e.size {
+			return nil, errOVBA
+		}
+		var err error
+		if raw, err = p.c.read(e); err != nil {
+			return nil, errOVBA
+		}
+		p.budget -= len(raw)
+		p.raw[lowerPath] = raw
 	}
-	raw, err := c.read(e)
-	if err != nil || uint64(offset) > uint64(len(raw)) {
+	if uint64(offset) > uint64(len(raw)) {
 		return nil, errOVBA
 	}
-	src, err := decompress(raw[offset:], *budget)
+	src, err := decompress(raw[offset:], p.budget)
 	if err != nil {
 		return nil, err
 	}
-	*budget -= len(src)
+	p.budget -= len(src)
 	return src, nil
+}
+
+// source reads and decompresses the module stream with the given path. A
+// stream that does not exist gives nil.
+func (p *project) source(path string, offset uint32) ([]byte, error) {
+	lower := strings.ToLower(path)
+	if _, ok := p.byPath[lower]; !ok {
+		return nil, nil
+	}
+	return p.read(lower, offset)
 }
 
 type moduleInfo struct {

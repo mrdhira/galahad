@@ -2,15 +2,19 @@ package office
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"unicode/utf16"
+
+	"github.com/mrdhira/galahad/internal/protocol"
 )
 
 // Limits of one compound file.
 const (
 	maxStream  = 16 << 20 // bytes of one stream
 	dirEntryLn = 128
+	maxDepth   = 32 // nesting of storages
 )
 
 const (
@@ -207,16 +211,22 @@ func (c *cfb) parseDir(dir []byte) {
 }
 
 // streams lists every stream with its path. The tree is walked with an explicit
-// stack and a visited set, so a looping tree ends.
-func (c *cfb) streams() []member {
+// stack and a visited set, so a looping tree ends. Storages nested deeper than
+// maxDepth, or whose path would pass protocol.MaxPath, are not entered and
+// shallow is false.
+func (c *cfb) streams(ctx context.Context) (out []member, complete bool, err error) {
 	type item struct {
 		idx    uint32
 		prefix string
+		depth  int
 	}
-	var out []member
+	complete = true
 	seen := make([]bool, len(c.entries))
-	stack := []item{{c.entries[0].kids, ""}}
+	stack := []item{{c.entries[0].kids, "", 0}}
 	for len(stack) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		it := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		if it.idx == noStream || int(it.idx) >= len(c.entries) || seen[it.idx] {
@@ -224,15 +234,23 @@ func (c *cfb) streams() []member {
 		}
 		seen[it.idx] = true
 		e := c.entries[it.idx]
-		stack = append(stack, item{e.left, it.prefix}, item{e.right, it.prefix})
+		stack = append(stack, item{e.left, it.prefix, it.depth}, item{e.right, it.prefix, it.depth})
 		switch e.typ {
 		case typeStream:
-			out = append(out, member{it.prefix + e.name, e})
+			if len(it.prefix)+len(e.name) <= protocol.MaxPath {
+				out = append(out, member{it.prefix + e.name, e})
+			} else {
+				complete = false
+			}
 		case typeStorage:
-			stack = append(stack, item{e.kids, it.prefix + e.name + "/"})
+			if it.depth+1 > maxDepth || len(it.prefix)+len(e.name)+1 > protocol.MaxPath {
+				complete = false
+				continue
+			}
+			stack = append(stack, item{e.kids, it.prefix + e.name + "/", it.depth + 1})
 		}
 	}
-	return out
+	return out, complete, nil
 }
 
 // read returns the content of a stream, from the mini stream when it is small.

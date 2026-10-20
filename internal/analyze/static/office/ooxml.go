@@ -32,7 +32,9 @@ var externalTypes = map[string]bool{
 
 var (
 	targetRE  = regexp.MustCompile(`\sTarget\s*=`)
-	ddeWordRE = regexp.MustCompile(`(?i)(?:<w:instrText[^>]*>|\binstr\s*=\s*["'])\s*DDE(?:AUTO)?\b`)
+	ddeSimple = regexp.MustCompile(`(?i)\binstr\s*=\s*["']\s*DDE(?:AUTO)?\b`)
+	ddeField  = regexp.MustCompile(`(?i)^\s*DDE(?:AUTO)?\b`)
+	instrRE   = regexp.MustCompile(`<w:instrText[^>]*>([^<]*)</w:instrText>`)
 	ddeCellRE = regexp.MustCompile(`(?i)\bDDE(?:AUTO)?\b`)
 )
 
@@ -66,9 +68,11 @@ func (s *scan) ooxml(f analyze.File) error {
 		mf.Data = data
 		switch {
 		case path.Base(name) == "vbaproject.bin":
-			s.project(mf.Path, data, true)
+			if err := s.project(mf.Path, data, true); err != nil {
+				return err
+			}
 		case name == "word/document.xml":
-			s.dde(mf, ddeWordRE)
+			s.ddeWord(mf)
 		case name == "xl/sharedstrings.xml":
 			s.dde(mf, ddeCellRE)
 		default:
@@ -153,6 +157,7 @@ func (s *scan) rels(mf analyze.File) {
 				mode = a.Value
 			}
 		}
+		target = strings.TrimSpace(target)
 		kind := typ[strings.LastIndexByte(typ, '/')+1:]
 		if !strings.EqualFold(mode, "External") || (!externalTypes[kind] && kind != "hyperlink") {
 			continue
@@ -178,5 +183,45 @@ func (s *scan) dde(mf analyze.File, re *regexp.Regexp) {
 	}
 	ev := analyze.EvidenceAt(mf, loc[0])
 	ev.Snippet = protocol.Snippet(string(mf.Data[loc[0]:min(loc[1]+ddeContext, len(mf.Data))]))
+	s.out.Findings = append(s.out.Findings, ruleDDE.Finding(ev))
+}
+
+// ddeWord reports the first DDE or DDEAUTO field in document.xml. A field
+// instruction split over consecutive runs is joined before it is matched.
+func (s *scan) ddeWord(mf analyze.File) {
+	if loc := ddeSimple.FindIndex(mf.Data); loc != nil {
+		s.addDDE(mf, loc[0], string(mf.Data[loc[0]:min(loc[1]+ddeContext, len(mf.Data))]))
+		return
+	}
+	first, prevEnd := -1, 0
+	var joined strings.Builder
+	flush := func() bool {
+		if first >= 0 && ddeField.MatchString(joined.String()) {
+			s.addDDE(mf, first, strings.TrimSpace(joined.String()))
+			return true
+		}
+		return false
+	}
+	for _, m := range instrRE.FindAllSubmatchIndex(mf.Data, -1) {
+		gap := mf.Data[prevEnd:m[0]]
+		if bytes.Contains(gap, []byte("fldChar")) || bytes.Contains(gap, []byte("<w:t>")) || bytes.Contains(gap, []byte("<w:t ")) {
+			if flush() {
+				return
+			}
+			first = -1
+			joined.Reset()
+		}
+		if first < 0 {
+			first = m[0]
+		}
+		joined.Write(mf.Data[m[2]:m[3]])
+		prevEnd = m[1]
+	}
+	flush()
+}
+
+func (s *scan) addDDE(mf analyze.File, at int, text string) {
+	ev := analyze.EvidenceAt(mf, at)
+	ev.Snippet = protocol.Snippet(text)
 	s.out.Findings = append(s.out.Findings, ruleDDE.Finding(ev))
 }

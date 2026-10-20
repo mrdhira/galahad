@@ -730,6 +730,97 @@ func TestAnalyze(t *testing.T) {
 			wantSkips:    []string{"memo.doc:parse_error"},
 		},
 		{
+			name: "storages nested beyond the depth limit are not entered",
+			kind: ident.OLE, path: "memo.doc",
+			data: func(t *testing.T) []byte {
+				var names []string
+				for i := range 40 {
+					names = append(names, fmt.Sprintf("S%d", i))
+				}
+				return buildCFB(names, []cfbStream{{"dir", []byte("x")}}, nil)
+			},
+			wantSkips: []string{"memo.doc:depth"},
+		},
+		{
+			name: "cancelled context stops the OLE scan",
+			kind: ident.OLE, path: "memo.doc", abort: true,
+			data:    func(t *testing.T) []byte { return vbaProject(macroModules, nil) },
+			wantErr: true,
+		},
+		{
+			name: "more module records than the limit stop the scan",
+			kind: ident.OLE, path: "memo.doc",
+			data: func(t *testing.T) []byte {
+				var dir []byte
+				for range 1001 {
+					dir = append(dir, rec(0x001A, []byte("Ghost"))...)
+					dir = append(dir, rec(0x002B, nil)...)
+				}
+				return buildCFB([]string{"VBA"}, []cfbStream{{"dir", lz(dir)}}, nil)
+			},
+			wantFindings: []string{"GAL-OFFICE-002 memo.doc:0"},
+			wantSkips:    []string{"memo.doc:parse_error"},
+		},
+		{
+			name: "VBA storage name is matched without case",
+			kind: ident.OLE, path: "memo.doc",
+			data: func(t *testing.T) []byte {
+				return buildCFB([]string{"MACROS", "vba"}, vbaStreams(macroModules[:1]), nil)
+			},
+			wantFindings: []string{"GAL-OFFICE-002 memo.doc:0", "GAL-OFFICE-003 memo.doc!/MACROS/vba/ThisDocument:2"},
+		},
+		{
+			name: "benign CreateObject in Workbook_Open is auto-exec only",
+			kind: ident.OLE, path: "book.xls",
+			data: func(t *testing.T) []byte {
+				mods := []vbaModule{{name: "ThisWorkbook", source: "Sub Workbook_Open()\r\n  Set d = CreateObject(\"Scripting.Dictionary\")\r\nEnd Sub\r\n"}}
+				return buildCFB([]string{"_VBA_PROJECT_CUR", "VBA"}, vbaStreams(mods), nil)
+			},
+			wantFindings: []string{"GAL-OFFICE-002 book.xls:0", "GAL-OFFICE-003 book.xls!/_VBA_PROJECT_CUR/VBA/ThisWorkbook:1"},
+		},
+		{
+			name: "shell calls inside comments are ignored",
+			kind: ident.OLE, path: "memo.doc",
+			data: func(t *testing.T) []byte {
+				mods := []vbaModule{{name: "M", source: "Sub Hello()\r\n  ' x = Shell(\"calc\")\r\n  Rem powershell -enc\r\n  y = \"a'b\" & Shell(\"calc\")\r\nEnd Sub\r\n"}}
+				return buildCFB([]string{"VBA"}, vbaStreams(mods), nil)
+			},
+			wantFindings: []string{"GAL-OFFICE-002 memo.doc:0", "GAL-OFFICE-004 memo.doc!/VBA/M:4"},
+		},
+		{
+			name: "DDE field split over runs is flagged at its first run",
+			kind: ident.OOXML, path: word,
+			data: func(t *testing.T) []byte {
+				doc := "<w:document>\n<w:r><w:instrText>DD</w:instrText></w:r><w:r><w:instrText>EAUTO c:\\x</w:instrText></w:r></w:document>"
+				return zipOf(t, part{name: "word/document.xml", data: []byte(doc)})
+			},
+			wantFindings: []string{"GAL-OFFICE-005 " + word + "!/word/document.xml:2"},
+		},
+		{
+			name: "DDE field via fldSimple is flagged",
+			kind: ident.OOXML, path: word,
+			data: func(t *testing.T) []byte {
+				return zipOf(t, part{name: "word/document.xml", data: []byte(`<w:fldSimple w:instr=" DDE cmd x ">`)})
+			},
+			wantFindings: []string{"GAL-OFFICE-005 " + word + "!/word/document.xml:1"},
+		},
+		{
+			name: "instruction pieces separated by text are not joined",
+			kind: ident.OOXML, path: word,
+			data: func(t *testing.T) []byte {
+				doc := "<w:instrText>DD</w:instrText><w:t>x</w:t><w:instrText>E</w:instrText>"
+				return zipOf(t, part{name: "word/document.xml", data: []byte(doc)})
+			},
+		},
+		{
+			name: "whitespace around an external target is trimmed from the indicator",
+			kind: ident.OOXML, path: word,
+			data: func(t *testing.T) []byte {
+				return zipOf(t, part{name: "word/_rels/document.xml.rels", data: rels(rel("hyperlink", " https://docs.sinkhole.test/a ", true))})
+			},
+			wantIOCs: []string{"https://docs.sinkhole.test/a " + word + "!/word/_rels/document.xml.rels:3"},
+		},
+		{
 			name: "other kinds are ignored",
 			kind: ident.Text, path: "notes.txt",
 			data: func(t *testing.T) []byte { return []byte("Sub AutoOpen()") },
