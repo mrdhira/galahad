@@ -96,6 +96,12 @@ func TestValidate(t *testing.T) {
 		{name: "complete valid result", mutate: func(r *protocol.Result) {}},
 		{name: "not yet scored result", mutate: func(r *protocol.Result) { r.Verdict, r.ConfidenceLevel = "", "" }},
 		{name: "wrong schema version", mutate: func(r *protocol.Result) { r.SchemaVersion = 2 }, wantErr: "schema_version"},
+		{name: "tool name has control character", mutate: func(r *protocol.Result) { r.Tool.Name = "a\x1b" }, wantErr: "tool.name"},
+		{name: "tool version has invalid UTF-8", mutate: func(r *protocol.Result) { r.Tool.Version = "\xff" }, wantErr: "tool.version"},
+		{name: "target name too long", mutate: func(r *protocol.Result) { r.Target.Name = strings.Repeat("a", protocol.MaxPath+1) }, wantErr: "target.name is"},
+		{name: "target name has bidi character", mutate: func(r *protocol.Result) { r.Target.Name = "a\u202eb" }, wantErr: "target.name has"},
+		{name: "target kind unknown", mutate: func(r *protocol.Result) { r.Target.Kind = "repo" }, wantErr: "target.kind"},
+		{name: "target kind dir", mutate: func(r *protocol.Result) { r.Target.Kind = protocol.TargetDir }},
 		{name: "unknown verdict", mutate: func(r *protocol.Result) { r.Verdict = "evil" }, wantErr: "verdict"},
 		{name: "unknown confidence level", mutate: func(r *protocol.Result) { r.ConfidenceLevel = "huge" }, wantErr: "confidence_level"},
 		{name: "score below 0", mutate: func(r *protocol.Result) { r.Score = -1 }, wantErr: "score"},
@@ -105,11 +111,14 @@ func TestValidate(t *testing.T) {
 		{name: "too many findings", mutate: func(r *protocol.Result) { manyFindings(r, protocol.MaxFindings+1) }, wantErr: "findings, max"},
 		{name: "too many iocs", mutate: func(r *protocol.Result) { r.IOCs = make([]protocol.IOC, protocol.MaxIOCs+1) }, wantErr: "iocs, max"},
 		{name: "file path empty", mutate: func(r *protocol.Result) { r.Files[0].Path = "" }, wantErr: "files[0]: path is empty"},
+		{name: "file kind has control character", mutate: func(r *protocol.Result) { r.Files[0].Kind = "a\x1b" }, wantErr: "files[0]: kind"},
 		{name: "rule id malformed", mutate: func(r *protocol.Result) { r.Findings[0].RuleID = "gal-exec-1" }, wantErr: "rule_id"},
 		{name: "severity unknown", mutate: func(r *protocol.Result) { r.Findings[0].Severity = "huge" }, wantErr: "severity"},
 		{name: "attack malformed", mutate: func(r *protocol.Result) { r.Findings[0].Attack = "T12" }, wantErr: "attack"},
 		{name: "attack empty is allowed", mutate: func(r *protocol.Result) { r.Findings[0].Attack = "" }},
 		{name: "attack without sub-technique is allowed", mutate: func(r *protocol.Result) { r.Findings[0].Attack = "T1204" }},
+		{name: "analyzer has control character", mutate: func(r *protocol.Result) { r.Findings[0].Analyzer = "a\x1b" }, wantErr: "analyzer"},
+		{name: "title has invalid UTF-8", mutate: func(r *protocol.Result) { r.Findings[0].Title = "\xff" }, wantErr: "title"},
 		{name: "title has control character", mutate: func(r *protocol.Result) { r.Findings[0].Title = "a\x1bb" }, wantErr: "title"},
 		{name: "title has bidi character", mutate: func(r *protocol.Result) { r.Findings[0].Title = "a\u202eb" }, wantErr: "title"},
 		{name: "no evidence", mutate: func(r *protocol.Result) { r.Findings[0].Evidence = nil }, wantErr: "no evidence"},
@@ -119,6 +128,7 @@ func TestValidate(t *testing.T) {
 		{name: "evidence path is absolute", mutate: func(r *protocol.Result) { r.Findings[0].Evidence[0].Path = "/etc/passwd" }, wantErr: "starts with /"},
 		{name: "evidence path has control character", mutate: func(r *protocol.Result) { r.Findings[0].Evidence[0].Path = "a\x1bb" }, wantErr: "path has control"},
 		{name: "evidence path has bidi character", mutate: func(r *protocol.Result) { r.Findings[0].Evidence[0].Path = "a\u202eb" }, wantErr: "path has control"},
+		{name: "evidence path has 8-bit CSI byte", mutate: func(r *protocol.Result) { r.Findings[0].Evidence[0].Path = "a\x9b[2J" }, wantErr: "path has control"},
 		{name: "snippet too long", mutate: func(r *protocol.Result) {
 			r.Findings[0].Evidence[0].Snippet = strings.Repeat("é", protocol.MaxSnippet+1)
 		}, wantErr: "snippet has 201 runes"},
@@ -142,6 +152,10 @@ func TestValidate(t *testing.T) {
 		{name: "ioc value has bidi character", mutate: func(r *protocol.Result) { r.IOCs[0].Value = "http://a\u202e" }, wantErr: "value has control"},
 		{name: "ioc path is absolute", mutate: func(r *protocol.Result) { r.IOCs[0].Path = "/x" }, wantErr: "iocs[0]: path"},
 		{name: "skip path is absolute", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Path = "/x" }, wantErr: "coverage.skipped[0]: path"},
+		{name: "skip reason unknown", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Reason = "lazy" }, wantErr: "reason"},
+		{name: "coverage analyzer has control character", mutate: func(r *protocol.Result) { r.Coverage.Analyzers[0] = "a\x1b" }, wantErr: "coverage.analyzers[0]"},
+		{name: "reason too long", mutate: func(r *protocol.Result) { r.Reasons[0] = strings.Repeat("a", protocol.MaxReason+1) }, wantErr: "reasons[0]: 401 runes"},
+		{name: "reason has control character", mutate: func(r *protocol.Result) { r.Reasons[0] = "a\nb" }, wantErr: "reasons[0]: text"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

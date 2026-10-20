@@ -1,9 +1,34 @@
 // Package protocol defines the versioned result schema shared by the guest agent
-// and the host. It is host-safe: it never parses untrusted bytes, it only
-// validates already-decoded values.
+// and the host. It is host-safe: it never parses untrusted bytes.
+//
+// Result.Validate checks a decoded result: enums, ID formats, ranges and counts,
+// and that every string a renderer may print is valid UTF-8 without control or
+// bidi characters. Paths and the target name are also length bounded, snippets
+// and reasons are bounded in runes.
 package protocol
 
 import "time"
+
+// Target kinds.
+const (
+	TargetFile = "file"
+	TargetDir  = "dir"
+)
+
+// Skip reasons.
+const (
+	SkipTooLarge    = "too_large"
+	SkipBudget      = "budget"
+	SkipDepth       = "depth"
+	SkipUnsupported = "unsupported"
+	SkipEncrypted   = "encrypted"
+	SkipParseError  = "parse_error"
+	SkipTimeout     = "timeout"
+	SkipPanic       = "panic"
+)
+
+// MaxReason is the longest allowed entry of Result.Reasons, in runes.
+const MaxReason = MaxSnippet * 2
 
 // SchemaVersion is the value of Result.SchemaVersion.
 const SchemaVersion = 1

@@ -21,16 +21,24 @@ func unsafeRune(r rune) bool {
 	return false
 }
 
-// clean renders unsafe runes as literal \uXXXX text (lowercase hex) and stops
+// clean renders unsafe runes as literal \uXXXX text and invalid UTF-8 bytes as
+// literal \xNN text (lowercase hex) and stops
 // before the output would exceed limit, measured by size.
 func clean(raw string, limit int, size func(string) int) string {
 	var b strings.Builder
 	used := 0
-	for _, r := range raw {
-		piece := string(r)
-		if unsafeRune(r) {
+	for i := 0; i < len(raw); {
+		r, w := utf8.DecodeRuneInString(raw[i:])
+		var piece string
+		switch {
+		case r == utf8.RuneError && w == 1:
+			piece = fmt.Sprintf(`\x%02x`, raw[i])
+		case unsafeRune(r):
 			piece = fmt.Sprintf(`\u%04x`, r)
+		default:
+			piece = raw[i : i+w]
 		}
+		i += w
 		n := size(piece)
 		if used+n > limit {
 			break

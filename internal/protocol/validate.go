@@ -20,6 +20,21 @@ func (r *Result) Validate() error {
 	if r.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schema_version %d, want %d", r.SchemaVersion, SchemaVersion)
 	}
+	if err := checkText("tool.name", r.Tool.Name); err != nil {
+		return err
+	}
+	if err := checkText("tool.version", r.Tool.Version); err != nil {
+		return err
+	}
+	if len(r.Target.Name) > MaxPath {
+		return fmt.Errorf("target.name is %d bytes, max %d", len(r.Target.Name), MaxPath)
+	}
+	if err := checkText("target.name", r.Target.Name); err != nil {
+		return err
+	}
+	if r.Target.Kind != TargetFile && r.Target.Kind != TargetDir {
+		return fmt.Errorf("target.kind %q not allowed", r.Target.Kind)
+	}
 	switch r.Verdict {
 	case "", VerdictClean, VerdictSuspicious, VerdictMalicious:
 	default:
@@ -46,6 +61,9 @@ func (r *Result) Validate() error {
 		if err := checkPath(f.Path); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
 		}
+		if err := checkText("kind", f.Kind); err != nil {
+			return fmt.Errorf("files[%d]: %w", i, err)
+		}
 	}
 	perRuleFile := map[string]int{}
 	for i, f := range r.Findings {
@@ -66,6 +84,24 @@ func (r *Result) Validate() error {
 		if err := checkPath(s.Path); err != nil {
 			return fmt.Errorf("coverage.skipped[%d]: %w", i, err)
 		}
+		switch s.Reason {
+		case SkipTooLarge, SkipBudget, SkipDepth, SkipUnsupported, SkipEncrypted, SkipParseError, SkipTimeout, SkipPanic:
+		default:
+			return fmt.Errorf("coverage.skipped[%d]: reason %q not allowed", i, s.Reason)
+		}
+	}
+	for i, a := range r.Coverage.Analyzers {
+		if err := checkText("name", a); err != nil {
+			return fmt.Errorf("coverage.analyzers[%d]: %w", i, err)
+		}
+	}
+	for i, s := range r.Reasons {
+		if n := utf8.RuneCountInString(s); n > MaxReason {
+			return fmt.Errorf("reasons[%d]: %d runes, max %d", i, n, MaxReason)
+		}
+		if err := checkText("text", s); err != nil {
+			return fmt.Errorf("reasons[%d]: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -81,6 +117,9 @@ func (f Finding) validate() error {
 	}
 	if f.Attack != "" && !attackRe.MatchString(f.Attack) {
 		return fmt.Errorf("attack %q does not match %s", f.Attack, attackRe)
+	}
+	if err := checkText("analyzer", f.Analyzer); err != nil {
+		return err
 	}
 	if hasUnsafe(f.Title) {
 		return errors.New("title has control or bidi characters")
@@ -130,6 +169,14 @@ func checkPath(p string) error {
 	return nil
 }
 
+func checkText(field, s string) error {
+	if hasUnsafe(s) {
+		return fmt.Errorf("%s has control or bidi characters or invalid UTF-8", field)
+	}
+	return nil
+}
+
+// hasUnsafe reports invalid UTF-8 (which would hide 8-bit control bytes), control and bidi characters.
 func hasUnsafe(s string) bool {
-	return strings.IndexFunc(s, unsafeRune) >= 0
+	return !utf8.ValidString(s) || strings.IndexFunc(s, unsafeRune) >= 0
 }
