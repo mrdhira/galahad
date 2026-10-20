@@ -8,7 +8,7 @@ Security and project terms used in Galahad's code, reports and docs, in plain la
 : Code that runs without you choosing to run it, just because you opened a folder, installed dependencies or made a commit. Examples: a VS Code task with `runOn: folderOpen`, an npm `postinstall` script, a git hook. This is the main trick in fake take-home assignments.
 
 **Bidi / RTLO (right-to-left override)**
-: Invisible Unicode characters that flip the display order of text. `invoice<RTLO>fdp.exe` displays as `invoiceexe.pdf`, so an executable looks like a PDF. Galahad shows these characters as visible escapes such as `‮`.
+: Invisible Unicode characters that flip the display order of text. `invoice<RTLO>fdp.exe` displays as `invoiceexe.pdf`, so an executable looks like a PDF. Galahad shows these characters as visible escapes such as `\u202e`.
 
 **Decompression bomb (zip bomb)**
 : A small archive that expands to an enormous size (for example 1 MB that unpacks to 100 GB) to crash or freeze the tool that opens it.
@@ -73,7 +73,7 @@ Security and project terms used in Galahad's code, reports and docs, in plain la
 : A measure of randomness in data (0–8 bits per byte). Very high entropy in executable code often means it is packed or encrypted.
 
 **Evidence**
-: Where a finding was seen: a path plus a line number (`.vscode/tasks.json:7`) and a short snippet. Paths inside containers use `!/`, for example `invoice.zip!/invoice.pdf.lnk`.
+: Where a finding was seen: a path plus a line number (`.vscode/tasks.json:7`) and a short snippet. Paths inside archives and other container files use `!/`, for example `invoice.zip!/invoice.pdf.lnk`.
 
 **Finding**
 : One detected issue, with a rule ID (`GAL-AUTOEXEC-001`), a severity, a title, an ATT&CK ID and evidence.
@@ -88,7 +88,7 @@ Security and project terms used in Galahad's code, reports and docs, in plain la
 : A tool that compresses or encrypts an executable to hide its real code. Legitimate software uses packers too, so this is a signal, not proof.
 
 **Risk score**
-: 0–100, the sum of finding weights (critical 100, high 35, medium 15, low 5), with each rule counted once.
+: 0–100, the sum of finding weights (critical 100, high 35, medium 15, low 5), with each rule counted once and the total capped at 100.
 
 **Rule ID**
 : The stable name of a detection, in the form `GAL-<AREA>-<NNN>`, for example `GAL-IOC-002`.
