@@ -96,6 +96,9 @@ func TestRun(t *testing.T) {
 		}
 		return kids
 	}
+	// 20 members of MaxFileSize each, then as many grandchildren as fit in what the budget has left.
+	nestedShared := make([]byte, analyze.MaxFileSize)
+	const nestedFit = (analyze.MaxTotalBytes - 1 - 20*analyze.MaxFileSize) / analyze.MaxFileSize
 	nest := fake{name: "nest", fn: func(context.Context, analyze.File) (analyze.Output, error) {
 		return analyze.Output{Children: []analyze.File{{Name: "c", Data: []byte("x")}}}, nil
 	}}
@@ -381,6 +384,29 @@ func TestRun(t *testing.T) {
 			wantTruncated: true,
 		},
 		{
+			name: "queued members are charged to the budget when queued, so nested members cannot exceed it",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "fan", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
+				if f.Depth >= 2 {
+					return analyze.Output{}, nil
+				}
+				var kids []analyze.File
+				for i := range 20 {
+					kids = append(kids, analyze.File{Name: fmt.Sprintf("k%d", i), Data: nestedShared})
+				}
+				return analyze.Output{Children: kids}, nil
+			}}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantSeen:       1 + 20 + 400,
+			wantAnalyzed:   1 + 20 + nestedFit,
+			wantSkips:      nestedBudgetSkips(nestedFit),
+			wantTruncated:  true,
+		},
+		{
 			name: "findings per rule and file are capped",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a", []byte("x"))
@@ -497,13 +523,31 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// budgetSkips lists what the shared-members case skips: every member that fits
-// in the budget is too large to analyze, and the one after them hits the budget.
+// budgetSkips lists what the shared-members case skips: the member that does
+// not fit in the budget is dropped when it is queued, and every member that
+// fits is too large to analyze.
 func budgetSkips() []protocol.Skip {
 	const fit = analyze.MaxTotalBytes / (analyze.MaxFileSize + 1)
-	var skips []protocol.Skip
+	skips := []protocol.Skip{{Path: fmt.Sprintf("a.zip!/m%d", fit), Reason: protocol.SkipBudget}}
 	for i := range fit {
 		skips = append(skips, protocol.Skip{Path: fmt.Sprintf("a.zip!/m%d", i), Reason: protocol.SkipTooLarge})
 	}
-	return append(skips, protocol.Skip{Path: fmt.Sprintf("a.zip!/m%d", fit), Reason: protocol.SkipBudget})
+	return skips
+}
+
+// nestedBudgetSkips lists the grandchildren the nested-members case drops: each of
+// the 20 members offers 20 grandchildren, and only the first fitFirst fit in the budget.
+func nestedBudgetSkips(fitFirst int) []protocol.Skip {
+	var skips []protocol.Skip
+	left := fitFirst
+	for i := range 20 {
+		for j := range 20 {
+			if left > 0 {
+				left--
+				continue
+			}
+			skips = append(skips, protocol.Skip{Path: fmt.Sprintf("a!/k%d!/k%d", i, j), Reason: protocol.SkipBudget})
+		}
+	}
+	return skips
 }
