@@ -76,27 +76,36 @@ func (analyzer) Analyze(_ context.Context, f analyze.File) (analyze.Output, erro
 	return out, nil
 }
 
+// isPadding reports characters Windows or a viewer ignores at the end of a
+// name or around a dot: trailing dots and spaces, and invisible fillers.
+func isPadding(r rune) bool {
+	return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) ||
+		r == 0x115F || r == 0x1160 || r == 0x2800 || r == 0x3164 || r == 0xFFA0
+}
+
+func isTrailing(r rune) bool { return r == '.' || isPadding(r) }
+
 // lastExt returns the lowercase extension of name without the dot, ignoring
-// trailing whitespace.
+// trailing dots and padding.
 func lastExt(name string) string {
-	return strings.ToLower(strings.TrimPrefix(path.Ext(strings.TrimRightFunc(name, unicode.IsSpace)), "."))
+	return strings.ToLower(strings.TrimPrefix(path.Ext(strings.TrimRightFunc(name, isTrailing)), "."))
 }
 
 // isDoubleExt reports a decoy extension directly followed by an executable one,
 // allowing whitespace padding before the last dot.
 func isDoubleExt(name string) bool {
-	name = strings.TrimRightFunc(name, unicode.IsSpace)
+	name = strings.TrimRightFunc(name, isTrailing)
 	i := strings.LastIndexByte(name, '.')
 	if i < 0 || !execExts[strings.ToLower(name[i+1:])] {
 		return false
 	}
-	stem := strings.TrimRightFunc(name[:i], unicode.IsSpace)
+	stem := strings.TrimRightFunc(name[:i], isPadding)
 	return decoyExts[lastExt(stem)]
 }
 
 func hasBidi(name string) bool {
 	return strings.ContainsFunc(name, func(r rune) bool {
-		return r == 0x200E || r == 0x200F || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+		return r == 0x061C || r == 0x200E || r == 0x200F || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 	})
 }
 
