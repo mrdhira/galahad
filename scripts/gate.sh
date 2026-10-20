@@ -3,7 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-gobin="$(go env GOPATH)/bin"
+# "make tools" installs into GOBIN, or the first GOPATH entry's bin.
+gobin="$(go env GOBIN)"
+if [ -z "$gobin" ]; then
+  gopath="$(go env GOPATH)"
+  if [ "$(go env GOOS)" = windows ]; then gopath="${gopath%%;*}"; else gopath="${gopath%%:*}"; fi
+  gobin="$gopath/bin"
+fi
 
 # tool NAME: print the path of a dev tool. GOPATH/bin (where "make tools"
 # installs the pinned versions) wins over PATH, so a stale system copy cannot shadow it.
@@ -64,7 +70,7 @@ step deps
 go mod verify
 main_module="$(go list -m)"
 mods="$(go list -m -f '{{.Path}}' all)"
-bad="$(printf '%s\n' "$mods" | grep -v -x -e "$main_module" | grep -v '^golang\.org/x/' || true)"
+bad="$(printf '%s\n' "$mods" | grep -v -x -F -e "$main_module" | grep -v '^golang\.org/x/' || true)"
 if [ -n "$bad" ]; then
   echo "disallowed modules (only the main module and golang.org/x/* are allowed):" >&2
   echo "$bad" >&2
