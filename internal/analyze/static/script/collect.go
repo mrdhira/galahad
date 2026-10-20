@@ -20,6 +20,7 @@ const (
 type secretHit struct {
 	off  int
 	kind secretKind
+	name string // for a copy of the environment: the variable it is assigned to
 }
 
 // found holds the byte offsets that the patterns matched in a doc.
@@ -199,6 +200,7 @@ func (s *scan) collect(d *doc) *found {
 		s.pieces(d, w[0], w[1], func(base, minEnd int, text string) { s.scanSecrets(d, f, base, minEnd, text) })
 	}
 	if len(f.secrets) > 0 {
+		s.aliasesOf(d)
 		s.pieces(d, 0, len(d.data), func(base, minEnd int, text string) { s.scanNet(d, f, base, minEnd, text) })
 	}
 	return f
@@ -258,7 +260,12 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 	if d.lang&langPy != 0 {
 		eachMatch(d, spawnsPy, base, minEnd, text, spawn)
 	}
-	eachMatch(d, bulkEnv, base, minEnd, text, func(off, _ int) { keep(s, &f.secrets, secretHit{off, secretDump}) })
+	eachMatch(d, bulkEnv, base, minEnd, text, func(off, _ int) { keep(s, &f.secrets, secretHit{off: off, kind: secretDump}) })
+	eachMatch(d, bulkEnvVar, base, minEnd, text, func(off, _ int) {
+		if g := assignRE.FindSubmatch(d.data[max(0, off-160):off]); g != nil && !bytes.ContainsRune(g[0], '\n') {
+			keep(s, &f.secrets, secretHit{off: off, kind: secretDump, name: string(g[1])})
+		}
+	})
 }
 
 // definition reports whether the call-like text at off defines a function or
@@ -307,13 +314,20 @@ func receiver(data []byte, dot int) bool {
 	return false
 }
 
-// scanNet finds network calls.
+// scanNet finds network calls, including calls through an alias.
 func (s *scan) scanNet(d *doc, f *found, base, minEnd int, text string) {
 	eachMatch(d, networkCalls, base, minEnd, text, func(off, _ int) {
 		if !definition(d.data, off) && (!bytes.HasPrefix(d.data[off:], []byte("fetch")) || off == 0 || d.data[off-1] != '.' || globalObject(d.data, off-1)) {
 			keep(s, &f.nets, off)
 		}
 	})
+	call := func(off, _ int) {
+		if (off == 0 || d.data[off-1] != '.') && !definition(d.data, off) {
+			keep(s, &f.nets, off)
+		}
+	}
+	eachMatch(d, d.al.nsCalls, base, minEnd, text, call)
+	eachMatch(d, d.al.fnCalls, base, minEnd, text, call)
 }
 
 // scanShell finds shell commands that download, decode or send data, in a
@@ -375,7 +389,7 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 			continue
 		}
 		if kind, ok := classify(d, off, text[m.Start:m.End]); ok {
-			keep(s, &f.secrets, secretHit{off, kind})
+			keep(s, &f.secrets, secretHit{off: off, kind: kind})
 		}
 	}
 }

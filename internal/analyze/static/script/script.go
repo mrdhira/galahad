@@ -102,15 +102,14 @@ type doc struct {
 	depth int
 	line  int // line of the literal a decoded text came from
 	memo  lineMemo
+	al    *aliasSet // found by aliasesOf
 
 	childProc bool // the text mentions child_process
 }
 
-// lineMemo is the answer of commentLine for the offsets [lo, hi).
-type lineMemo struct {
-	lo, hi  int
-	comment bool
-}
+// lineMemo is the answer of commentLine for the line [lo, hi): the offsets
+// before to are comment.
+type lineMemo struct{ lo, hi, to int }
 
 // scan collects the findings of one file.
 type scan struct {
@@ -205,21 +204,33 @@ func (s *scan) run(d *doc) {
 	s.exfil(d, f)
 }
 
-// commentLine reports whether the line that holds off is a whole-line comment.
-// It remembers the last line it saw, so the many matches on one long line cost
-// one scan.
+// commentLine reports whether off is in a whole-line comment: a line that
+// starts with // (or # in Python), or the part of a line that starts with /* or *
+// up to the first */. Code after the */ is code. It remembers the last line it
+// saw, so the many matches on one long line cost one scan.
 func (d *doc) commentLine(off int) bool {
 	if off >= d.memo.lo && off < d.memo.hi {
-		return d.memo.comment
+		return off < d.memo.to
 	}
 	lo := bytes.LastIndexByte(d.data[:off], '\n') + 1
 	hi := len(d.data)
 	if i := bytes.IndexByte(d.data[off:], '\n'); i >= 0 {
 		hi = off + i + 1
 	}
-	line := bytes.TrimLeft(d.data[lo:hi], " \t")
-	comment := d.lang&langJS != 0 && (bytes.HasPrefix(line, []byte("//")) || bytes.HasPrefix(line, []byte("/*")) || bytes.HasPrefix(line, []byte("*"))) ||
-		d.lang&langPy != 0 && bytes.HasPrefix(line, []byte("#")) && !bytes.HasPrefix(line, []byte("#!"))
-	d.memo = lineMemo{lo, hi, comment}
-	return comment
+	line := d.data[lo:hi]
+	to := lo // the comment ends here
+	text := bytes.TrimLeft(line, " \t")
+	switch {
+	case d.lang&langJS != 0 && bytes.HasPrefix(text, []byte("//")):
+		to = hi
+	case d.lang&langJS != 0 && (bytes.HasPrefix(text, []byte("/*")) || bytes.HasPrefix(text, []byte("*"))):
+		to = hi
+		if i := bytes.Index(line, []byte("*/")); i >= 0 {
+			to = lo + i + 2
+		}
+	case d.lang&langPy != 0 && bytes.HasPrefix(text, []byte("#")) && !bytes.HasPrefix(text, []byte("#!")):
+		to = hi
+	}
+	d.memo = lineMemo{lo, hi, to}
+	return off < to
 }

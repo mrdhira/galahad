@@ -21,7 +21,8 @@ const (
 		`|\ba2b_(?:base64|hex)\s*\(` +
 		`|\b(?:zlib|bz2|lzma|gzip)\.decompress\s*\(` +
 		`|\bmarshal\.loads\s*\(` +
-		`|\.decode\(\s*['"](?:base64|hex|rot_?13|zlib|bz2)`
+		`|\.decode\(\s*['"](?:base64|hex|rot_?13|zlib|bz2)` +
+		`|\bcodecs\.decode\s*\([^\n]{0,300}?,\s*['"](?:base64|hex|rot_?13|zlib|bz2)`
 )
 
 // networkParts are the network calls, each starting with a literal word.
@@ -68,7 +69,7 @@ var (
 
 	// bulkEnv finds the whole environment turned into data.
 	bulkEnv = compile(
-		`JSON\s*\.\s*stringify\(\s*(?:Object\s*\.\s*(?:fromEntries|entries)\(\s*)?process\.env\b`,
+		`JSON\s*\.\s*stringify\(\s*\{?\s*(?:\.\.\.\s*)?(?:Object\s*\.\s*(?:fromEntries|entries)\(\s*)?process\.env\b`,
 		`querystring\s*\.\s*stringify\(\s*process\.env\b`,
 		`qs\s*\.\s*stringify\(\s*process\.env\b`,
 		`URLSearchParams\(\s*process\.env\b`,
@@ -76,7 +77,27 @@ var (
 		`str\(\s*os\.environ\s*\)`,
 		`repr\(\s*os\.environ\s*\)`,
 		`json\.dumps\(\s*(?:dict\(\s*)?os\.environ\b`,
+		`\*\*\s*os\.environ\b`,
+		`data\s*=\s*os\.environ[ \t]*(?:[,)\n]|$)`,
+		`json\s*=\s*os\.environ[ \t]*(?:[,)\n]|$)`,
+		`params\s*=\s*os\.environ[ \t]*(?:[,)\n]|$)`,
+		`body\s*=\s*os\.environ[ \t]*(?:[,)\n]|$)`,
 	)
+
+	// bulkEnvVar finds ways to copy the environment that are common in
+	// harmless code (a spread into a child's options, a copy for a child). They
+	// count only when the copy is assigned to a variable that the network call
+	// uses: const e = process.env; ... fetch(url, { body: JSON.stringify(e) }).
+	bulkEnvVar = compile(
+		`\.\.\.\s*process\.env\s*[,}]`,
+		`Object\s*\.\s*(?:entries|values)\(\s*process\.env\s*\)`,
+		`os\.environ\.copy\(\)`,
+		`process\.env[ \t]*(?:[;\n]|$)`,
+	)
+
+	// assignRE ends at the end of a line prefix and captures the name in
+	// "name = ...".
+	assignRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*=(?:[^=>;\n][^=;\n]*)?$`)
 
 	// Secret classification of a signals.SecretRefs match.
 	namedEnvRE = regexp.MustCompile(`^(?:\$|%|process\.env|os\.environ|os\.getenv|getenv|ENV\[)`)
@@ -87,7 +108,7 @@ var (
 // Words that every decoder and every network call contains. The patterns for
 // them are slow on long text, so they run only on text that has a word.
 var (
-	decoderWords = words("atob", "Buffer", "fromCharCode", "zlib", "decode", "bz2", "lzma", "gzip", "unhexlify", "fromhex", "a2b_", "marshal")
+	decoderWords = words("atob", "Buffer", "fromCharCode", "zlib", "decode", "bz2", "lzma", "gzip", "unhexlify", "fromhex", "a2b_", "marshal", "codecs")
 	networkWords = words("fetch", "http", "HTTP", "axios", "XMLHttp", "net", "navigator", "tls", "requests", "urllib", "urlopen", "socket", "smtplib")
 )
 

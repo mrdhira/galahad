@@ -20,8 +20,8 @@ func (s *scan) sinks(d *doc, f *found) {
 		}
 		open := m[1] - 1
 		timer := bytes.HasPrefix(d.data[m[0]:], []byte("set"))
-		raw := argAt(d.data, open, timer)
-		if s.argBytes += len(raw) + 1; s.argBytes > argBudget {
+		raw, read := argAt(d.data, open, timer)
+		if s.argBytes += read + 1; s.argBytes > argBudget {
 			s.limited = true
 			return
 		}
@@ -32,7 +32,7 @@ func (s *scan) sinks(d *doc, f *found) {
 		if timer && (bytes.HasPrefix(arg, []byte("function")) || bytes.HasPrefix(arg, []byte("async")) || bytes.Contains(arg, []byte("=>"))) {
 			continue
 		}
-		decoded, download := hasDecoder(arg), hasNetwork(arg)
+		decoded, download := s.decodes(d, arg), s.network(d, arg)
 		via := -1
 		if id := identRE.Find(arg); id != nil && !decoded && !download && (len(arg) == len(id) || arg[len(id)] != '(') {
 			decoded, download, via = s.assigned(d, m[0], string(id))
@@ -90,46 +90,73 @@ func (s *scan) assigned(d *doc, off int, id string) (decoded, download bool, via
 		if k := bytes.IndexAny(rhs, ";\n"); k >= 0 {
 			rhs = rhs[:k]
 		}
-		return hasDecoder(rhs), hasNetwork(rhs), lo + i
+		return s.decodes(d, rhs), s.network(d, rhs), lo + i
 	}
 	return false, false, -1
 }
 
+// maxString is the longest string literal that argAt skips over.
+const maxString = 8 << 20
+
 // argAt returns the text of the call whose "(" is at data[open]: up to the
-// matching ")" or, with first set, to the first top-level comma. It reads at
-// most maxArg bytes and skips over string literals.
-func argAt(data []byte, open int, first bool) []byte {
-	end := min(len(data), open+1+maxArg)
+// matching ")" or, with first set, to the first top-level comma. The content
+// of long string literals is left out (” stands for it), so that a decoder
+// after a big blob is still seen. At most maxArg bytes of code are kept. It
+// also returns the number of bytes read.
+func argAt(data []byte, open int, first bool) (arg []byte, read int) {
 	depth := 0
-	var quote byte
-	for i := open + 1; i < end; i++ {
+	i := open + 1
+	for i < len(data) && len(arg) < maxArg {
 		c := data[i]
-		if quote != 0 {
-			switch c {
-			case '\\':
-				i++
-			case quote:
-				quote = 0
-			}
-			continue
-		}
 		switch c {
 		case '"', '\'', '`':
-			quote = c
+			end := stringEnd(data, i)
+			if end < 0 {
+				return append(arg, data[i:min(len(data), i+maxArg)]...), min(len(data), i+maxString) - open
+			}
+			body := data[i+1 : end]
+			if len(body) > 64 && (c != '`' || !bytes.Contains(body, []byte("${"))) {
+				arg = append(arg, c, c)
+			} else {
+				arg = append(arg, data[i:end+1]...)
+			}
+			i = end + 1
+			continue
 		case '(', '[', '{':
 			depth++
 		case ')', ']', '}':
 			if depth == 0 {
-				return data[open+1 : i]
+				return arg, i - open
 			}
 			depth--
 		case ',':
 			if first && depth == 0 {
-				return data[open+1 : i]
+				return arg, i - open
 			}
 		}
+		arg = append(arg, c)
+		i++
 	}
-	return data[open+1 : end]
+	return arg, i - open
+}
+
+// stringEnd returns the offset of the quote that closes the string literal
+// opened at data[open], or -1 if there is none within maxString bytes.
+func stringEnd(data []byte, open int) int {
+	set := string([]byte{data[open], '\\'})
+	limit := min(len(data), open+maxString)
+	for j := open + 1; j < limit; {
+		k := bytes.IndexAny(data[j:limit], set)
+		if k < 0 {
+			return -1
+		}
+		j += k
+		if data[j] != '\\' {
+			return j
+		}
+		j += 2
+	}
+	return -1
 }
 
 // isLiteral reports whether arg is one plain string literal, which is code
@@ -200,8 +227,8 @@ func (s *scan) exfil(d *doc, f *found) {
 			continue
 		}
 		line := lineKey(d.data, sec.off)
-		net := nearest(f.nets, sec.off)
-		if seen[key{r.ID, line}] || sec.kind != secretNamed && !near(d.data, sec.off, net) {
+		net, ok := pairNet(d.data, f.nets, sec)
+		if seen[key{r.ID, line}] || !ok {
 			continue
 		}
 		seen[key{r.ID, line}] = true
@@ -232,6 +259,49 @@ func lineKey(data []byte, off int) int {
 func near(data []byte, a, b int) bool {
 	a, b = min(a, b), max(a, b)
 	return b-a <= maxFar && bytes.Count(data[a:b], []byte{'\n'}) <= maxPairLines
+}
+
+// pairNet picks the network use for a secret. Named variables pair with the
+// nearest one. Other secrets pair with the nearest one that is near enough
+// and, for a copy of the environment in a variable, that uses the variable.
+func pairNet(data []byte, nets []int, sec secretHit) (int, bool) {
+	if sec.kind == secretNamed {
+		return nearest(nets, sec.off), true
+	}
+	i := sort.SearchInts(nets, sec.off)
+	for lo, hi := i-1, i; (lo >= 0 || hi < len(nets)) && i-lo < 16 && hi-i < 16; {
+		var net int
+		if hi >= len(nets) || lo >= 0 && sec.off-nets[lo] <= nets[hi]-sec.off {
+			net = nets[lo]
+			lo--
+		} else {
+			net = nets[hi]
+			hi++
+		}
+		if !near(data, sec.off, net) {
+			return 0, false
+		}
+		if sec.name == "" || usesName(data[net:min(len(data), net+400)], sec.name) {
+			return net, true
+		}
+	}
+	return 0, false
+}
+
+// usesName reports whether text has name as a whole word.
+func usesName(text []byte, name string) bool {
+	for from := 0; ; {
+		i := bytes.Index(text[from:], []byte(name))
+		if i < 0 {
+			return false
+		}
+		i += from
+		end := i + len(name)
+		if (i == 0 || !isWord(text[i-1])) && (end == len(text) || !isWord(text[end])) {
+			return true
+		}
+		from = i + 1
+	}
 }
 
 // nearest returns the element of the sorted, non-empty list closest to off.
