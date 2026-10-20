@@ -17,13 +17,17 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/static"
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/scoring"
 )
 
-// Exit codes, matching the host CLI.
+// Exit codes, matching the host CLI. A scan exits with the code of its verdict:
+// ExitClean, ExitSuspicious or ExitMalicious.
 const (
-	ExitClean = 0
-	ExitError = 1
-	ExitUsage = 2
+	ExitClean      = 0
+	ExitError      = 1
+	ExitUsage      = 2
+	ExitSuspicious = 10
+	ExitMalicious  = 20
 )
 
 // Set at build time with -ldflags "-X github.com/mrdhira/galahad/internal/agent.version=...".
@@ -148,6 +152,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer) int {
 		return ExitError
 	}
 	res.Tool = protocol.Tool{Name: "galahad-agent", Version: version}
+	scoring.Apply(&res)
 	if err := res.Validate(); err != nil {
 		fmt.Fprintf(stderr, "galahad-agent analyze: invalid result: %v\n", err)
 		return ExitError
@@ -158,7 +163,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer) int {
 		return ExitError
 	}
 	fmt.Fprintf(stdout, "report: %s\n", path)
-	return ExitClean
+	return res.Verdict.ExitCode()
 }
 
 // writeReport writes report.json into dir, or into a new temporary directory when dir is empty.
