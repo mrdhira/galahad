@@ -110,9 +110,10 @@ func TestRunAnalyze(t *testing.T) {
 		setup func(t *testing.T, tmp string) (args []string, report string)
 		// expectations
 		wantCode     int
-		wantStdout   string // substring; empty means stdout must be empty
-		wantStderr   string // substring; empty means stderr must be empty
-		wantRule     string // rule that must be in the report
+		wantStdout   string           // substring; empty means stdout must be empty
+		wantStderr   string           // substring; empty means stderr must be empty
+		wantVerdict  protocol.Verdict // empty only for cases that write no report
+		wantRule     string           // rule that must be in the report
 		wantFiles    int
 		wantNoReport bool
 	}{
@@ -125,10 +126,25 @@ func TestRunAnalyze(t *testing.T) {
 				out := filepath.Join(tmp, "out")
 				return []string{"analyze", "-o", out, target}, filepath.Join(out, "report.json")
 			},
-			wantCode:   agent.ExitClean,
-			wantStdout: "report: ",
-			wantRule:   "GAL-SIG-001",
-			wantFiles:  2,
+			wantCode:    agent.ExitMalicious,
+			wantStdout:  "report: ",
+			wantVerdict: protocol.VerdictMalicious,
+			wantRule:    "GAL-SIG-001",
+			wantFiles:   2,
+		},
+		{
+			name: "one high finding exits suspicious",
+			setup: func(t *testing.T, tmp string) ([]string, string) {
+				target := filepath.Join(tmp, "notes.txt")
+				mustWrite(t, target, "\x7fELF\x02\x01\x01"+strings.Repeat("\x00", 64))
+				out := filepath.Join(tmp, "out")
+				return []string{"analyze", "-o", out, target}, filepath.Join(out, "report.json")
+			},
+			wantCode:    agent.ExitSuspicious,
+			wantStdout:  "report: ",
+			wantVerdict: protocol.VerdictSuspicious,
+			wantRule:    "GAL-IDENT-001",
+			wantFiles:   1,
 		},
 		{
 			name: "file target writes a valid report",
@@ -138,9 +154,10 @@ func TestRunAnalyze(t *testing.T) {
 				out := filepath.Join(tmp, "out")
 				return []string{"analyze", "-timeout", "1m", "-o", out, target}, filepath.Join(out, "report.json")
 			},
-			wantCode:   agent.ExitClean,
-			wantStdout: "report: ",
-			wantFiles:  1,
+			wantCode:    agent.ExitClean,
+			wantStdout:  "report: ",
+			wantVerdict: protocol.VerdictClean,
+			wantFiles:   1,
 		},
 		{
 			name: "default output is a temporary directory",
@@ -152,9 +169,10 @@ func TestRunAnalyze(t *testing.T) {
 				mustWrite(t, target, "hello\n")
 				return []string{"analyze", target}, ""
 			},
-			wantCode:   agent.ExitClean,
-			wantStdout: "report: ",
-			wantFiles:  1,
+			wantCode:    agent.ExitClean,
+			wantStdout:  "report: ",
+			wantVerdict: protocol.VerdictClean,
+			wantFiles:   1,
 		},
 		{
 			name:       "-h prints usage",
@@ -247,8 +265,11 @@ func TestRunAnalyze(t *testing.T) {
 			if err := res.Validate(); err != nil {
 				t.Errorf("report does not validate: %v", err)
 			}
-			if res.Tool.Name != "galahad-agent" || res.Verdict != "" || len(res.Files) != tt.wantFiles {
-				t.Errorf("tool %q verdict %q files %d, want galahad-agent, empty, %d", res.Tool.Name, res.Verdict, len(res.Files), tt.wantFiles)
+			if res.Tool.Name != "galahad-agent" || res.Verdict != tt.wantVerdict || len(res.Files) != tt.wantFiles {
+				t.Errorf("tool %q verdict %q files %d, want galahad-agent, %q, %d", res.Tool.Name, res.Verdict, len(res.Files), tt.wantVerdict, tt.wantFiles)
+			}
+			if res.Verdict == protocol.VerdictMalicious && tt.wantRule != "" && !strings.Contains(strings.Join(res.Reasons, "\n"), tt.wantRule) {
+				t.Errorf("reasons %q do not mention %s", res.Reasons, tt.wantRule)
 			}
 			if tt.wantRule != "" && (len(res.Findings) != 1 || res.Findings[0].RuleID != tt.wantRule) {
 				t.Errorf("findings = %+v, want one %s", res.Findings, tt.wantRule)

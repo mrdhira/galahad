@@ -36,16 +36,18 @@ type report struct {
 			Reason string `json:"reason"`
 		} `json:"skipped"`
 	} `json:"coverage"`
-	Verdict string `json:"verdict"`
+	Verdict         string   `json:"verdict"`
+	ConfidenceLevel string   `json:"confidence_level"`
+	Reasons         []string `json:"reasons"`
 }
 
-// analyze runs "galahad-agent analyze" on target, expects exit 0 and returns the parsed report.
-func analyze(t *testing.T, target string) report {
+// analyze runs "galahad-agent analyze" on target, expects exit code wantCode and returns the parsed report.
+func analyze(t *testing.T, target string, wantCode int) report {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
 	stdout, stderr, code := runAgent(t, "analyze", "-o", out, target)
-	if code != 0 {
-		t.Fatalf("analyze exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	if code != wantCode {
+		t.Fatalf("analyze exit = %d, want %d\nstdout: %s\nstderr: %s", code, wantCode, stdout, stderr)
 	}
 	b, err := os.ReadFile(filepath.Join(out, "report.json"))
 	if err != nil {
@@ -119,7 +121,10 @@ func TestAgentAnalyze(t *testing.T) {
 		// setup returns the target to analyze
 		setup func(t *testing.T) string
 		// expectations
-		wantRule       string // rule that must be present at wantAt; empty means no findings at all
+		wantCode       int
+		wantVerdict    string
+		wantLevel      string
+		wantRule       string // rule that must be present at wantAt and in the reasons; empty means no findings at all
 		wantAt         string
 		wantTargetKind string
 	}{
@@ -128,6 +133,9 @@ func TestAgentAnalyze(t *testing.T) {
 			setup: func(t *testing.T) string {
 				return writeEICAR(t, t.TempDir())
 			},
+			wantCode:       20,
+			wantVerdict:    "malicious",
+			wantLevel:      "high",
 			wantRule:       "GAL-SIG-001",
 			wantAt:         "eicar.txt:1",
 			wantTargetKind: "file",
@@ -139,6 +147,9 @@ func TestAgentAnalyze(t *testing.T) {
 				writeEICAR(t, dir)
 				return dir
 			},
+			wantCode:       20,
+			wantVerdict:    "malicious",
+			wantLevel:      "high",
 			wantRule:       "GAL-SIG-001",
 			wantAt:         "eicar.txt:1",
 			wantTargetKind: "dir",
@@ -152,6 +163,9 @@ func TestAgentAnalyze(t *testing.T) {
 				}
 				return filepath.Join(root, "testdata", "corpus", "benign-go-cli")
 			},
+			wantCode:       0,
+			wantVerdict:    "clean",
+			wantLevel:      "high",
 			wantTargetKind: "dir",
 		},
 	}
@@ -160,7 +174,7 @@ func TestAgentAnalyze(t *testing.T) {
 			// Given a target
 			target := tt.setup(t)
 			// When the agent analyzes it
-			rep := analyze(t, target)
+			rep := analyze(t, target, tt.wantCode)
 			// Then the report has the expected finding (or none) and the coverage is complete
 			if tt.wantRule == "" {
 				if len(rep.Findings) != 0 {
@@ -175,8 +189,11 @@ func TestAgentAnalyze(t *testing.T) {
 			if rep.Coverage.FilesSeen == 0 || rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen || len(rep.Coverage.Skipped) != 0 {
 				t.Errorf("coverage seen/analyzed/skipped = %d/%d/%v, want all files analyzed", rep.Coverage.FilesSeen, rep.Coverage.FilesAnalyzed, rep.Coverage.Skipped)
 			}
-			if rep.Verdict != "" {
-				t.Errorf("verdict = %q, want empty until scoring exists", rep.Verdict)
+			if rep.Verdict != tt.wantVerdict || rep.ConfidenceLevel != tt.wantLevel {
+				t.Errorf("verdict/confidence_level = %q/%q, want %q/%q", rep.Verdict, rep.ConfidenceLevel, tt.wantVerdict, tt.wantLevel)
+			}
+			if tt.wantRule != "" && !strings.Contains(strings.Join(rep.Reasons, "\n"), tt.wantRule) {
+				t.Errorf("reasons %q do not mention %s", rep.Reasons, tt.wantRule)
 			}
 			if tt.wantTargetKind == "file" && len(rep.Target.SHA256) != 64 {
 				t.Errorf("file target sha256 = %q, want 64 hex chars", rep.Target.SHA256)
