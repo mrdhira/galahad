@@ -3,11 +3,14 @@ package agent_test
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/mrdhira/galahad/internal/agent"
+	"github.com/mrdhira/galahad/internal/protocol"
 )
 
 func TestRun(t *testing.T) {
@@ -95,6 +98,177 @@ func TestRunVersionJSON(t *testing.T) {
 				t.Errorf("stderr = %q, want empty", errb.String())
 			}
 		})
+	}
+}
+
+func TestRunAnalyze(t *testing.T) {
+	// The test signature is built from parts so no file in the repo contains it.
+	eicar := `X5O!P%@AP[4\PZX54(P^)7CC)7}$` + "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!" + "$H+H*"
+	tests := []struct {
+		name string
+		// inputs: setup returns the command arguments and the report path to check ("" for none)
+		setup func(t *testing.T, tmp string) (args []string, report string)
+		// expectations
+		wantCode     int
+		wantStdout   string // substring; empty means stdout must be empty
+		wantStderr   string // substring; empty means stderr must be empty
+		wantRule     string // rule that must be in the report
+		wantFiles    int
+		wantNoReport bool
+	}{
+		{
+			name: "directory target writes a valid report",
+			setup: func(t *testing.T, tmp string) ([]string, string) {
+				target := filepath.Join(tmp, "target")
+				mustWrite(t, filepath.Join(target, "a.txt"), "hello\n")
+				mustWrite(t, filepath.Join(target, "sub", "e.txt"), eicar)
+				out := filepath.Join(tmp, "out")
+				return []string{"analyze", "-o", out, target}, filepath.Join(out, "report.json")
+			},
+			wantCode:   agent.ExitClean,
+			wantStdout: "report: ",
+			wantRule:   "GAL-SIG-001",
+			wantFiles:  2,
+		},
+		{
+			name: "file target writes a valid report",
+			setup: func(t *testing.T, tmp string) ([]string, string) {
+				target := filepath.Join(tmp, "a.txt")
+				mustWrite(t, target, "hello\n")
+				out := filepath.Join(tmp, "out")
+				return []string{"analyze", "-timeout", "1m", "-o", out, target}, filepath.Join(out, "report.json")
+			},
+			wantCode:   agent.ExitClean,
+			wantStdout: "report: ",
+			wantFiles:  1,
+		},
+		{
+			name: "default output is a temporary directory",
+			setup: func(t *testing.T, tmp string) ([]string, string) {
+				t.Setenv("TMPDIR", tmp)
+				t.Setenv("TMP", tmp)
+				t.Setenv("TEMP", tmp)
+				target := filepath.Join(tmp, "a.txt")
+				mustWrite(t, target, "hello\n")
+				return []string{"analyze", target}, ""
+			},
+			wantCode:   agent.ExitClean,
+			wantStdout: "report: ",
+			wantFiles:  1,
+		},
+		{
+			name:       "-h prints usage",
+			setup:      func(*testing.T, string) ([]string, string) { return []string{"analyze", "-h"}, "" },
+			wantCode:   agent.ExitClean,
+			wantStdout: "Commands:",
+		},
+		{
+			name:       "unknown flag",
+			setup:      func(*testing.T, string) ([]string, string) { return []string{"analyze", "--nope", "x"}, "" },
+			wantCode:   agent.ExitUsage,
+			wantStderr: "flag provided but not defined",
+		},
+		{
+			name:       "missing path",
+			setup:      func(*testing.T, string) ([]string, string) { return []string{"analyze"}, "" },
+			wantCode:   agent.ExitUsage,
+			wantStderr: "exactly one path",
+		},
+		{
+			name: "nonexistent target",
+			setup: func(t *testing.T, tmp string) ([]string, string) {
+				out := filepath.Join(tmp, "out")
+				return []string{"analyze", "-o", out, filepath.Join(tmp, "missing")}, filepath.Join(out, "report.json")
+			},
+			wantCode:     agent.ExitError,
+			wantStderr:   "galahad-agent analyze:",
+			wantNoReport: true,
+		},
+		{
+			name: "output directory inside the target",
+			setup: func(t *testing.T, tmp string) ([]string, string) {
+				target := filepath.Join(tmp, "target")
+				mustWrite(t, filepath.Join(target, "a.txt"), "hello\n")
+				out := filepath.Join(target, "new", "out")
+				return []string{"analyze", "-o", out, target}, filepath.Join(out, "report.json")
+			},
+			wantCode:     agent.ExitUsage,
+			wantStderr:   "inside the target",
+			wantNoReport: true,
+		},
+		{
+			name: "output directory cannot be created",
+			setup: func(t *testing.T, tmp string) ([]string, string) {
+				target := filepath.Join(tmp, "a.txt")
+				mustWrite(t, target, "hello\n")
+				blocker := filepath.Join(tmp, "blocker")
+				mustWrite(t, blocker, "x")
+				return []string{"analyze", "-o", filepath.Join(blocker, "out"), target}, ""
+			},
+			wantCode:   agent.ExitError,
+			wantStderr: "galahad-agent analyze:",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			args, report := tt.setup(t, tmp)
+			var out, errb bytes.Buffer
+
+			code := agent.Run(args, &out, &errb)
+
+			if code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tt.wantCode, errb.String())
+			}
+			checkOutput(t, "stdout", out.String(), tt.wantStdout)
+			checkOutput(t, "stderr", errb.String(), tt.wantStderr)
+			if tt.wantNoReport {
+				if _, err := os.Stat(report); err == nil {
+					t.Errorf("report %s exists, want none", report)
+				}
+				return
+			}
+			if tt.wantFiles == 0 {
+				return
+			}
+			if report == "" {
+				report = strings.TrimSpace(strings.TrimPrefix(out.String(), "report: "))
+			}
+			b, err := os.ReadFile(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var res protocol.Result
+			dec := json.NewDecoder(bytes.NewReader(b))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&res); err != nil {
+				t.Fatal(err)
+			}
+			if err := res.Validate(); err != nil {
+				t.Errorf("report does not validate: %v", err)
+			}
+			if res.Tool.Name != "galahad-agent" || res.Verdict != "" || len(res.Files) != tt.wantFiles {
+				t.Errorf("tool %q verdict %q files %d, want galahad-agent, empty, %d", res.Tool.Name, res.Verdict, len(res.Files), tt.wantFiles)
+			}
+			if tt.wantRule != "" && (len(res.Findings) != 1 || res.Findings[0].RuleID != tt.wantRule) {
+				t.Errorf("findings = %+v, want one %s", res.Findings, tt.wantRule)
+			}
+			if runtime.GOOS != "windows" {
+				if st, err := os.Stat(report); err != nil || st.Mode().Perm() != 0o600 {
+					t.Errorf("report stat = %v, %v, want mode 0600", st, err)
+				}
+			}
+		})
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

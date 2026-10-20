@@ -51,6 +51,16 @@ for goos in linux darwin windows; do
   done
 done
 
+step "host imports"
+# The host binary must never link the analysis code, which parses untrusted bytes.
+host_deps="$(go list -deps ./cmd/galahad)"
+case "$host_deps" in
+  *"$(go list -m)/internal/analyze"*)
+    echo "cmd/galahad must not depend on internal/analyze (host never parses untrusted bytes)" >&2
+    exit 1
+    ;;
+esac
+
 step vuln
 if [ "${SKIP_VULN:-}" = "1" ]; then
   echo "WARNING: SKIP_VULN=1, govulncheck skipped"

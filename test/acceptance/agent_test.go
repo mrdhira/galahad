@@ -1,9 +1,86 @@
 package acceptance_test
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// report mirrors the parts of report.json the tests read. It does not import internal packages.
+type report struct {
+	Target struct {
+		Name      string `json:"name"`
+		Kind      string `json:"kind"`
+		SHA256    string `json:"sha256"`
+		FileCount int    `json:"file_count"`
+	} `json:"target"`
+	Files []struct {
+		Path string `json:"path"`
+	} `json:"files"`
+	Findings []struct {
+		RuleID   string `json:"rule_id"`
+		Analyzer string `json:"analyzer"`
+		Evidence []struct {
+			Path string `json:"path"`
+			Line int    `json:"line"`
+		} `json:"evidence"`
+	} `json:"findings"`
+	Coverage struct {
+		FilesSeen     int `json:"files_seen"`
+		FilesAnalyzed int `json:"files_analyzed"`
+		Skipped       []struct {
+			Path   string `json:"path"`
+			Reason string `json:"reason"`
+		} `json:"skipped"`
+	} `json:"coverage"`
+	Verdict string `json:"verdict"`
+}
+
+// analyze runs "galahad-agent analyze" on target, expects exit 0 and returns the parsed report.
+func analyze(t *testing.T, target string) report {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "out")
+	stdout, stderr, code := runAgent(t, "analyze", "-o", out, target)
+	if code != 0 {
+		t.Fatalf("analyze exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep report
+	if err := json.Unmarshal(b, &rep); err != nil {
+		t.Fatalf("report.json: %v", err)
+	}
+	return rep
+}
+
+// hasFinding reports whether the report has a finding of rule with evidence at "path:line".
+func hasFinding(rep report, rule, at string) bool {
+	for _, f := range rep.Findings {
+		for _, e := range f.Evidence {
+			if f.RuleID == rule && fmt.Sprintf("%s:%d", e.Path, e.Line) == at {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// writeEICAR writes the EICAR test file to dir/eicar.txt. The signature is built from
+// parts so that no file in the repository contains it.
+func writeEICAR(t *testing.T, dir string) string {
+	t.Helper()
+	sig := `X5O!P%@AP[4\PZX54(P^)7CC)7}$` + "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!" + "$H+H*"
+	p := filepath.Join(dir, "eicar.txt")
+	if err := os.WriteFile(p, []byte(sig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 
 func TestAgentSmoke(t *testing.T) {
 	tests := []struct {
@@ -31,6 +108,135 @@ func TestAgentSmoke(t *testing.T) {
 			checkOutput(t, "stderr", stderr, tt.wantStderr)
 			if tt.wantCode == 2 && !strings.Contains(stderr, "Usage") {
 				t.Errorf("stderr lacks usage: %q", stderr)
+			}
+		})
+	}
+}
+
+func TestAgentAnalyze(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup returns the target to analyze
+		setup func(t *testing.T) string
+		// expectations
+		wantRule       string // rule that must be present at wantAt; empty means no findings at all
+		wantAt         string
+		wantTargetKind string
+	}{
+		{
+			name: "EICAR file built at test time is flagged",
+			setup: func(t *testing.T) string {
+				return writeEICAR(t, t.TempDir())
+			},
+			wantRule:       "GAL-SIG-001",
+			wantAt:         "eicar.txt:1",
+			wantTargetKind: "file",
+		},
+		{
+			name: "EICAR in a directory is flagged",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeEICAR(t, dir)
+				return dir
+			},
+			wantRule:       "GAL-SIG-001",
+			wantAt:         "eicar.txt:1",
+			wantTargetKind: "dir",
+		},
+		{
+			name: "benign Go CLI has no findings and is fully analyzed",
+			setup: func(t *testing.T) string {
+				root, err := moduleRoot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(root, "testdata", "corpus", "benign-go-cli")
+			},
+			wantTargetKind: "dir",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given a target
+			target := tt.setup(t)
+			// When the agent analyzes it
+			rep := analyze(t, target)
+			// Then the report has the expected finding (or none) and the coverage is complete
+			if tt.wantRule == "" {
+				if len(rep.Findings) != 0 {
+					t.Errorf("findings = %+v, want none", rep.Findings)
+				}
+			} else if !hasFinding(rep, tt.wantRule, tt.wantAt) {
+				t.Errorf("no %s at %s in %+v", tt.wantRule, tt.wantAt, rep.Findings)
+			}
+			if rep.Target.Kind != tt.wantTargetKind {
+				t.Errorf("target kind = %q, want %q", rep.Target.Kind, tt.wantTargetKind)
+			}
+			if rep.Coverage.FilesSeen == 0 || rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen || len(rep.Coverage.Skipped) != 0 {
+				t.Errorf("coverage seen/analyzed/skipped = %d/%d/%v, want all files analyzed", rep.Coverage.FilesSeen, rep.Coverage.FilesAnalyzed, rep.Coverage.Skipped)
+			}
+			if rep.Verdict != "" {
+				t.Errorf("verdict = %q, want empty until scoring exists", rep.Verdict)
+			}
+			if tt.wantTargetKind == "file" && len(rep.Target.SHA256) != 64 {
+				t.Errorf("file target sha256 = %q, want 64 hex chars", rep.Target.SHA256)
+			}
+		})
+	}
+}
+
+func TestAgentAnalyzeUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup returns the arguments after "analyze"
+		setup func(t *testing.T) []string
+		// expectations
+		wantCode   int
+		wantStderr string // substring
+	}{
+		{
+			name:       "missing path",
+			setup:      func(*testing.T) []string { return nil },
+			wantCode:   2,
+			wantStderr: "exactly one path",
+		},
+		{
+			name: "nonexistent target",
+			setup: func(t *testing.T) []string {
+				return []string{"-o", t.TempDir(), filepath.Join(t.TempDir(), "missing")}
+			},
+			wantCode:   1,
+			wantStderr: "galahad-agent analyze:",
+		},
+		{
+			name: "output inside the target is refused and nothing is written",
+			setup: func(t *testing.T) []string {
+				dir := t.TempDir()
+				writeEICAR(t, dir)
+				return []string{"-o", filepath.Join(dir, "out"), dir}
+			},
+			wantCode:   2,
+			wantStderr: "inside the target",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given arguments that are wrong
+			args := append([]string{"analyze"}, tt.setup(t)...)
+			// When the agent runs
+			stdout, stderr, code := runAgent(t, args...)
+			// Then it fails with the expected code and message, and writes no report into the target
+			if code != tt.wantCode {
+				t.Errorf("exit = %d, want %d", code, tt.wantCode)
+			}
+			checkOutput(t, "stderr", stderr, tt.wantStderr)
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if len(args) > 1 && args[1] == "-o" {
+				if _, err := os.Stat(filepath.Join(args[2], "report.json")); err == nil {
+					t.Errorf("report written to %s", args[2])
+				}
 			}
 		})
 	}
