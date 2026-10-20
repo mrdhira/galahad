@@ -42,8 +42,8 @@ func Defang(s string) string {
 	return b.String()
 }
 
-// urlOrEmail finds URLs first, so an at sign inside a URL belongs to the URL.
-var urlOrEmail = regexp.MustCompile(`(?i)\b(?:https?|ftp)://[^\s<>"'` + "`" + `\\^{}|]+|[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}`)
+// urlOrEmail finds URLs first (also when glued to a preceding character), so an at sign inside a URL belongs to the URL.
+var urlOrEmail = regexp.MustCompile(`(?i)(?:https?|ftp)://[^\s<>"'` + "`" + `\\^{}|]+|[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}`)
 
 // DefangText defangs every URL and email address in free text and leaves the
 // rest unchanged. Punctuation that ends a sentence is not part of a URL.

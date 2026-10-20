@@ -127,7 +127,7 @@ func TestRunAnalyze(t *testing.T) {
 				return []string{"analyze", "-o", out, target}, filepath.Join(out, "report.json")
 			},
 			wantCode:    agent.ExitMalicious,
-			wantStdout:  "report: ",
+			wantStdout:  "report.html",
 			wantVerdict: protocol.VerdictMalicious,
 			wantRule:    "GAL-SIG-001",
 			wantFiles:   2,
@@ -141,7 +141,7 @@ func TestRunAnalyze(t *testing.T) {
 				return []string{"analyze", "-o", out, target}, filepath.Join(out, "report.json")
 			},
 			wantCode:    agent.ExitSuspicious,
-			wantStdout:  "report: ",
+			wantStdout:  "report.html",
 			wantVerdict: protocol.VerdictSuspicious,
 			wantRule:    "GAL-IDENT-001",
 			wantFiles:   1,
@@ -155,7 +155,7 @@ func TestRunAnalyze(t *testing.T) {
 				return []string{"analyze", "-timeout", "1m", "-o", out, target}, filepath.Join(out, "report.json")
 			},
 			wantCode:    agent.ExitClean,
-			wantStdout:  "report: ",
+			wantStdout:  "report.html",
 			wantVerdict: protocol.VerdictClean,
 			wantFiles:   1,
 		},
@@ -170,7 +170,7 @@ func TestRunAnalyze(t *testing.T) {
 				return []string{"analyze", target}, ""
 			},
 			wantCode:    agent.ExitClean,
-			wantStdout:  "report: ",
+			wantStdout:  "report.html",
 			wantVerdict: protocol.VerdictClean,
 			wantFiles:   1,
 		},
@@ -250,7 +250,11 @@ func TestRunAnalyze(t *testing.T) {
 				return
 			}
 			if report == "" {
-				report = strings.TrimSpace(strings.TrimPrefix(out.String(), "report: "))
+				for _, l := range strings.Split(out.String(), "\n") {
+					if l = strings.TrimSpace(l); strings.HasSuffix(l, "report.json") {
+						report = l
+					}
+				}
 			}
 			b, err := os.ReadFile(report)
 			if err != nil {
