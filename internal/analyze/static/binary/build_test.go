@@ -200,3 +200,48 @@ func buildFat(first []byte, archs int) []byte {
 	b.Write(first)
 	return b.Bytes()
 }
+
+// buildPEImports makes a PE32 whose import directory has the given number of
+// descriptors, all pointing at one thunk array that names funcs.
+func buildPEImports(funcs []string, descriptors int) []byte {
+	const base = 0x1000
+	thunkOff := (descriptors + 1) * 20
+	namesOff := thunkOff + (len(funcs)+1)*4
+	sec := make([]byte, namesOff)
+	for i := range descriptors {
+		le.PutUint32(sec[i*20:], base+uint32(thunkOff))
+		le.PutUint32(sec[i*20+16:], base+uint32(thunkOff))
+	}
+	for i, f := range funcs {
+		le.PutUint32(sec[thunkOff+i*4:], base+uint32(len(sec)))
+		sec = append(sec, 0, 0)
+		sec = append(sec, f...)
+		sec = append(sec, 0)
+	}
+	var b bytes.Buffer
+	dos := make([]byte, 0x40)
+	copy(dos, "MZ")
+	le.PutUint32(dos[0x3c:], 0x40)
+	b.Write(dos)
+	coff := make([]byte, 24)
+	copy(coff, "PE\x00\x00")
+	le.PutUint16(coff[4:], 0x14c)
+	le.PutUint16(coff[6:], 1)
+	le.PutUint16(coff[20:], 224)
+	b.Write(coff)
+	opt := make([]byte, 224)
+	le.PutUint16(opt[0:], 0x10b)
+	le.PutUint32(opt[92:], 16)
+	le.PutUint32(opt[96+8:], base) // import directory
+	b.Write(opt)
+	h := make([]byte, 40)
+	copy(h, ".idata")
+	le.PutUint32(h[8:], uint32(len(sec)))
+	le.PutUint32(h[12:], base)
+	le.PutUint32(h[16:], uint32(len(sec)))
+	le.PutUint32(h[20:], uint32(b.Len()+40))
+	le.PutUint32(h[36:], peData)
+	b.Write(h)
+	b.Write(sec)
+	return b.Bytes()
+}

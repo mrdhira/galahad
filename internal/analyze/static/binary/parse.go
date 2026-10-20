@@ -134,10 +134,10 @@ func parsePE(rd *budgetReader, data []byte) (Features, error) {
 			Entropy:    e,
 		})
 	}
-	syms, _ := f.ImportedSymbols() // "Func:dll"; an unreadable import table is just empty
-	for _, s := range syms[:min(len(syms), maxImports)] {
-		name, _, _ := strings.Cut(s, ":")
-		ft.Imports = append(ft.Imports, name)
+	// A damaged import table keeps the names found so far; only cancellation is an error.
+	ft.Imports, err = peImports(rd.ctx, f)
+	if err != nil && rd.ctx.Err() != nil {
+		return Features{}, err
 	}
 	return ft, nil
 }

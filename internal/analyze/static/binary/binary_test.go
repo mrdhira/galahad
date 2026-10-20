@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -145,13 +146,16 @@ func TestParse(t *testing.T) {
 		// inputs
 		data []byte
 		// expectations
-		wantErr    bool
-		wantAnyErr bool // an error or success are both fine; it must not panic or hang
-		wantRules  []string
+		wantErr     bool
+		wantAnyErr  bool // an error or success are both fine; it must not panic or hang
+		wantRules   []string
+		wantImports int // 0 skips the check
 	}{
 		{name: "the test binary itself", data: self},
 		{name: "pe with packed sections", data: buildPE([]peSection{{name: "UPX0", chars: peData}, {name: ".text", chars: peExec, data: noise(8192)}}, -1), wantRules: []string{"GAL-BIN-001", "GAL-BIN-002"}},
 		{name: "pe with an ordinary data section", data: buildPE([]peSection{{name: ".data", chars: peData, data: noise(8192)}}, -1)},
+		{name: "pe importing the injection set", data: buildPEImports([]string{"VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread"}, 2), wantImports: 3, wantRules: []string{"GAL-BIN-003"}},
+		{name: "pe with many descriptors sharing one thunk array", data: buildPEImports(manyNames(2000), 20000), wantImports: 2000},
 		{name: "elf with a packed executable section", data: elfWith([]elfSection{text, {name: "UPX1", typ: 1, flags: 2, data: []byte{1}}}, 0, nil), wantRules: []string{"GAL-BIN-001", "GAL-BIN-002"}},
 		{name: "mach-o text segment", data: machoText, wantRules: []string{"GAL-BIN-001"}},
 		{name: "mach-o custom executable segment", data: buildMachO("EVIL", 5, []machoSection{{name: "x", seg: "EVIL", data: noise(8192)}}), wantRules: []string{"GAL-BIN-001"}},
@@ -188,6 +192,9 @@ func TestParse(t *testing.T) {
 			var got []string
 			for _, f := range binary.Assess(ft) {
 				got = append(got, f.RuleID)
+			}
+			if tt.wantImports != 0 && len(ft.Imports) != tt.wantImports {
+				t.Errorf("imports = %d, want %d", len(ft.Imports), tt.wantImports)
 			}
 			if !slices.Equal(got, tt.wantRules) {
 				t.Errorf("rules = %v, want %v (features %+v)", got, tt.wantRules, ft)
@@ -235,4 +242,12 @@ func TestAnalyze(t *testing.T) {
 			}
 		})
 	}
+}
+
+func manyNames(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = "Func" + strconv.Itoa(i)
+	}
+	return out
 }
