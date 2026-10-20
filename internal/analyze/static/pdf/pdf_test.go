@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"encoding/ascii85"
 	"fmt"
 	"reflect"
 	"strings"
@@ -45,7 +46,33 @@ func utf16BE(s string) string {
 	return out
 }
 
+// objstmDoc builds a document whose catalog and action sit in one object stream.
+// enc encodes the member text; filter is the matching /Filter value.
+func objstmDoc(members []string, filter string, enc func([]byte) []byte, extra string) []byte {
+	head, body := "", ""
+	for i, m := range members {
+		head += fmt.Sprintf("%d %d ", 10+i, len(body))
+		body += m + " "
+	}
+	first := len(head)
+	return doc(obj(1, "<< /Type /Catalog >>"), stream(5, fmt.Sprintf("/Type /ObjStm /N %d /First %d /Filter %s %s", len(members), first, filter, extra), enc([]byte(head+body))))
+}
+
 func TestAnalyze(t *testing.T) {
+	flate := func(b []byte) []byte { return deflate(t, b) }
+	hexEnc := func(b []byte) []byte { return []byte(fmt.Sprintf("%x>", b)) }
+	a85 := func(b []byte) []byte {
+		dst := make([]byte, ascii85.MaxEncodedLen(len(b)))
+		return append(append([]byte("<~"), dst[:ascii85.Encode(dst, b)]...), "~>"...)
+	}
+	action := "<< /S /JavaScript /JS (go) >>"
+	catalog := "<< /OpenAction 11 0 R >>"
+	bigArray := "<< /A [" + strings.Repeat("0 ", 210000) + "] >>"
+	fan := obj(2, "<< /X ["+strings.Repeat("1 ", 50000)+"] /Y << /Z 3 0 R >> >>") + obj(3, "<< /S /Launch >>")
+	for i := range 2000 {
+		fan += obj(100+i, "<< /AA 2 0 R >>")
+	}
+
 	zeros := func(n int) []byte { return make([]byte, n) }
 	longURI := "http://a.test/" + strings.Repeat("a", pdf.MaxURILen)
 	objstm := func() string {
@@ -71,7 +98,7 @@ func TestAnalyze(t *testing.T) {
 		wantLines   map[string]int // rule -> line of the first evidence
 		wantSnippet map[string]string
 		wantIOCs    []string // type=value
-		wantSkip    string
+		wantSkips   []string
 		wantErr     bool
 	}{
 		{
@@ -202,6 +229,99 @@ func TestAnalyze(t *testing.T) {
 			wantRules: []string{"GAL-PDF-003", "GAL-PDF-006"},
 		},
 		{
+			name:      "endobj inside a string does not end the object",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /A (endobj) /B (a\\)endobj) /S /Launch >>")),
+			wantRules: []string{"GAL-PDF-003"},
+		},
+		{
+			name:      "endobj and stream inside a comment or hex string do not end the object",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /A <656e646f626a> % endobj\n /B (stream\n) % stream\n /S /Launch >>")),
+			wantRules: []string{"GAL-PDF-003"},
+		},
+		{
+			name:      "object without endobj ends at the next header",
+			kind:      ident.PDF,
+			data:      []byte("%PDF-1.4\n1 0 obj\n<< /S /Launch >>\n2 0 obj\n<< /JS (x) >>\nendobj\n"),
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-003"},
+			wantLines: map[string]int{"GAL-PDF-001": 4, "GAL-PDF-003": 2},
+		},
+		{
+			name: "an /Encrypt comment does not hide an object stream",
+			kind: ident.PDF,
+			data: func() []byte {
+				d := objstmDoc([]string{catalog, action}, "/FlateDecode", flate, "")
+				return append([]byte("% /Encrypt\n"), d...)
+			}(),
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-002"},
+		},
+		{
+			name:      "ASCIIHex object stream",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{catalog, action}, "/ASCIIHexDecode", hexEnc, ""),
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-002"},
+		},
+		{
+			name:      "ASCII85 then Flate object stream",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{catalog, action}, "[/ASCII85Decode /FlateDecode]", func(b []byte) []byte { return a85(flate(b)) }, ""),
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-002"},
+		},
+		{
+			name:      "ASCIIHex stream over the limit",
+			kind:      ident.PDF,
+			data:      doc(stream(1, "/Filter /ASCIIHexDecode", []byte(strings.Repeat("00", pdf.MaxStreamBytes+1)+">"))),
+			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"unsupported"},
+		},
+		{
+			name:      "object stream with a bad /First is scanned whole",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{catalog, action}, "/FlateDecode", flate, "/First 999999"),
+			wantRules: []string{"GAL-PDF-001"},
+		},
+		{
+			name:      "object stream with an undecodable filter is skipped",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{catalog, action}, "/LZWDecode", func(b []byte) []byte { return b }, ""),
+			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"unsupported"},
+		},
+		{
+			name:      "a huge array in one member does not hide the next member",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{bigArray, catalog, action}, "/FlateDecode", flate, ""),
+			wantRules: []string{"GAL-PDF-001"},
+		},
+		{
+			name:      "a region over the token limit is reported as budget",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /S /Launch /A ["+strings.Repeat("0 ", 1<<20+10)+"] >>")),
+			wantRules: []string{"GAL-PDF-003"},
+			wantSkips: []string{"budget"},
+		},
+		{
+			name:      "many references to one large object are examined once",
+			kind:      ident.PDF,
+			data:      doc(fan),
+			wantRules: []string{"GAL-PDF-002", "GAL-PDF-003"},
+		},
+		{
+			name:      "URI as a hex string and as a reference",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /URI <687474703a2f2f612e746573742f68> >>"), obj(2, "<< /URI 3 0 R >>"), obj(3, "(http://b.test/r)"), obj(4, "<< /URI 9 0 R >>"), obj(5, "<< /URI 6 0 R >>"), obj(6, "<< /A 1 >>")),
+			wantRules: []string{"GAL-PDF-005"},
+			wantIOCs:  []string{"url=http://a.test/h", "url=http://b.test/r"},
+		},
+		{
+			name:        "JavaScript as a hex string",
+			kind:        ident.PDF,
+			data:        doc(obj(1, "<< /JS <61626364> >>")),
+			wantRules:   []string{"GAL-PDF-001"},
+			wantSnippet: map[string]string{"GAL-PDF-001": "abcd"},
+		},
+		{
 			name:      "embedded file",
 			kind:      ident.PDF,
 			data:      doc(obj(1, "<< /Names << /EmbeddedFiles 2 0 R >> >>"), stream(3, "/Type /EmbeddedFile", []byte("MZ"))),
@@ -240,6 +360,7 @@ func TestAnalyze(t *testing.T) {
 			data:      doc(obj(1, "<< >>"), stream(2, "/Filter [/ASCII85Decode /FlateDecode]", []byte("abc"))),
 			wantRules: []string{"GAL-PDF-007"},
 			wantLines: map[string]int{"GAL-PDF-007": 5},
+			wantSkips: []string{"unsupported"},
 		},
 		{
 			name: "image filter is normal",
@@ -251,18 +372,21 @@ func TestAnalyze(t *testing.T) {
 			kind:      ident.PDF,
 			data:      doc(stream(1, "/Filter /FlateDecode", []byte("not zlib")), stream(2, "/Filter /FlateDecode", deflate(t, []byte("abcdef"))[:8])),
 			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"unsupported"},
 		},
 		{
 			name:      "encrypted document",
 			kind:      ident.PDF,
 			data:      doc(obj(1, "<< /Encrypt 9 0 R >>"), stream(2, "/Filter /FlateDecode", []byte("cipher"))),
 			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"encrypted"},
 		},
 		{
 			name:      "stream over the per-stream limit",
 			kind:      ident.PDF,
 			data:      doc(stream(1, "/Filter /FlateDecode", deflate(t, zeros(pdf.MaxStreamBytes+1)))),
 			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"unsupported"},
 		},
 		{
 			name:      "streams over the per-file limit",
@@ -270,12 +394,13 @@ func TestAnalyze(t *testing.T) {
 			data:      doc(fiveBombs),
 			wantRules: []string{"GAL-PDF-007"},
 			wantLines: map[string]int{"GAL-PDF-007": 26},
+			wantSkips: []string{"unsupported"},
 		},
 		{
-			name:     "too many objects",
-			kind:     ident.PDF,
-			data:     doc(manyObjs),
-			wantSkip: "budget",
+			name:      "too many objects",
+			kind:      ident.PDF,
+			data:      doc(manyObjs),
+			wantSkips: []string{"budget"},
 		},
 		{
 			name:    "cancelled context",
@@ -321,12 +446,12 @@ func TestAnalyze(t *testing.T) {
 			if !reflect.DeepEqual(iocs, tt.wantIOCs) {
 				t.Errorf("iocs = %v, want %v", iocs, tt.wantIOCs)
 			}
-			gotSkip := ""
-			if len(out.Skips) > 0 {
-				gotSkip = out.Skips[0].Reason
+			var skips []string
+			for _, sk := range out.Skips {
+				skips = append(skips, sk.Reason)
 			}
-			if gotSkip != tt.wantSkip {
-				t.Errorf("skip = %q, want %q", gotSkip, tt.wantSkip)
+			if !reflect.DeepEqual(skips, tt.wantSkips) {
+				t.Errorf("skips = %v, want %v", skips, tt.wantSkips)
 			}
 		})
 	}

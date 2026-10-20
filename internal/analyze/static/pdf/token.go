@@ -24,7 +24,7 @@ type token struct {
 }
 
 const (
-	maxTokens     = 200000    // tokens kept per region
+	maxTokens     = 1 << 20   // tokens kept per region
 	maxStringKeep = 256 << 10 // bytes of one string kept
 )
 
@@ -54,11 +54,15 @@ func hexVal(c byte) int {
 	return -1
 }
 
-// tokenize splits PDF syntax into tokens. It never fails: unbalanced input just ends early.
-func tokenize(b []byte) []token {
+// tokenize splits PDF syntax into at most max tokens. It never fails: unbalanced
+// input just ends early. The second result is true when tokens were left over.
+func tokenize(b []byte, max int) ([]token, bool) {
 	var toks []token
 	i := 0
-	for i < len(b) && len(toks) < maxTokens {
+	for i < len(b) {
+		if len(toks) >= max {
+			return toks, true
+		}
 		c := b[i]
 		switch {
 		case isSpace(c):
@@ -81,9 +85,9 @@ func tokenize(b []byte) []token {
 		case c == '<':
 			end := bytes.IndexByte(b[i:], '>')
 			if end < 0 {
-				end = len(b) - i - 1
+				end = len(b) - i
 			}
-			toks = append(toks, token{kind: tHex, off: i})
+			toks = append(toks, token{kind: tHex, val: decodeText(decodeHex(b[i+1:i+end], maxStringKeep)), off: i})
 			i += end + 1
 		case c == '>' && i+1 < len(b) && b[i+1] == '>':
 			toks = append(toks, token{kind: tPunct, val: ">>", off: i})
@@ -102,7 +106,33 @@ func tokenize(b []byte) []token {
 			i = j
 		}
 	}
-	return toks
+	return toks, false
+}
+
+// decodeHex decodes the digits of a hex string, ignoring anything that is not a
+// digit. It stops after max bytes.
+func decodeHex(b []byte, max int) []byte {
+	var out []byte
+	hi := -1
+	for _, c := range b {
+		v := hexVal(c)
+		if v < 0 {
+			continue
+		}
+		if hi < 0 {
+			hi = v
+			continue
+		}
+		if len(out) >= max {
+			return out
+		}
+		out = append(out, byte(hi<<4|v))
+		hi = -1
+	}
+	if hi >= 0 && len(out) < max {
+		out = append(out, byte(hi<<4))
+	}
+	return out
 }
 
 // readName reads a name after its slash and decodes #xx escapes. obf is true when an

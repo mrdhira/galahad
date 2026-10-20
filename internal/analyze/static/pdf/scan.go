@@ -2,66 +2,43 @@ package pdf
 
 import (
 	"bytes"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
-// registerMembers makes the objects inside a decoded object stream resolvable.
-func (s *scanner) registerMembers(o *object) {
-	if o.content == nil || o.first <= 0 || o.first > len(o.content) {
-		return
-	}
-	head := tokenize(o.content[:o.first])
-	type member struct{ num, off int }
-	var ms []member
-	for i := 0; i+1 < len(head) && len(ms) < o.n && len(s.objs)+len(ms) < MaxObjects; i += 2 {
-		num, err1 := strconv.Atoi(head[i].val)
-		off, err2 := strconv.Atoi(head[i+1].val)
-		if err1 != nil || err2 != nil || off < 0 {
-			break
-		}
-		ms = append(ms, member{num, off})
-	}
-	for i, m := range ms {
-		ds := o.first + m.off
-		de := len(o.content)
-		if i+1 < len(ms) {
-			de = min(de, o.first+ms[i+1].off)
-		}
-		if ds > de {
-			continue
-		}
-		// Members are only looked up; scanning the whole decoded stream covers them.
-		s.byNum[m.num] = &object{num: m.num, hdr: o.hdr, buf: o.content, ds: ds, de: de}
-	}
-}
-
 // scanTrailers reads the trailer dictionaries, which sit outside any object.
-func (s *scanner) scanTrailers() {
+func (s *scanner) scanTrailers() error {
 	data := s.f.Data
 	pos := 0
 	for n := 0; n < 1000; n++ {
 		i := bytes.Index(data[pos:], []byte("trailer"))
 		if i < 0 {
-			return
+			return nil
 		}
 		i += pos
 		end := min(len(data), i+4096)
 		if e := bytes.Index(data[i:end], []byte("startxref")); e >= 0 {
 			end = i + e
 		}
-		s.scanRegion(tokenize(data[i+len("trailer"):end]), i)
+		if err := s.scanRegion(s.tok(data[i+len("trailer"):end]), i); err != nil {
+			return err
+		}
 		pos = i + len("trailer")
 	}
+	return nil
 }
 
 // scanRegion looks at the names and strings of one dictionary or decoded stream.
 // off is the offset of the containing object header in the file.
-func (s *scanner) scanRegion(toks []token, off int) {
+func (s *scanner) scanRegion(toks []token, off int) error {
 	for i, t := range toks {
+		if i&1023 == 0 {
+			if err := s.ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if t.kind != tName {
 			continue
 		}
@@ -83,36 +60,54 @@ func (s *scanner) scanRegion(toks []token, off int) {
 				s.add(ruleLaunch, off, "")
 			}
 		case "URI":
-			if next.kind == tStr {
-				s.addURI(next.val, off)
+			if uri, ok := s.stringAt(toks, i+1); ok {
+				s.addURI(uri, off)
 			}
 		case "OpenAction", "AA":
-			if s.targetsAction(toks, i+1, map[int]bool{}, 0) {
+			if s.targetsAction(toks, i+1) {
 				s.add(ruleAuto, off, "")
 			}
 		case "EmbeddedFile", "EmbeddedFiles":
 			s.add(ruleEmbedded, off, "")
 		case "Encrypt":
+			s.encrypted = true
 			s.add(ruleOpaque, off, "encrypted document")
 		}
 	}
+	return nil
+}
+
+// stringAt returns the string value at toks[i]: a literal or hex string, or a
+// reference to an object that holds one.
+func (s *scanner) stringAt(toks []token, i int) (string, bool) {
+	if i >= len(toks) {
+		return "", false
+	}
+	if toks[i].kind == tStr || toks[i].kind == tHex {
+		return toks[i].val, true
+	}
+	n, ok := refAt(toks, i)
+	if !ok {
+		return "", false
+	}
+	o := s.byNum[n]
+	if o == nil {
+		return "", false
+	}
+	first, _ := tokenize(o.buf[o.ds:o.de], 1)
+	if len(first) == 1 && (first[0].kind == tStr || first[0].kind == tHex) {
+		return first[0].val, true
+	}
+	return "", false
 }
 
 // jsSnippet returns the start of the JavaScript that /JS at toks[i-1] points to, cleaned to one line.
 func (s *scanner) jsSnippet(toks []token, i int) string {
-	var text string
-	switch {
-	case i >= len(toks):
-	case toks[i].kind == tStr:
-		text = toks[i].val
-	default:
-		if n, ok := refAt(toks, i); ok {
-			if o := s.byNum[n]; o != nil {
-				if o.content != nil {
-					text = string(o.content[:min(len(o.content), maxSnippetRaw)])
-				} else if rt := tokenize(o.buf[o.ds:o.de]); len(rt) > 0 && rt[0].kind == tStr {
-					text = rt[0].val
-				}
+	text, ok := s.stringAt(toks, i)
+	if !ok {
+		if n, isRef := refAt(toks, i); isRef {
+			if o := s.byNum[n]; o != nil && o.content != nil {
+				text = string(o.content[:min(len(o.content), maxSnippetRaw)])
 			}
 		}
 	}
@@ -148,12 +143,7 @@ func (s *scanner) addURI(uri string, off int) {
 		}
 	}
 	s.add(ruleLinks, off, "")
-	ev := s.evidenceLine(off)
-	s.iocs = append(s.iocs, protocol.IOC{Type: typ, Value: val, Path: s.f.Path, Line: ev})
-}
-
-func (s *scanner) evidenceLine(off int) int {
-	return 1 + bytes.Count(s.f.Data[:min(off, len(s.f.Data))], []byte{'\n'})
+	s.iocs = append(s.iocs, protocol.IOC{Type: typ, Value: val, Path: s.f.Path, Line: s.evidenceLine(off)})
 }
 
 func isScheme(x string) bool {
@@ -170,15 +160,14 @@ func isScheme(x string) bool {
 
 // targetsAction reports whether the value that starts at toks[j] is an action.
 // A destination array is not.
-func (s *scanner) targetsAction(toks []token, j int, seen map[int]bool, depth int) bool {
+func (s *scanner) targetsAction(toks []token, j int) bool {
 	if j >= len(toks) {
 		return false
 	}
-	t := toks[j]
-	switch {
-	case t.kind == tPunct && t.val == "<<":
+	if toks[j].kind == tPunct && toks[j].val == "<<" {
 		level := 0
-		for k := j; k < len(toks); k++ {
+		end := min(len(toks), j+maxInlineToks)
+		for k := j; k < end; k++ {
 			if toks[k].kind != tPunct {
 				continue
 			}
@@ -189,29 +178,29 @@ func (s *scanner) targetsAction(toks []token, j int, seen map[int]bool, depth in
 				level--
 			}
 			if level == 0 {
-				return s.holdsAction(toks[j:k+1], seen, depth)
+				end = k + 1
+				break
 			}
 		}
-		return s.holdsAction(toks[j:], seen, depth)
-	default:
-		if n, ok := refAt(toks, j); ok {
-			return s.objectIsAction(n, seen, depth)
-		}
+		return s.holdsAction(toks[j:end], 0)
+	}
+	if n, ok := refAt(toks, j); ok {
+		return s.objectIsAction(n, 0)
 	}
 	return false
 }
 
 // holdsAction reports whether the tokens hold "/S /<action>" or a reference to an action.
-func (s *scanner) holdsAction(toks []token, seen map[int]bool, depth int) bool {
+func (s *scanner) holdsAction(toks []token, depth int) bool {
 	for i, t := range toks {
 		if t.kind == tName && t.val == "S" && i+1 < len(toks) && toks[i+1].kind == tName && actionTypes[toks[i+1].val] {
 			return true
 		}
-		if n, ok := refAt(toks, i); ok && depth < maxRefDepth {
+		if n, ok := refAt(toks, i); ok {
 			if i > 0 && toks[i-1].kind == tName && skipRefKeys[toks[i-1].val] {
 				continue
 			}
-			if s.objectIsAction(n, seen, depth+1) {
+			if s.objectIsAction(n, depth+1) {
 				return true
 			}
 		}
@@ -219,17 +208,28 @@ func (s *scanner) holdsAction(toks []token, seen map[int]bool, depth int) bool {
 	return false
 }
 
-func (s *scanner) objectIsAction(num int, seen map[int]bool, depth int) bool {
+// objectIsAction reports whether object num is an action or refers to one. Each
+// object is examined once per file.
+func (s *scanner) objectIsAction(num, depth int) bool {
+	switch s.memo[num] {
+	case 1, 2:
+		return false
+	case 3:
+		return true
+	}
 	o := s.byNum[num]
-	if o == nil || seen[num] || depth > maxRefDepth {
+	if o == nil || depth > maxRefDepth || s.ctx.Err() != nil {
 		return false
 	}
-	seen[num] = true
-	toks := tokenize(o.buf[o.ds:o.de])
-	if len(toks) > 0 && toks[0].kind == tPunct && toks[0].val == "[" {
-		return false
+	s.memo[num] = 1
+	toks := s.tok(o.buf[o.ds:o.de])
+	isArray := len(toks) > 0 && toks[0].kind == tPunct && toks[0].val == "["
+	res := !isArray && s.holdsAction(toks, depth)
+	s.memo[num] = 2
+	if res {
+		s.memo[num] = 3
 	}
-	return s.holdsAction(toks, seen, depth)
+	return res
 }
 
 // looksText reports whether the start of b is mostly printable ASCII or UTF-8 text.

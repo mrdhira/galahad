@@ -2,21 +2,23 @@
 // actions that run when the document opens, embedded files and URIs without
 // building a document model.
 //
-// Streams that use only FlateDecode are decoded and scanned too, and so are
-// object streams. A stream that needs any other decoder (LZW, ASCII85, ...) or
-// that is encrypted or corrupt is reported as GAL-PDF-007 (low) instead of a
-// coverage Skip: such PDFs are common and the file was still read in full, so
-// coverage should not be penalised. Only a file over the object limit becomes a
-// Skip.
+// Streams that use FlateDecode, ASCIIHexDecode and ASCII85Decode, alone or
+// chained, are decoded and scanned too, and so are object streams. Content that
+// cannot be read is reported twice: as GAL-PDF-007 (low) with the object line,
+// and as one coverage Skip per file, so the verdict cannot claim a full
+// analysis. The Skip reason is "encrypted" for a document with an /Encrypt
+// entry, "budget" when the object or token limit was hit, and "unsupported"
+// when a non-image stream (always an object stream) could not be decoded.
+// Image streams are never decoded and never reported.
 package pdf
 
 import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"encoding/ascii85"
 	"io"
 	"strconv"
-	"strings"
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/ident"
@@ -33,7 +35,8 @@ const (
 
 const (
 	maxEvidence   = 3
-	maxRefDepth   = 4
+	maxRefDepth   = 256
+	maxInlineToks = 4096 // tokens examined for one inline action dictionary
 	maxSnippetRaw = 400
 )
 
@@ -68,8 +71,8 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if f.Kind != ident.PDF {
 		return analyze.Output{}, nil
 	}
-	s := &scanner{f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}}
-	return s.run(ctx)
+	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}}
+	return s.run()
 }
 
 // object is one indirect object: where its dictionary is and what its stream holds.
@@ -80,8 +83,9 @@ type object struct {
 	ds, de   int    // dictionary region in buf
 	content  []byte // raw or decoded stream; nil without a stream
 	objStm   bool
-	n, first int  // /N and /First of an object stream
-	skipScan bool // image or font data
+	n, first int      // /N and /First of an object stream
+	members  [][2]int // member regions of an object stream inside content
+	skipScan bool     // image or font data
 }
 
 type evidence struct {
@@ -92,37 +96,41 @@ type evidence struct {
 type hit struct{ evs []evidence }
 
 type scanner struct {
+	ctx       context.Context
 	f         analyze.File
 	objs      []*object
 	byNum     map[int]*object
 	hits      map[string]*hit
 	seenURI   map[string]bool
+	memo      map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
 	iocs      []protocol.IOC
 	decoded   int
 	encrypted bool
+	undecoded bool
+	truncated bool
 	tooMany   bool
 }
 
-func (s *scanner) run(ctx context.Context) (analyze.Output, error) {
+// tok tokenizes b and remembers that the token limit was hit.
+func (s *scanner) tok(b []byte) []token {
+	toks, cut := tokenize(b, maxTokens)
+	s.truncated = s.truncated || cut
+	return toks
+}
+
+func (s *scanner) run() (analyze.Output, error) {
 	var out analyze.Output
-	s.encrypted = bytes.Contains(s.f.Data, []byte("/Encrypt"))
-	if err := s.locate(ctx); err != nil {
+	if err := s.locate(); err != nil {
 		return out, err
 	}
-	if s.tooMany {
-		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipBudget})
-		return out, nil
-	}
 	for _, o := range s.objs {
-		if err := ctx.Err(); err != nil {
+		if err := s.scanObject(o); err != nil {
 			return out, err
 		}
-		s.scanRegion(tokenize(o.buf[o.ds:o.de]), o.hdr)
-		if o.content != nil && !o.skipScan && (o.objStm || looksText(o.content)) {
-			s.scanRegion(tokenize(o.content), o.hdr)
-		}
 	}
-	s.scanTrailers()
+	if err := s.scanTrailers(); err != nil {
+		return out, err
+	}
 	for _, r := range ruleOrder {
 		h := s.hits[r.ID]
 		if h == nil {
@@ -139,7 +147,37 @@ func (s *scanner) run(ctx context.Context) (analyze.Output, error) {
 		out.Findings = append(out.Findings, r.Finding(evs...))
 	}
 	out.IOCs = s.iocs
+	if s.tooMany || s.truncated {
+		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipBudget})
+	}
+	if s.encrypted {
+		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipEncrypted})
+	} else if s.undecoded {
+		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipUnsupported})
+	}
 	return out, nil
+}
+
+// scanObject scans the dictionary and the stream content of one object.
+func (s *scanner) scanObject(o *object) error {
+	if err := s.scanRegion(s.tok(o.buf[o.ds:o.de]), o.hdr); err != nil {
+		return err
+	}
+	if o.content == nil || o.skipScan {
+		return nil
+	}
+	if len(o.members) > 0 {
+		for _, m := range o.members {
+			if err := s.scanRegion(s.tok(o.content[m[0]:m[1]]), o.hdr); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if o.objStm || looksText(o.content) {
+		return s.scanRegion(s.tok(o.content), o.hdr)
+	}
+	return nil
 }
 
 // add records a hit for the rule at the object header offset. A later snippet
@@ -164,11 +202,11 @@ func (s *scanner) add(r protocol.Rule, off int, snip string) {
 }
 
 // locate finds every "N G obj" and decodes its stream.
-func (s *scanner) locate(ctx context.Context) error {
+func (s *scanner) locate() error {
 	data := s.f.Data
 	pos := 0
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := s.ctx.Err(); err != nil {
 			return err
 		}
 		i := bytes.Index(data[pos:], []byte("obj"))
@@ -182,16 +220,16 @@ func (s *scanner) locate(ctx context.Context) error {
 			continue
 		}
 		bodyStart := i + 3
-		end := bytes.Index(data[bodyStart:], []byte("endobj"))
-		if end < 0 {
-			end = len(data) - bodyStart
-		}
-		end += bodyStart
-		o := &object{num: num, hdr: hdr, buf: data, ds: bodyStart, de: end}
-		next := end
-		if kw := streamKeyword(data[bodyStart:end]); kw >= 0 {
-			kw += bodyStart
-			ss := kw + len("stream")
+		o := &object{num: num, hdr: hdr, buf: data, ds: bodyStart}
+		kw, at := nextKeyword(data, bodyStart)
+		next := at
+		switch kw {
+		case "endobj":
+			o.de = at
+			next = at + len("endobj")
+		case "stream":
+			o.de = at
+			ss := at + len("stream")
 			if ss < len(data) && data[ss] == '\r' {
 				ss++
 			}
@@ -203,35 +241,94 @@ func (s *scanner) locate(ctx context.Context) error {
 				se = len(data) - ss
 			}
 			se += ss
-			o.de = kw
-			if e := bytes.Index(data[se:], []byte("endobj")); e >= 0 {
-				next = se + e
-			} else {
-				next = len(data)
-			}
 			s.prepareStream(o, data[ss:se])
+			kw2, at2 := nextKeyword(data, min(len(data), se+len("endstream")))
+			next = at2
+			if kw2 == "endobj" {
+				next = at2 + len("endobj")
+			}
+		default:
+			o.de = at
 		}
-		if !s.register(o) {
+		if len(s.objs) >= MaxObjects {
+			s.tooMany = true
 			return nil
 		}
+		s.objs = append(s.objs, o)
+		s.byNum[o.num] = o
 		if o.objStm {
-			s.registerMembers(o)
+			if err := s.registerMembers(o); err != nil {
+				return err
+			}
 		}
-		pos = next
-		if pos <= i {
-			pos = i + 3
-		}
+		pos = max(next, i+3)
 	}
 }
 
-func (s *scanner) register(o *object) bool {
-	if len(s.objs) >= MaxObjects {
-		s.tooMany = true
-		return false
+// nextKeyword walks data from pos like the tokenizer, skipping strings,
+// comments and hex strings, and returns the next "endobj" or "stream" keyword
+// (a stream keyword must end its line) or the header of the next object, with
+// its offset. At the end of the data it returns "" and len(data).
+func nextKeyword(data []byte, pos int) (string, int) {
+	i := pos
+	for i < len(data) {
+		c := data[i]
+		switch {
+		case c == '(':
+			i = skipString(data, i)
+		case c == '%':
+			for i < len(data) && data[i] != '\n' && data[i] != '\r' {
+				i++
+			}
+		case c == '<' && i+1 < len(data) && data[i+1] != '<':
+			e := bytes.IndexByte(data[i:], '>')
+			if e < 0 {
+				return "", len(data)
+			}
+			i += e + 1
+		case isRegular(c):
+			j := i
+			for j < len(data) && isRegular(data[j]) {
+				j++
+			}
+			switch string(data[i:j]) {
+			case "endobj":
+				return "endobj", i
+			case "stream":
+				if j < len(data) && (data[j] == '\r' || data[j] == '\n') {
+					return "stream", i
+				}
+			case "obj":
+				if _, hdr, ok := headerBefore(data, j-len("obj")); ok && hdr >= pos {
+					return "obj", hdr
+				}
+			}
+			i = j
+		default:
+			i++
+		}
 	}
-	s.objs = append(s.objs, o)
-	s.byNum[o.num] = o
-	return true
+	return "", len(data)
+}
+
+// skipString returns the offset after the literal string that starts at data[i].
+func skipString(data []byte, i int) int {
+	depth := 0
+	for i < len(data) {
+		switch data[i] {
+		case '\\':
+			i++
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+		i++
+	}
+	return len(data)
 }
 
 // headerBefore parses "N G " before the obj keyword at i and returns N and the offset of N.
@@ -269,28 +366,10 @@ func headerBefore(data []byte, i int) (num, hdr int, ok bool) {
 	return n, a, true
 }
 
-// streamKeyword returns the offset of a "stream" keyword (not "endstream") followed by a line end.
-func streamKeyword(b []byte) int {
-	off := 0
-	for {
-		i := bytes.Index(b[off:], []byte("stream"))
-		if i < 0 {
-			return -1
-		}
-		i += off
-		after := i + len("stream")
-		if (i == 0 || b[i-1] != 'd') && after < len(b) && (b[after] == '\r' || b[after] == '\n') {
-			return i
-		}
-		off = after
-	}
-}
-
 // prepareStream reads the stream metadata from the dictionary and sets o.content.
 func (s *scanner) prepareStream(o *object, raw []byte) {
 	var filters []string
-	var n, first int
-	toks := tokenize(o.buf[o.ds:o.de])
+	toks := s.tok(o.buf[o.ds:o.de])
 	for i, t := range toks {
 		if t.kind != tName || i+1 >= len(toks) {
 			continue
@@ -311,24 +390,33 @@ func (s *scanner) prepareStream(o *object, raw []byte) {
 		case "Length1", "Length2", "Length3":
 			o.skipScan = true
 		case "N":
-			n, _ = strconv.Atoi(nx.val)
+			o.n, _ = strconv.Atoi(nx.val)
 		case "First":
-			first, _ = strconv.Atoi(nx.val)
+			o.first, _ = strconv.Atoi(nx.val)
 		}
 	}
-	switch {
-	case len(filters) == 0:
+	if o.objStm {
+		o.skipScan = false
+	}
+	if len(filters) == 0 {
 		o.content = raw
-	case s.encrypted:
-		s.add(ruleOpaque, o.hdr, "")
-	case len(filters) == 1 && (filters[0] == "FlateDecode" || filters[0] == "Fl"):
-		o.content = s.inflate(o, raw)
-	default:
-		if !o.skipScan && !slicesAny(filters, imageFilters) {
-			s.add(ruleOpaque, o.hdr, "unsupported stream filter "+strings.Join(filters, " "))
+		return
+	}
+	if o.skipScan || slicesAny(filters, imageFilters) {
+		o.skipScan = true
+		return
+	}
+	data := raw
+	for _, f := range filters {
+		out, err := s.decode(f, data)
+		data = out
+		if err != "" {
+			s.add(ruleOpaque, o.hdr, err)
+			s.undecoded = true
+			break
 		}
 	}
-	o.n, o.first = n, first
+	o.content = data
 }
 
 func slicesAny(filters []string, set map[string]bool) bool {
@@ -340,15 +428,36 @@ func slicesAny(filters []string, set map[string]bool) bool {
 	return false
 }
 
-// inflate decodes a Flate stream within the per-stream and per-file limits.
-func (s *scanner) inflate(o *object, raw []byte) []byte {
-	r, err := zlib.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		s.add(ruleOpaque, o.hdr, "undecodable Flate stream")
-		return nil
-	}
-	defer func() { _ = r.Close() }()
+// decode applies one filter within the per-stream and per-file limits. It returns
+// the bytes it got and, when it could not decode everything, a reason.
+func (s *scanner) decode(filter string, in []byte) ([]byte, string) {
 	limit := min(MaxStreamBytes, MaxFileBytes-s.decoded)
+	var r io.Reader
+	switch filter {
+	case "FlateDecode", "Fl":
+		zr, err := zlib.NewReader(bytes.NewReader(in))
+		if err != nil {
+			return nil, "undecodable Flate stream"
+		}
+		defer func() { _ = zr.Close() }()
+		r = zr
+	case "ASCIIHexDecode", "AHx":
+		out, over := decodeHexFilter(in, limit)
+		s.decoded += len(out)
+		if over {
+			return out, "ASCIIHexDecode stream over the size limit"
+		}
+		return out, ""
+	case "ASCII85Decode", "A85":
+		in = bytes.TrimSpace(in)
+		in = bytes.TrimPrefix(in, []byte("<~"))
+		if e := bytes.Index(in, []byte("~>")); e >= 0 {
+			in = in[:e]
+		}
+		r = ascii85.NewDecoder(bytes.NewReader(in))
+	default:
+		return nil, "unsupported stream filter " + filter
+	}
 	out, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if len(out) > limit {
 		out = out[:limit]
@@ -356,7 +465,60 @@ func (s *scanner) inflate(o *object, raw []byte) []byte {
 	}
 	s.decoded += len(out)
 	if err != nil {
-		s.add(ruleOpaque, o.hdr, "undecodable Flate stream")
+		return out, "undecodable " + filter + " stream"
 	}
-	return out
+	return out, ""
+}
+
+// decodeHexFilter decodes ASCIIHexDecode data up to limit bytes.
+func decodeHexFilter(in []byte, limit int) ([]byte, bool) {
+	if e := bytes.IndexByte(in, '>'); e >= 0 {
+		in = in[:e]
+	}
+	out := decodeHex(in, limit+1)
+	if len(out) > limit {
+		return out[:limit], true
+	}
+	return out, false
+}
+
+// registerMembers makes the objects inside a decoded object stream resolvable
+// and records their regions, which are scanned one by one.
+func (s *scanner) registerMembers(o *object) error {
+	if o.content == nil || o.first <= 0 || o.first > len(o.content) {
+		return nil
+	}
+	head := s.tok(o.content[:o.first])
+	type member struct{ num, off int }
+	var ms []member
+	for i := 0; i+1 < len(head) && len(ms) < o.n && len(s.byNum)+len(ms) < 2*MaxObjects; i += 2 {
+		num, err1 := strconv.Atoi(head[i].val)
+		off, err2 := strconv.Atoi(head[i+1].val)
+		if err1 != nil || err2 != nil || off < 0 {
+			break
+		}
+		ms = append(ms, member{num, off})
+	}
+	for i, m := range ms {
+		if i&1023 == 0 {
+			if err := s.ctx.Err(); err != nil {
+				return err
+			}
+		}
+		ds := o.first + m.off
+		de := len(o.content)
+		if i+1 < len(ms) {
+			de = min(de, o.first+ms[i+1].off)
+		}
+		if ds > de {
+			continue
+		}
+		o.members = append(o.members, [2]int{ds, de})
+		s.byNum[m.num] = &object{num: m.num, hdr: o.hdr, buf: o.content, ds: ds, de: de}
+	}
+	return nil
+}
+
+func (s *scanner) evidenceLine(off int) int {
+	return 1 + bytes.Count(s.f.Data[:min(off, len(s.f.Data))], []byte{'\n'})
 }
