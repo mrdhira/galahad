@@ -24,7 +24,7 @@ func TestAgentAnalyzeEML(t *testing.T) {
 			name:         "lure email: sender, reply-to, link mismatch and the attachment as a child",
 			fixture:      "p6-eml-lure",
 			wantMinCode:  10,
-			wantFindings: []string{"GAL-EML-001 lure.eml:1", "GAL-EML-002 lure.eml:2", "GAL-EML-003 lure.eml:15"},
+			wantFindings: []string{"GAL-EML-001 lure.eml:1", "GAL-EML-002 lure.eml:2", "GAL-EML-003 lure.eml:15", "GAL-EXFIL-001 lure.eml!/setup.js:3"},
 			wantFiles:    []string{"lure.eml", "lure.eml!/setup.js"},
 		},
 		{
