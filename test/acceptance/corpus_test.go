@@ -11,7 +11,7 @@ import (
 )
 
 // liveLink matches a URL that is not defanged. No report may contain one.
-var liveLink = regexp.MustCompile(`(?i)\b(?:https?|ftp)://`)
+var liveLink = regexp.MustCompile(`(?i)(?:https?|ftp|file)://`)
 
 // corpusDir returns a builder that targets a committed fixture in testdata/corpus.
 func corpusDir(name string) func(t *testing.T) string {
@@ -29,7 +29,7 @@ func builtFile(name string, build func(t *testing.T, dest string)) func(t *testi
 
 // TestCorpus is the single regression list for corpus v1 (docs/milestones/M1.md section 5).
 // Cases follow the order of the two tables there: malicious and suspicious imitations first,
-// then the benign twins (P7), then fixtures added after the card.
+// then the benign twins (P7).
 func TestCorpus(t *testing.T) {
 	tests := []struct {
 		name string
@@ -206,18 +206,28 @@ func TestCorpus(t *testing.T) {
 			target: corpusDir("benign-eml-newsletter"), wantCode: 0, wantQuiet: true,
 		},
 		{
+			name:   "benign-npm-deps: npm project with a registry lockfile (twin of p2-typosquat)",
+			target: corpusDir("benign-npm-deps"), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign devcontainer: image and forwardPorts only (built, twin of p1-devcontainer-init)",
+			target: filesRepo(map[string]string{
+				".devcontainer/devcontainer.json": "{\n  \"image\": \"mcr.microsoft.com/devcontainers/base:ubuntu\",\n  \"forwardPorts\": [3000]\n}\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:     "benign git config: built-in fsmonitor daemon (built, twin of git-config fsmonitor)",
+			target:   gitConfigRepo("[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n"),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
 			name:   "benign-archive: zip of benign-go-cli (built)",
 			target: builtFile("benign.zip", zipOfBenignCLI), wantCode: 0, wantQuiet: true,
 		},
 		{
 			name:   "built galahad binary: a normal Go executable",
 			target: func(*testing.T) string { return binPath }, wantCode: 0, wantQuiet: true,
-		},
-
-		// Added after the card.
-		{
-			name:   "benign-npm-deps: npm project with a registry lockfile (twin of p2-typosquat)",
-			target: corpusDir("benign-npm-deps"), wantCode: 0, wantQuiet: true,
 		},
 	}
 	verdicts := map[int]string{0: "clean", 10: "suspicious", 20: "malicious"}

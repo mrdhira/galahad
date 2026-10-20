@@ -20,6 +20,7 @@ func TestDemo(t *testing.T) {
 		wantStdout   []string // each must be in stdout
 		wantEvidence []string // "RULE path:line" that must be in report.json
 		wantFiles    []string // files that must exist in the output directory
+		wantSummary  []string // each must be in summary.md, which the demo has the reader open
 		wantVerdict  string   // empty means the step writes no report
 	}{
 		{
@@ -34,6 +35,7 @@ func TestDemo(t *testing.T) {
 			wantCode:     20,
 			wantStdout:   []string{"Verdict: MALICIOUS", "report.html"},
 			wantEvidence: []string{"GAL-AUTOEXEC-010 .vscode/tasks.json:7", "GAL-EXFIL-001 scripts/setup.js:3"},
+			wantSummary:  []string{".vscode/tasks.json:7", "scripts/setup.js:3"},
 			wantFiles:    []string{"summary.md", "report.html", "report.json"},
 			wantVerdict:  "malicious",
 		},
@@ -85,6 +87,11 @@ func TestDemo(t *testing.T) {
 				rule, at, _ := strings.Cut(want, " ")
 				if !hasFinding(rep, rule, at) {
 					t.Errorf("no %s at %s in %+v", rule, at, rep.Findings)
+				}
+			}
+			for _, want := range tt.wantSummary {
+				if md := readFile(t, filepath.Join(out, "summary.md")); !strings.Contains(md, want) {
+					t.Errorf("summary.md lacks %q:\n%s", want, md)
 				}
 			}
 			// And the summary the reader opens has no live link: every URL is defanged
