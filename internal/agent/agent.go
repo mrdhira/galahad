@@ -210,6 +210,7 @@ func useColor(w io.Writer) bool {
 	return ok && os.Getenv("NO_COLOR") == "" && term.IsTerminal(int(f.Fd()))
 }
 
+// inside reports whether dir is target or below it, after resolving symlinks.
 func inside(target, dir string) bool {
 	rel, err := filepath.Rel(resolve(target), resolve(dir))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
