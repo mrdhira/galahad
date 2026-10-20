@@ -151,7 +151,7 @@ func TestAgentHostGuard(t *testing.T) {
 				}
 				return
 			}
-			if code != 0 || !strings.Contains(stdout, "report: ") {
+			if code != 0 || !strings.Contains(stdout, "report.html") {
 				t.Errorf("exit = %d, stdout %q, stderr %q, want a report", code, stdout, stderr)
 			}
 			if _, err := os.Stat(filepath.Join(out, "report.json")); err != nil {
