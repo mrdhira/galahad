@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/protocol"
@@ -43,11 +44,12 @@ var (
 	yarnHosts = map[string]bool{"registry.npmjs.org": true, "registry.yarnpkg.com": true}
 	pypiHosts = map[string]bool{"pypi.org": true, "files.pythonhosted.org": true}
 
-	depSections = map[string]bool{"dependencies": true, "devdependencies": true, "optionaldependencies": true, "peerdependencies": true}
-	npmShort    = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(#.*)?$`)
-	pyName      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
-	pyScheme    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
-	errDepth    = errors.New("json nested too deeply")
+	depSections  = map[string]bool{"dependencies": true, "devdependencies": true, "optionaldependencies": true, "peerdependencies": true}
+	npmShort     = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(#.*)?$`)
+	pyName       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
+	pySeparators = regexp.MustCompile(`[-_.]+`)
+	pyScheme     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+	errDepth     = errors.New("json nested too deeply")
 )
 
 type analyzer struct{}
@@ -73,7 +75,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 		return analyze.Output{}, nil
 	}
 	var out analyze.Output
-	if len(f.Data) > analyze.MaxConfigSize {
+	if len(f.Data) > analyze.MaxConfigSize && name != "package-lock.json" && name != "yarn.lock" {
 		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipTooLarge})
 		return out, nil
 	}
@@ -105,6 +107,9 @@ func packageJSON(_ context.Context, f analyze.File) ([]protocol.Finding, error) 
 		ev := analyze.EvidenceAt(f, m.off)
 		if isNpmRemote(lower, spec) {
 			found = append(found, ruleURL.Finding(ev))
+		}
+		if alias, ok := strings.CutPrefix(lower, "npm:"); ok {
+			name = aliasTarget(alias)
 		}
 		if topNpm.squat(npmName(name)) {
 			found = append(found, ruleTypo.Finding(ev))
@@ -158,6 +163,11 @@ func requirements(ctx context.Context, f analyze.File) ([]protocol.Finding, erro
 					found = append(found, ruleIndex.Finding(ev))
 				}
 				return
+			case "-f", "--find-links":
+				if foreignHost(val, pypiHosts) {
+					found = append(found, ruleIndex.Finding(ev))
+				}
+				return
 			case "-e", "--editable":
 				s = val
 			default:
@@ -191,13 +201,25 @@ func requirement(s string, ev protocol.Evidence) []protocol.Finding {
 	return found
 }
 
-// splitOption splits "--opt value", "--opt=value" and "-o value".
+// splitOption splits "--opt value", "--opt=value", "--opt<TAB>value", "-o value" and "-ovalue".
+// Long options that pip accepts abbreviated are expanded to their full name.
 func splitOption(s string) (opt, val string) {
-	opt, _, _ = strings.Cut(s, " ")
-	opt, _, _ = strings.Cut(opt, "=")
-	val = strings.TrimSpace(s[len(opt):])
-	val = strings.TrimSpace(strings.TrimPrefix(val, "="))
-	return opt, val
+	if !strings.HasPrefix(s, "--") {
+		opt, val = s[:min(2, len(s))], s[min(2, len(s)):]
+	} else {
+		end := strings.IndexFunc(s, func(r rune) bool { return r == '=' || unicode.IsSpace(r) })
+		if end < 0 {
+			end = len(s)
+		}
+		opt, val = s[:end], s[end:]
+		for _, long := range []string{"--index-url", "--extra-index-url", "--find-links", "--editable"} {
+			if len(opt) >= 5 && strings.HasPrefix(long, opt) {
+				opt = long
+			}
+		}
+	}
+	val = strings.TrimSpace(val)
+	return opt, strings.TrimSpace(strings.TrimPrefix(val, "="))
 }
 
 // eachLine calls fn with every line and its byte offset, and stops when ctx is done.
@@ -255,7 +277,7 @@ func npmName(name string) string {
 
 // pypiName applies the PEP 503 normalization.
 func pypiName(name string) string {
-	return strings.NewReplacer("_", "-", ".", "-").Replace(strings.ToLower(name))
+	return pySeparators.ReplaceAllString(strings.ToLower(name), "-")
 }
 
 // popular is a snapshot of well-known package names.
@@ -386,4 +408,12 @@ func walkJSON(data []byte) ([]member, error) {
 			}
 		}
 	}
+}
+
+// aliasTarget returns the package name in "name@range" (the part after "npm:").
+func aliasTarget(s string) string {
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		return s[:i]
+	}
+	return s
 }

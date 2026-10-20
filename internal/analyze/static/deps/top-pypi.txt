@@ -5,6 +5,7 @@ adal
 aiofiles
 aiohttp
 aiohttp-cors
+aioredis
 aiosignal
 aiosqlite
 alabaster
@@ -57,10 +58,13 @@ cachecontrol
 cachelib
 cachetools
 cassandra-driver
+cattr
+cattrs
 celery
 certifi
 cffi
 chalice
+chardet
 charset-normalizer
 click
 click-didyoumean
@@ -136,6 +140,8 @@ flask-login
 flask-mail
 flask-migrate
 flask-restful
+flask-restx
+flask-session
 flask-smorest
 flask-socketio
 flask-sqlalchemy
@@ -175,10 +181,12 @@ greenlet
 grpc-google-iam-v1
 grpcio
 grpcio-status
+grpcio-tools
 gunicorn
 h11
 h5py
 hatchling
+hiredis
 hjson
 html5lib
 httpcore
@@ -229,7 +237,9 @@ locket
 loguru
 lxml
 lz4
+mako
 markdown
+markdown2
 markupsafe
 marshmallow
 marshmallow-sqlalchemy
@@ -308,11 +318,15 @@ prompt-toolkit
 proto-plus
 protobuf
 psutil
+psycopg
+psycopg-binary
+psycopg-pool
 psycopg2
 psycopg2-binary
 ptyprocess
 py
 py4j
+pyaml
 pyarrow
 pyasn1
 pyasn1-modules
@@ -320,11 +334,13 @@ pyautogui
 pybind11
 pycodestyle
 pycparser
+pycrypto
 pycryptodome
 pycryptodomex
 pycurl
 pydantic
 pydantic-core
+pydantic-extra-types
 pydantic-settings
 pyflakes
 pygithub
@@ -333,6 +349,7 @@ pyinstaller
 pyjwt
 pylint
 pymongo
+pymssql
 pymysql
 pynacl
 pynput
@@ -352,6 +369,7 @@ pytest-asyncio
 pytest-benchmark
 pytest-cov
 pytest-django
+pytest-env
 pytest-forked
 pytest-html
 pytest-metadata
@@ -387,6 +405,7 @@ redis
 regex
 reportlab
 requests
+requests-mock
 requests-oauthlib
 requests-toolbelt
 responses
@@ -502,6 +521,7 @@ xgboost
 xlrd
 xlsxwriter
 xlwt
+xmlschema
 xmltodict
 yapf
 yarl

@@ -13,6 +13,7 @@ import (
 )
 
 func TestAnalyze(t *testing.T) {
+	filler := strings.Repeat("x", 3<<19) // 1.5 MiB, above MaxConfigSize
 	deep := strings.Repeat(`{"a":`, 40) + "1" + strings.Repeat("}", 40)
 	tests := []struct {
 		name string
@@ -80,6 +81,36 @@ func TestAnalyze(t *testing.T) {
 			data:         "# comment\nrequests>=2\nreqeusts==1  # swapped\nnum_py\ngit+https://git.example.test/x.git#egg=x\n-e git+https://git.example.test/y.git#egg=y\npkg @ https://dl.example.test/pkg.zip\nfile:///tmp/z\n-e .\n./local\nfoo-1.0-py3-none-any.whl\nsome-lib[extra]>=1 ; python_version>'3'\n\n",
 			wantFindings: []string{"GAL-DEPS-001@3", "GAL-DEPS-001@4", "GAL-DEPS-002@5", "GAL-DEPS-002@6", "GAL-DEPS-002@7"},
 		},
+		{
+			name:         "requirements option spellings",
+			file:         "requirements.txt",
+			data:         "-ihttps://a.sinkhole.test/simple\n--index-url\thttps://b.sinkhole.test/simple\n--extra-index=https://c.sinkhole.test/simple\n--extra-index-url\thttps://pypi.org/simple\n-f https://d.sinkhole.test/wheels\n--find-links=https://pypi.org/x\n-f ./wheels\n--no-binary :all:\n",
+			wantFindings: []string{"GAL-DEPS-004@1", "GAL-DEPS-004@2", "GAL-DEPS-004@3", "GAL-DEPS-004@5"},
+		},
+		{
+			name:         "lockfile above the config size limit is still checked",
+			file:         "package-lock.json",
+			data:         "{\n\"x\": \"" + filler + "\",\n\"packages\": {\n\"node_modules/b\": {\n\"resolved\": \"https://npm.sinkhole.test/b.tgz\"\n}\n}\n}",
+			wantFindings: []string{"GAL-DEPS-003@5"},
+		},
+		{
+			name:         "yarn lock above the config size limit is still checked",
+			file:         "yarn.lock",
+			data:         "# " + filler + "\nb@^1:\n  resolved \"https://npm.sinkhole.test/b.tgz#x\"\n",
+			wantFindings: []string{"GAL-DEPS-003@3"},
+		},
+		{
+			name:         "npm alias targets are checked",
+			file:         "package.json",
+			data:         "{\n\"dependencies\": {\n\"x\": \"npm:expresss@1.0.0\",\n\"y\": \"npm:express@1.0.0\",\n\"z\": \"npm:@scope/lodahs\"\n}\n}",
+			wantFindings: []string{"GAL-DEPS-001@3", "GAL-DEPS-001@5"},
+		},
+		{
+			name: "popular packages missing from earlier snapshots are not typosquats",
+			file: "package.json",
+			data: "{\n\"dependencies\": {\"recharts\": \"1\", \"cookies\": \"1\", \"xtend\": \"1\", \"merge2\": \"1\", \"colord\": \"1\", \"dotenvx\": \"1\"}\n}",
+		},
+		{name: "popular python packages missing from earlier snapshots", file: "requirements.txt", data: "psycopg\ncattrs\npymssql\npyaml\ntyping__extensions\nTyping.Extensions\n"},
 		{name: "benign requirements", file: "requirements.txt", data: "requests>=2.31\nnumpy>=1.26\nFlask_Cors==4\n"},
 	}
 	for _, tt := range tests {
