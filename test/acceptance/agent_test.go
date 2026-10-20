@@ -45,7 +45,7 @@ type report struct {
 func analyze(t *testing.T, target string, wantCode int) report {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
-	stdout, stderr, code := runAgent(t, "analyze", "-o", out, target)
+	stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, target)
 	if code != wantCode {
 		t.Fatalf("analyze exit = %d, want %d\nstdout: %s\nstderr: %s", code, wantCode, stdout, stderr)
 	}
@@ -110,6 +110,52 @@ func TestAgentSmoke(t *testing.T) {
 			checkOutput(t, "stderr", stderr, tt.wantStderr)
 			if tt.wantCode == 2 && !strings.Contains(stderr, "Usage") {
 				t.Errorf("stderr lacks usage: %q", stderr)
+			}
+		})
+	}
+}
+
+func TestAgentHostGuard(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		flags []string
+		// expectations
+		wantRefusal bool // when the runner is not a VM
+	}{
+		{name: "without the flag refuses outside a VM", wantRefusal: true},
+		{name: "with the flag proceeds", flags: []string{"--unsafe-host"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given a harmless file and the built agent
+			target := filepath.Join(t.TempDir(), "a.txt")
+			if err := os.WriteFile(target, []byte("hello\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out := filepath.Join(t.TempDir(), "out")
+			args := append([]string{"analyze"}, tt.flags...)
+			// When it analyzes the file
+			stdout, stderr, code := runAgent(t, append(args, "-o", out, target)...)
+			// Then it refuses (exit 2, naming the flag) on a non-VM host, or writes a report on a VM or with the flag
+			refused := strings.Contains(stderr, "refusing to analyze untrusted input outside a VM")
+			if refused && !tt.wantRefusal {
+				t.Fatalf("refused despite the flag: %s", stderr)
+			}
+			if refused {
+				if code != 2 || !strings.Contains(stderr, "--unsafe-host") || stdout != "" {
+					t.Errorf("refusal exit = %d, stdout %q, stderr %q, want exit 2, empty stdout, --unsafe-host hint", code, stdout, stderr)
+				}
+				if _, err := os.Stat(filepath.Join(out, "report.json")); err == nil {
+					t.Error("report written despite refusal")
+				}
+				return
+			}
+			if code != 0 || !strings.Contains(stdout, "report: ") {
+				t.Errorf("exit = %d, stdout %q, stderr %q, want a report", code, stdout, stderr)
+			}
+			if _, err := os.Stat(filepath.Join(out, "report.json")); err != nil {
+				t.Error(err)
 			}
 		})
 	}

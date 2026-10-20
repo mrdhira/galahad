@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -59,18 +60,13 @@ func TestExtractLimits(t *testing.T) {
 		text string
 		// expectations
 		wantMaxLen int
-		wantMax    time.Duration
 	}{
-		{name: "long url is cut at the path limit", text: "http://a.test/" + strings.Repeat("x", 100000), wantMaxLen: protocol.MaxPath, wantMax: 5 * time.Second},
-		{name: "one mixed 1 MiB line is fast", text: strings.Repeat("http://a.test/x u@h.test 8.8.8.8 ", (1<<20)/34), wantMaxLen: protocol.MaxPath, wantMax: 20 * time.Second},
+		{name: "long url is cut at the path limit", text: "http://a.test/" + strings.Repeat("x", 100000), wantMaxLen: protocol.MaxPath},
+		{name: "one mixed 1 MiB line keeps every value bounded", text: mixedLine(1 << 20), wantMaxLen: protocol.MaxPath},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start := time.Now()
 			ms := ioc.Extract([]byte(tt.text))
-			if d := time.Since(start); d > tt.wantMax {
-				t.Errorf("took %v, want under %v", d, tt.wantMax)
-			}
 			if len(ms) == 0 {
 				t.Fatal("no matches")
 			}
@@ -81,6 +77,49 @@ func TestExtractLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExtractScalesLinearly guards against quadratic matching on long lines.
+// It compares run times instead of using a fixed limit, so a slow or busy
+// machine (or the race detector) does not make it flaky: a 16x larger line must
+// take well under the 256x a quadratic scan would show (measured: about 16-27x
+// linear, 100x and more quadratic).
+func TestExtractScalesLinearly(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		small, large int
+		// expectations
+		wantMaxRatio float64
+	}{
+		{name: "16x larger mixed line costs well under 256x", small: 32 << 10, large: 512 << 10, wantMaxRatio: 60},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			small := []byte(mixedLine(tt.small))
+			large := []byte(mixedLine(tt.large))
+			ratio := float64(fastest(large)) / float64(fastest(small))
+			if ratio > tt.wantMaxRatio {
+				t.Errorf("time ratio %.1f, want at most %.1f", ratio, tt.wantMaxRatio)
+			}
+		})
+	}
+}
+
+func mixedLine(n int) string {
+	const unit = "http://a.test/x u@h.test 8.8.8.8 "
+	return strings.Repeat(unit, n/len(unit))
+}
+
+// fastest returns the best of three Extract runs to damp scheduling noise.
+func fastest(text []byte) time.Duration {
+	best := time.Duration(math.MaxInt64)
+	for range 3 {
+		start := time.Now()
+		ioc.Extract(text)
+		best = min(best, time.Since(start))
+	}
+	return best
 }
 
 func TestExtractOffset(t *testing.T) {

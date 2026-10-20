@@ -1,0 +1,147 @@
+package acceptance_test
+
+import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// Archive builders. Fixtures are built at test time and never committed. Each
+// builder writes to dest and fails the test on any error.
+
+// zipEntry is one zip member. The name is written as given, so tests can use
+// hostile names such as "../../evil.sh".
+type zipEntry struct {
+	name string
+	data []byte
+	mode fs.FileMode // zero means a regular file
+}
+
+// zipDir zips the files below src into dest. Member names are slash-separated
+// paths relative to src.
+func zipDir(t *testing.T, src, dest string) {
+	t.Helper()
+	var entries []zipEntry
+	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		entries = append(entries, zipEntry{name: filepath.ToSlash(rel), data: b})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipEntries(t, dest, entries)
+}
+
+// zipEntries writes a zip with the entries in order, using their raw names.
+func zipEntries(t *testing.T, dest string, entries []zipEntry) {
+	t.Helper()
+	f, err := os.Create(dest) // #nosec G304 -- test fixture path under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for _, e := range entries {
+		h := &zip.FileHeader{Name: e.name, Method: zip.Deflate}
+		if e.mode != 0 {
+			h.SetMode(e.mode)
+		}
+		w, err := zw.CreateHeader(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(e.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// zipZeros writes a zip with one entry of size zero bytes, streamed so the test
+// never holds it in memory.
+func zipZeros(t *testing.T, dest, name string, size int64) {
+	t.Helper()
+	f, err := os.Create(dest) // #nosec G304 -- test fixture path under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.CopyN(w, zeroReader{}, size); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+// tarEntry is one tar member. A zero typeflag means a regular file.
+type tarEntry struct {
+	name     string
+	data     []byte
+	typeflag byte
+	link     string
+}
+
+// tarGz writes a gzip-compressed tar with the entries in order.
+func tarGz(t *testing.T, dest string, entries []tarEntry) {
+	t.Helper()
+	f, err := os.Create(dest) // #nosec G304 -- test fixture path under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	tw := tar.NewWriter(zw)
+	for _, e := range entries {
+		typeflag := e.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		h := &tar.Header{Name: e.name, Typeflag: typeflag, Linkname: e.link, Mode: 0o644}
+		if typeflag == tar.TypeReg {
+			h.Size = int64(len(e.data))
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(e.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
