@@ -45,6 +45,10 @@ func TestDefangText(t *testing.T) {
 		{name: "urls and emails in prose", in: "See https://a.test/x, or mail bob@c.test. Done.", want: "See hxxps://a[.]test/x, or mail bob[@]c[.]test. Done."},
 		{name: "markdown link", in: "[docs](http://d.test/p)", want: "[docs](hxxp://d[.]test/p)"},
 		{name: "at sign inside a url", in: "http://u@h.test/", want: "hxxp://u[@]h[.]test/"},
+		{name: "url glued to a word", in: "xhttps://evil.test/a", want: "xhxxps://evil[.]test/a"},
+		{name: "url after a parenthesis", in: "(https://evil.test/a)", want: "(hxxps://evil[.]test/a)"},
+		{name: "url after a quote", in: `"https://evil.test/a"`, want: `"hxxps://evil[.]test/a"`},
+		{name: "already defanged text is unchanged", in: "see hxxps://evil[.]test/a and bob[@]c[.]test", want: "see hxxps://evil[.]test/a and bob[@]c[.]test"},
 		{name: "text without indicators", in: "version 1.2.3 is out.", want: "version 1.2.3 is out."},
 		{name: "empty", in: "", want: ""},
 	}
