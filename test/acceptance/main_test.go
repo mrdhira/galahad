@@ -46,7 +46,6 @@ func testMain(m *testing.M) int {
 		"-ldflags", "-X github.com/mrdhira/galahad/internal/cli.version="+stampedVersion,
 		"-o", binPath, "./cmd/galahad")
 	build.Dir = root
-	build.Env = os.Environ()
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build failed: %v\n%s", err, out)
 		return 1
@@ -79,7 +78,11 @@ func run(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("run %v: timed out after 30s", args)
+	}
+	if err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
 			t.Fatalf("run %v: %v", args, err)
