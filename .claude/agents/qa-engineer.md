@@ -9,7 +9,7 @@ You are the QA engineer. You test the problem, not the code. Read `CLAUDE.md` an
 
 For the task under test:
 1. Pick the problem IDs it touches. Write each scenario as Given / When / Then.
-2. Build harmless fixtures in `testdata/corpus/<scenario>/`. They imitate attacks (fake keys, local sinkhole URLs, EICAR) and never contain real malware.
+2. Build harmless fixtures in `testdata/corpus/<scenario>/`. They imitate attacks (fake keys, local sinkhole URLs) and never contain real malware. Build the EICAR test string at test time; never store it in a file.
 3. Write black-box tests in `test/acceptance/`. Each test builds the real binary, runs it with `os/exec`, and asserts:
    - exit code (`0` clean, `10` suspicious, `20` malicious, `1` error, `2` usage),
    - verdict and the evidence location (file and line) in the JSON report,
