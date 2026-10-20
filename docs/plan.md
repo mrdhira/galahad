@@ -33,18 +33,12 @@ Fake recruiters and phishers send developers PDFs, archives and "take-home" repo
 | GoReleaser / cosign | `go build` matrix + `sha256sum` + GitHub `attest-build-provenance` + `gh release` |
 | VM networking (tap/iptables on host) | **host-side Go proxy over vsock.** The VM has no NIC. Allowlists, the sinkhole and logging all live in one Go component, with no root needed. |
 
-**CLI exit codes** (useful for scripting): `0` clean · `10` suspicious · `20` malicious · `1` error.
+**CLI exit codes** (useful for scripting): `0` clean · `10` suspicious · `20` malicious · `1` error · `2` usage error.
 
 ---
 
-## Step 0: skills (first thing after approval)
-1. Clone `JuliusBrussee/caveman` and `dietrichgebert/ponytail` into the scratchpad.
-2. **Read every file before installing.** Skills are third-party instructions, the same kind of risk Galahad exists to catch.
-3. Report anything beyond prompt or style text (scripts, hooks, network calls). Check each license.
-4. Install them into the repo at `.claude/skills/caveman/` and `.claude/skills/ponytail/`, so they persist across sessions.
-5. Activate them with `/caveman full` and `/ponytail full`.
-
-Skills shape *how I communicate and work*. They don't override the ground rules above or safety.
+## Skills
+Third-party skills live in `.claude/skills/{caveman,ponytail}/`. Before a skill is added or updated, every file is reviewed: no scripts, hooks or network calls, and the license is checked. Skills shape communication and coding style only. They never override the ground rules above.
 
 ---
 
@@ -63,7 +57,7 @@ Skills shape *how I communicate and work*. They don't override the ground rules 
 | Test | `qa-engineer` agent | Sonnet 5.5 · medium | black-box acceptance tests run against the built binary |
 | Done | squash-merge PR, tick task, update milestone demo script | Haiku 5.5 · low (changelog/notes) | merged |
 
-- **Loop limit:** at most 3 fix loops per task. After that, escalate to Opus (high effort), then to you.
+- **Loop limit:** at most 3 fix loops per task. After that, escalate to Opus (high effort), then to the repository owner.
 - **Agent definitions:** live in `.claude/agents/{planner,coder,reviewer,qa-engineer}.md`. Rules and workflow are in `CLAUDE.md`.
 
 ### Quality gate (`make gate`, same in CI)
@@ -102,7 +96,7 @@ The QA engineer tests **the problem, not the code**. Each scenario traces back t
 | P9 | Decision API | Mock provider says "benign" on a P1 repo → still MALICIOUS; provider down → scan completes |
 | P10 | Safe-work | LAN unreachable from code-server; exported patch flags `.vscode`/binary changes |
 
-The fixtures in `testdata/corpus/` are **harmless imitations**: fake keys, a local sinkhole, EICAR. No real malware.
+The fixtures in `testdata/corpus/` are **harmless imitations**: fake keys, a local sinkhole, and the EICAR test string built at test time (never stored as a file, so antivirus does not flag clones). No real malware.
 
 ---
 
