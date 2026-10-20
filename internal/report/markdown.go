@@ -19,7 +19,7 @@ const mdSpecial = "\\`*_{}[]()|~!"
 
 // mdEscape defangs s and escapes Markdown-active characters so untrusted text cannot become a
 // link, image, code span, table cell break or raw HTML. The defang markers [.] and [@] stay as
-// they are; they are harmless without a following (...) and the parentheses are escaped.
+// they are after a letter or digit; elsewhere the bracket is escaped (see mdEscapeClean).
 func mdEscape(s string) string {
 	return mdEscapeClean(strings.ReplaceAll(clean(s), "www.", "www[.]"))
 }
@@ -31,22 +31,11 @@ func mdValue(s string) string {
 
 func mdEscapeClean(s string) string {
 	var b strings.Builder
-	atStart := true
 	for i := 0; i < len(s); i++ {
-		// A fragment starts a list item or table cell, so a leading "[" could begin a link
-		// reference definition ("[.]: url") that turns every defang marker into a link.
-		if s[i] != ' ' && s[i] != '[' {
-			atStart = false
-		}
-		if atStart && s[i] == '[' {
-			b.WriteString("\\[")
-			if strings.HasPrefix(s[i:], "[.]") || strings.HasPrefix(s[i:], "[@]") {
-				b.WriteString(s[i+1 : i+3])
-				i += 2
-			}
-			continue
-		}
-		if strings.HasPrefix(s[i:], "[.]") || strings.HasPrefix(s[i:], "[@]") {
+		// A defang marker stays as it is only right after a letter or digit, as in "evil[.]test".
+		// Anywhere else (line start, after a list marker or space) "[.]: url" could define a link
+		// reference that turns every marker in the file into a link.
+		if (strings.HasPrefix(s[i:], "[.]") || strings.HasPrefix(s[i:], "[@]")) && i > 0 && isAlnum(s[i-1]) {
 			b.WriteString(s[i : i+3])
 			i += 2
 			continue
@@ -137,4 +126,8 @@ func mdFindings(b *strings.Builder, rs []row, limit int) {
 		}
 		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(string(r.Severity)), mdEscape(r.Rule), mdEscape(r.Title), mdEscape(r.Attack), mdEscape(r.Location), mdEscape(r.Snippet))
 	}
+}
+
+func isAlnum(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }

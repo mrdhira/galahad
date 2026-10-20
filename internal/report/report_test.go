@@ -15,7 +15,7 @@ import (
 	"github.com/mrdhira/galahad/internal/report"
 )
 
-var refDef = regexp.MustCompile(`^\s*(- |\| )?\[[.@]\]:`)
+var refDef = regexp.MustCompile(`(^|[^\\])\[[.@]\]:`)
 
 func result(snippet, path string) *protocol.Result {
 	ev := protocol.Evidence{Path: path, Line: 3, Snippet: snippet}
@@ -97,8 +97,16 @@ func TestWrite(t *testing.T) {
 			snippet:      "![.] evil[.]test",
 			path:         "a.txt",
 			reasons:      []string{"[.]: //evil.test/t", "[@]: javascript:x"},
-			wantMD:       []string{`\[.]: //evil.test/t`, `\[@]: javascript:x`, `\![.] evil[.]test`},
+			wantMD:       []string{`\[.\]: //evil.test/t`, `\[@\]: javascript:x`, `\!\[.\] evil[.]test`},
 			wantMDAbsent: []string{"\n- [.]:", "\n- [@]:", " ![.]"},
+		},
+		{
+			name:         "link reference definitions behind list markers are escaped",
+			snippet:      "![.] evil[.]test",
+			path:         "a.txt",
+			reasons:      []string{"- [.]: //evil.test/n1", "+ [@]: //evil.test/n2", "1. [.]: //evil.test/n3", "[.]: //evil.test/t"},
+			wantMD:       []string{`- \[.\]: //evil.test/n1`, `+ \[@\]: //evil.test/n2`, `1. \[.\]: //evil.test/n3`, `\!\[.\] evil[.]test`},
+			wantMDAbsent: []string{" [.]:", " [@]:", "![.]"},
 		},
 		{
 			name:           "www host and newline are neutralized",
