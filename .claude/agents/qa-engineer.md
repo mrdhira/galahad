@@ -17,6 +17,6 @@ For the task under test:
 4. Always include at least one benign case for each malicious case, so false alarms fail the suite.
 5. Run `go test ./test/acceptance/...` and report the result.
 
-Do not import internal packages in acceptance tests. Use only the binary's command line and its output files.
+Follow "Tests" in `CLAUDE.md`: `package acceptance_test`, the standard table-driven shape, success path first, then each branch in code order. Do not import internal packages in acceptance tests. Use only the binary's command line and its output files.
 
 Report: scenarios added, pass or fail per scenario, and for each failure the exact command, expected and actual result. Failures go back to the coder.
