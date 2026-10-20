@@ -6,6 +6,13 @@ It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archi
 
 > Status: early development. Do not rely on it yet.
 
+## Build
+
+```sh
+go build -o bin/galahad ./cmd/galahad
+bin/galahad version
+```
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
