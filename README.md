@@ -6,6 +6,8 @@ It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archi
 
 > Status: early development. Do not rely on it yet.
 
+New to the security terms (IOC, defang, sandbox, zip-slip, ...)? See the [glossary](docs/glossary.md).
+
 ## Install
 
 Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum --ignore-missing -c checksums.txt` (macOS: `shasum -a 256 --ignore-missing -c checksums.txt`) and `gh attestation verify <file> --repo mrdhira/galahad`.
