@@ -29,7 +29,7 @@ func testMain(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "mktemp:", err)
 		return 1
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }() // best-effort cleanup of the temp build dir
 
 	root, err := moduleRoot()
 	if err != nil {
