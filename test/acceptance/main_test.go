@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const stampedVersion = "v0.0.0-acceptance"
+const (
+	stampedVersion = "v0.0.0-acceptance"
+	stampedCommit  = "0123456789ab"
+)
 
 var binPath string
 
@@ -43,7 +46,8 @@ func testMain(m *testing.M) int {
 	binPath = filepath.Join(tmp, name)
 
 	build := exec.Command("go", "build",
-		"-ldflags", "-X github.com/mrdhira/galahad/internal/cli.version="+stampedVersion,
+		"-ldflags", "-X github.com/mrdhira/galahad/internal/cli.version="+stampedVersion+
+			" -X github.com/mrdhira/galahad/internal/cli.commit="+stampedCommit,
 		"-o", binPath, "./cmd/galahad")
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {

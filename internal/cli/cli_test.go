@@ -17,7 +17,7 @@ func TestRun(t *testing.T) {
 		wantCode     int
 		wantStdout   string // substring; empty means stdout must be empty
 		wantStderr   string // substring; empty means stderr must be empty
-		wantPlatform bool   // stdout also names GOOS/GOARCH
+		wantPlatform bool   // stdout also names the Go version and GOOS/GOARCH
 	}{
 		{name: "version prints build info", args: []string{"version"}, wantCode: cli.ExitClean, wantStdout: "galahad dev (", wantPlatform: true},
 		{name: "no args prints usage", args: nil, wantCode: cli.ExitClean, wantStdout: "Usage: galahad"},
@@ -39,8 +39,10 @@ func TestRun(t *testing.T) {
 			checkOutput(t, "stdout", out.String(), tt.wantStdout)
 			checkOutput(t, "stderr", errb.String(), tt.wantStderr)
 			if tt.wantPlatform {
-				if want := runtime.GOOS + "/" + runtime.GOARCH; !strings.Contains(out.String(), want) {
-					t.Errorf("stdout %q missing %q", out.String(), want)
+				for _, want := range []string{runtime.Version(), runtime.GOOS + "/" + runtime.GOARCH} {
+					if !strings.Contains(out.String(), want) {
+						t.Errorf("stdout %q missing %q", out.String(), want)
+					}
 				}
 			}
 			if tt.wantCode == cli.ExitUsage && !strings.Contains(errb.String(), "Usage: galahad") {
@@ -86,6 +88,12 @@ func TestRunVersionJSON(t *testing.T) {
 			}
 			if m["version"] != tt.wantVersion {
 				t.Errorf("version = %q, want %q", m["version"], tt.wantVersion)
+			}
+			if m["go"] != runtime.Version() {
+				t.Errorf("go = %q, want %q", m["go"], runtime.Version())
+			}
+			if c := m["commit"]; c == "" || (c != "unknown" && len(c) > 12) {
+				t.Errorf("commit = %q, want 1-12 chars or \"unknown\"", c)
 			}
 			if m["os"] != runtime.GOOS || m["arch"] != runtime.GOARCH {
 				t.Errorf("os/arch = %q/%q, want %s/%s", m["os"], m["arch"], runtime.GOOS, runtime.GOARCH)

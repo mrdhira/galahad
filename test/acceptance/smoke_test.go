@@ -18,7 +18,7 @@ func TestSmoke(t *testing.T) {
 		wantPlatform bool   // stdout also names GOOS/GOARCH
 		wantKeys     []string
 	}{
-		{name: "version prints stamped build info", args: []string{"version"}, wantCode: 0, wantStdout: "galahad " + stampedVersion, wantPlatform: true},
+		{name: "version prints stamped build info", args: []string{"version"}, wantCode: 0, wantStdout: "galahad " + stampedVersion + " (" + stampedCommit + ", ", wantPlatform: true},
 		{name: "no args prints usage", args: nil, wantCode: 0, wantStdout: "Usage"},
 		{name: "help prints usage", args: []string{"help"}, wantCode: 0, wantStdout: "Usage"},
 		{name: "-h prints usage", args: []string{"-h"}, wantCode: 0, wantStdout: "Usage"},
@@ -56,6 +56,9 @@ func TestSmoke(t *testing.T) {
 				}
 				if got["version"] != stampedVersion {
 					t.Errorf("version = %v, want %s", got["version"], stampedVersion)
+				}
+				if got["commit"] != stampedCommit {
+					t.Errorf("commit = %v, want %s", got["commit"], stampedCommit)
 				}
 			}
 		})
