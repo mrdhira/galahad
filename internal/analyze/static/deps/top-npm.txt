@@ -155,7 +155,6 @@ domutils
 dotenv
 dotenv-cli
 dotenv-expand
-dotenvx
 duplexify
 echarts
 ee-first

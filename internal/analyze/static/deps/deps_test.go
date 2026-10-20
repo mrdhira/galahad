@@ -108,7 +108,7 @@ func TestAnalyze(t *testing.T) {
 		{
 			name: "popular packages missing from earlier snapshots are not typosquats",
 			file: "package.json",
-			data: "{\n\"dependencies\": {\"recharts\": \"1\", \"cookies\": \"1\", \"xtend\": \"1\", \"merge2\": \"1\", \"colord\": \"1\", \"dotenvx\": \"1\"}\n}",
+			data: "{\n\"dependencies\": {\"recharts\": \"1\", \"cookies\": \"1\", \"xtend\": \"1\", \"merge2\": \"1\", \"colord\": \"1\"}\n}",
 		},
 		{name: "popular python packages missing from earlier snapshots", file: "requirements.txt", data: "psycopg\ncattrs\npymssql\npyaml\ntyping__extensions\nTyping.Extensions\n"},
 		{name: "benign requirements", file: "requirements.txt", data: "requests>=2.31\nnumpy>=1.26\nFlask_Cors==4\n"},
