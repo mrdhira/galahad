@@ -15,7 +15,7 @@ Before 1.0.0, only the latest `v0.x` release receives fixes.
 
 **Do not open a public issue, pull request or discussion for a vulnerability.**
 
-Report it privately through GitHub: open the [Security tab](https://github.com/mrdhira/galahad/security) and choose **Report a vulnerability**. This creates a private advisory that only the maintainer can see.
+Report it privately through GitHub: open the [Security tab](https://github.com/mrdhira/galahad/security) and choose **Report a vulnerability**. This creates a private advisory visible only to you and the maintainer.
 
 Include:
 - the Galahad version (`galahad version --json`) and host OS
@@ -27,9 +27,9 @@ Include:
 ## What counts as a vulnerability
 
 In scope, highest severity first:
-1. **Sandbox escape:** a sample reads or writes host files, runs code on the host, or reaches the host or local network from inside a guest VM.
+1. **Sandbox escape:** a sample reads or writes host files, runs code on the host, or reaches the host or local network from inside a guest VM, or bypasses the egress proxy allowlist.
 2. **Host-side parsing:** the host binary parses, executes or opens untrusted bytes, or crashes or hangs on them.
-3. **Secret exposure:** host credentials, environment variables or decision-provider API keys reach a guest VM, a report or a decision provider.
+3. **Secret exposure:** host credentials or environment variables reach a guest VM or a report, or a key or host secret reaches a decision provider other than the one it belongs to, or appears in a prompt.
 4. **Report injection:** sample content runs as script or active content when a report is opened.
 5. **Verdict tampering:** a sample forces a clean verdict through a flaw in Galahad itself. Examples are prompt injection that bypasses the decision-provider cap, or crafted output that the host trusts without validating it.
 6. **Supply chain:** release artifacts, checksums, provenance attestations or guest images that can be swapped or fail to verify.
