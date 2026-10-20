@@ -39,7 +39,7 @@ func TestBinaryAnalyze(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "out")
-			stdout, stderr, code := runAgent(t, "analyze", "-o", out, tt.target(t))
+			stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, tt.target(t))
 			if code != tt.wantCode {
 				t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout, stderr)
 			}
