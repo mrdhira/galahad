@@ -99,9 +99,12 @@ func Apply(res *protocol.Result) {
 	}
 	if verdict == protocol.VerdictClean && cov < minCoverage {
 		verdict = protocol.VerdictSuspicious
+		why := "less than half of the files could be analyzed"
+		if res.Coverage.FilesSeen == 0 {
+			why = "no files were found to analyze"
+		}
 		reasons = append(reasons,
-			fmt.Sprintf("coverage %d%% < %d%%", int(math.Round(cov*100)), int(minCoverage*100)),
-			"less than half of the files could be analyzed")
+			fmt.Sprintf("coverage %d%% < %d%%", int(math.Round(cov*100)), int(minCoverage*100)), why)
 	}
 
 	agree := len(analyzers) >= 2

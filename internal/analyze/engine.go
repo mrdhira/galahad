@@ -317,7 +317,7 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 	}
 	j.res.Coverage.Skipped = append(j.res.Coverage.Skipped, out.Skips...)
 	for _, c := range out.Children {
-		c.Path = parent.Path + "!/" + protocol.CleanPath(c.Name)
+		c.Path = protocol.CleanPath(parent.Path + "!/" + c.Name)
 		c.Name = c.Name[strings.LastIndexByte(c.Name, '/')+1:]
 		c.Depth = parent.Depth + 1
 		j.queue = append(j.queue, c)
