@@ -99,7 +99,7 @@ func checkPE(data []byte) error {
 	if h.bad || pe > uint64(len(data)) || !bytes.HasPrefix(data[pe:], []byte("PE\x00\x00")) {
 		return errHeader
 	}
-	nsec, nsym, optSize := h.u(pe+6, 2), h.u(pe+12, 4), h.u(pe+20, 2)
+	nsec, nsym, optSize := h.u(pe+6, 2), h.u(pe+16, 4), h.u(pe+20, 2)
 	if nsec > maxSections || nsym*18 > uint64(len(data)) {
 		return errHeader
 	}

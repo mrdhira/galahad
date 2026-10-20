@@ -66,6 +66,15 @@ func buildPE(secs []peSection, count int) []byte {
 	return b.Bytes()
 }
 
+// withSymbols sets the COFF symbol table pointer and count of a buildPE file
+// and appends an empty string table, the way Go-built Windows binaries end.
+func withSymbols(pe []byte, count uint32) []byte {
+	out := append(bytes.Clone(pe), 0, 0, 0, 0)
+	le.PutUint32(out[0x40+12:], uint32(len(pe)))
+	le.PutUint32(out[0x40+16:], count)
+	return out
+}
+
 type elfSection struct {
 	name  string
 	typ   uint32
