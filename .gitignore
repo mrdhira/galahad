@@ -15,3 +15,6 @@ coverage.*
 # editors / OS
 .DS_Store
 .idea/
+
+# agent worktrees (local only)
+/.claude/worktrees/
