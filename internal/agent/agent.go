@@ -18,6 +18,7 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze/static"
 	"github.com/mrdhira/galahad/internal/protocol"
 	"github.com/mrdhira/galahad/internal/scoring"
+	"github.com/mrdhira/galahad/internal/vmguard"
 )
 
 // Exit codes, matching the host CLI. A scan exits with the code of its verdict:
@@ -39,14 +40,29 @@ var (
 const usage = `Usage: galahad-agent <command> [flags]
 
 Commands:
-  analyze [-o dir] [-timeout d] <path>
-            Analyze a file or directory and write dir/report.json
+  analyze [-o dir] [-timeout d] [--unsafe-host] <path>
+            Analyze a file or directory and write dir/report.json.
+            Refuses to run outside a VM unless --unsafe-host is given.
   version   Print version information
   help      Show this help
 `
 
+// Env holds the parts of the environment a command depends on, so tests can replace them.
+type Env struct {
+	// DetectVM reports whether the process runs inside a VM, and why. Nil means vmguard.Detect.
+	DetectVM func() (inVM bool, reason string)
+}
+
 // Run executes the command in args (without the program name) and returns the exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
+	return RunWithEnv(args, stdout, stderr, Env{})
+}
+
+// RunWithEnv is Run with an explicit environment.
+func RunWithEnv(args []string, stdout, stderr io.Writer, env Env) int {
+	if env.DetectVM == nil {
+		env.DetectVM = vmguard.Detect
+	}
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)
 		return ExitClean
@@ -56,7 +72,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return ExitClean
 	case "analyze":
-		return runAnalyze(args[1:], stdout, stderr)
+		return runAnalyze(args[1:], stdout, stderr, env)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:
@@ -115,11 +131,12 @@ func buildCommit() string {
 	return "unknown"
 }
 
-func runAnalyze(args []string, stdout, stderr io.Writer) int {
+func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	outDir := fs.String("o", "", "output directory (default: a new temporary directory)")
 	timeout := fs.Duration("timeout", analyze.DefaultJobTimeout, "time limit for the whole job")
+	unsafeHost := fs.Bool("unsafe-host", false, "analyze on this host even though it is not a VM; you accept the risk")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -133,6 +150,16 @@ func runAnalyze(args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 	target := fs.Arg(0)
+
+	if inVM, reason := env.DetectVM(); !inVM {
+		if !*unsafeHost {
+			fmt.Fprintf(stderr, "galahad-agent: refusing to analyze untrusted input outside a VM (%s). "+
+				"Galahad runs analysis inside its VM; use `galahad scan` (coming in M2). "+
+				"To run on this host anyway, pass --unsafe-host; you accept the risk.\n", reason)
+			return ExitUsage
+		}
+		fmt.Fprintf(stderr, "galahad-agent: WARNING: --unsafe-host: analyzing untrusted input outside a VM (%s)\n", reason)
+	}
 
 	info, err := os.Stat(target)
 	if err != nil {
