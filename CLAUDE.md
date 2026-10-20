@@ -12,7 +12,7 @@ Galahad is a Go CLI that inspects untrusted files, links and Git repositories in
 - Skills: use `caveman` (full) for chat and `ponytail` (full) for code. Code, comments, commits and docs are written in plain, normal prose.
 
 ## Commits and pull requests
-- Author: `Dhira Wigata <dwigata.putra@gmail.com>`. Nobody else.
+- Author: `Dhira Wigata <dwigata.putra@gmail.com>`. Nobody else. Exception: `dependabot[bot]` may author dependency-bump commits from its own PRs.
 - No `Co-Authored-By` lines, no AI or tool attribution, no session links in commits, PR titles, PR bodies or docs.
 - Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `ci:`, `refactor:`.
 - One branch and one PR per task: `feat/T<id>-<slug>` (for example `feat/T1.5-autoexec`). Squash-merge when the workflow below passes.
