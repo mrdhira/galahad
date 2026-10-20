@@ -8,14 +8,20 @@ import (
 )
 
 // Defang defangs one URL, host, IP address or email address: a leading http
-// becomes hxxp, every dot becomes [.] and every at sign becomes [@]. Parts
+// becomes hxxp (only before ://), every dot becomes [.] and every at sign becomes [@]. Parts
 // that are already defanged stay as they are.
 func Defang(s string) string {
 	var b strings.Builder
 	rest := s
 	if len(rest) >= 4 && strings.EqualFold(rest[:4], "http") {
-		b.WriteString("hxxp")
-		rest = rest[4:]
+		n := 4
+		if len(rest) > n && (rest[n] == 's' || rest[n] == 'S') {
+			n++
+		}
+		if strings.HasPrefix(rest[n:], "://") {
+			b.WriteString("hxxp" + strings.ToLower(rest[4:n]))
+			rest = rest[n:]
+		}
 	}
 	for rest != "" {
 		switch {

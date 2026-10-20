@@ -50,39 +50,53 @@ var (
 // Extract returns the URLs, email addresses, bare IPv4 addresses and the
 // domains and IPs of URL hosts in text, ordered by offset. Domains come only
 // from URLs and email addresses. Private, loopback, link-local and
-// documentation IPs are not listed as ip matches. Values with control or bidi
-// characters or invalid UTF-8 are dropped.
+// documentation IPs are not listed as ip matches. A value is cut at the first
+// control or bidi character or invalid UTF-8 byte and at protocol.MaxPath bytes.
 func Extract(text []byte) []Match {
-	type span struct{ start, end int }
+	ms, _ := extract(context.Background(), text)
+	return ms
+}
+
+// checkEvery is how many matches pass between checks of the context.
+const checkEvery = 256
+
+type span struct{ start, end int }
+
+// covered reports whether pos lies inside one of spans, which are sorted and do not overlap.
+func covered(spans []span, pos int) bool {
+	i := sort.Search(len(spans), func(i int) bool { return spans[i].end > pos })
+	return i < len(spans) && spans[i].start <= pos
+}
+
+func extract(ctx context.Context, text []byte) ([]Match, error) {
 	var ms []Match
-	var taken []span
+	var urls, emails []span
 	add := func(typ, value string, off int) {
-		if safe(value) {
+		if value != "" {
 			ms = append(ms, Match{Type: typ, Value: value, Offset: off})
 		}
 	}
-	covered := func(start int) bool {
-		for _, s := range taken {
-			if start >= s.start && start < s.end {
-				return true
-			}
+	n := 0
+	tick := func() error {
+		if n++; n%checkEvery == 0 {
+			return ctx.Err()
 		}
-		return false
+		return nil
 	}
 
 	for _, m := range urlRe.FindAllIndex(text, -1) {
-		end := m[0] + len(bytes.TrimRight(text[m[0]:m[1]], ".,;:!?)]"))
-		raw := string(text[m[0]:end])
-		taken = append(taken, span{m[0], end})
-		if !safe(raw) {
-			continue
+		if err := tick(); err != nil {
+			return nil, err
 		}
+		end := m[0] + len(bytes.TrimRight(text[m[0]:m[1]], ".,;:!?)]"))
+		urls = append(urls, span{m[0], end})
+		raw := trimPunct(cut(text[m[0]:m[1]]))
 		add(TypeURL, raw, m[0])
 		u, err := url.Parse(raw)
 		if err != nil {
 			continue
 		}
-		host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+		host := hostOf(u)
 		if addr, err := netip.ParseAddr(host); err == nil {
 			if isPublic(addr) {
 				add(TypeIP, addr.String(), m[0])
@@ -92,16 +106,22 @@ func Extract(text []byte) []Match {
 		}
 	}
 	for _, m := range emailRe.FindAllIndex(text, -1) {
-		if covered(m[0]) {
+		if err := tick(); err != nil {
+			return nil, err
+		}
+		if covered(urls, m[0]) {
 			continue
 		}
-		taken = append(taken, span{m[0], m[1]})
-		raw := string(text[m[0]:m[1]])
+		emails = append(emails, span{m[0], m[1]})
+		raw := cut(text[m[0]:m[1]])
 		add(TypeEmail, raw, m[0])
 		add(TypeDomain, strings.ToLower(raw[strings.LastIndexByte(raw, '@')+1:]), m[0])
 	}
 	for _, m := range ipRe.FindAllIndex(text, -1) {
-		if covered(m[0]) || inDottedRun(text, m[0], m[1]) {
+		if err := tick(); err != nil {
+			return nil, err
+		}
+		if covered(urls, m[0]) || covered(emails, m[0]) || inDottedRun(text, m[0], m[1]) {
 			continue
 		}
 		if addr, err := netip.ParseAddr(string(text[m[0]:m[1]])); err == nil && isPublic(addr) {
@@ -116,7 +136,28 @@ func Extract(text []byte) []Match {
 		prev = ms[i].Offset
 		ms[i].Line = line
 	}
-	return ms
+	return ms, nil
+}
+
+// hostOf returns the lowercase host of u without a trailing dot.
+func hostOf(u *url.URL) string {
+	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+}
+
+func trimPunct(s string) string { return strings.TrimRight(s, ".,;:!?)]") }
+
+// cut returns b up to the first control or bidi character or invalid UTF-8
+// byte, and at most protocol.MaxPath bytes, cut at a rune boundary.
+func cut(b []byte) string {
+	i := 0
+	for i < len(b) {
+		r, w := utf8.DecodeRune(b[i:])
+		if (r == utf8.RuneError && w == 1) || unsafeRune(r) || i+w > protocol.MaxPath {
+			break
+		}
+		i += w
+	}
+	return string(b[:i])
 }
 
 // inDottedRun reports an address that is part of a longer dotted number such as 1.2.3.4.5.
@@ -126,12 +167,9 @@ func inDottedRun(text []byte, start, end int) bool {
 		(start >= 2 && text[start-1] == '.' && digit(text[start-2]))
 }
 
-// safe reports a value that is valid UTF-8 without control or bidi characters.
-func safe(s string) bool {
-	return utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool {
-		return unicode.IsControl(r) || r == 0x061C || r == 0x200E || r == 0x200F ||
-			(r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
-	})
+func unsafeRune(r rune) bool {
+	return unicode.IsControl(r) || r == 0x061C || r == 0x200E || r == 0x200F ||
+		(r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // nonPublic lists address ranges that are not on the public internet, beyond
@@ -173,7 +211,7 @@ var services = []service{
 }
 
 func isService(u *url.URL) bool {
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	host := hostOf(u)
 	p := strings.ToLower(u.Path)
 	for _, s := range services {
 		if (host == s.host || strings.HasSuffix(host, "."+s.host)) && strings.HasPrefix(p, s.path) {
@@ -205,7 +243,11 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 			end = start + i
 		}
 		line := f.Data[start:min(end, start+analyze.MaxLineScan)]
-		for _, m := range Extract(line) {
+		ms, err := extract(ctx, line)
+		if err != nil {
+			return analyze.Output{}, err
+		}
+		for _, m := range ms {
 			key := m.Type + "\x00" + m.Value
 			if seen[key] {
 				continue
@@ -230,7 +272,7 @@ func risks(f analyze.File, off int, raw string) []protocol.Finding {
 		return nil
 	}
 	var fs []protocol.Finding
-	if addr, err := netip.ParseAddr(u.Hostname()); err == nil && isPublic(addr) {
+	if addr, err := netip.ParseAddr(hostOf(u)); err == nil && isPublic(addr) {
 		fs = append(fs, ruleRawIP.Finding(analyze.EvidenceAt(f, off)))
 	}
 	if isService(u) {

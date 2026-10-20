@@ -16,6 +16,8 @@ func TestDefang(t *testing.T) {
 	}{
 		{name: "https url", in: "https://a.b.test/x", want: "hxxps://a[.]b[.]test/x"},
 		{name: "http url keeps case of the rest", in: "HTTP://A.test/Path.exe", want: "hxxp://A[.]test/Path[.]exe"},
+		{name: "host starting with http is not a scheme", in: "httpbin.org", want: "httpbin[.]org"},
+		{name: "http without slashes", in: "https.test", want: "https[.]test"},
 		{name: "ftp url", in: "ftp://files.test", want: "ftp://files[.]test"},
 		{name: "email", in: "user@host.test", want: "user[@]host[.]test"},
 		{name: "ip address", in: "http://203.0.113.9:8080/a", want: "hxxp://203[.]0[.]113[.]9:8080/a"},
