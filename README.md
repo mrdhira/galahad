@@ -8,7 +8,7 @@ It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archi
 
 ## Install
 
-Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum -c checksums.txt` and `gh attestation verify <file> --repo mrdhira/galahad`.
+Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum --ignore-missing -c checksums.txt` (macOS: `shasum -a 256 --ignore-missing -c checksums.txt`) and `gh attestation verify <file> --repo mrdhira/galahad`.
 
 ## Development
 
