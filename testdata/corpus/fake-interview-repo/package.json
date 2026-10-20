@@ -1,0 +1,9 @@
+{
+  "name": "interview-task",
+  "version": "1.0.0",
+  "description": "Take-home coding task",
+  "scripts": {
+    "postinstall": "node scripts/setup.js",
+    "start": "node index.js"
+  }
+}

@@ -139,8 +139,8 @@ func TestArchive(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tt.wantRule == "" {
-				if len(rep.Findings) != 0 {
-					t.Errorf("findings = %+v, want none", rep.Findings)
+				if got := otherFindings(rep); len(got) != 0 {
+					t.Errorf("findings = %v, want none besides inventory", got)
 				}
 			} else if !hasFinding(rep, tt.wantRule, tt.wantAt) {
 				t.Errorf("no %s at %s in %+v", tt.wantRule, tt.wantAt, rep.Findings)

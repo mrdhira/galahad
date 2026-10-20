@@ -52,8 +52,8 @@ func TestAgentDependencyChecks(t *testing.T) {
 					t.Errorf("no %s at %s in %+v", rule, at, rep.Findings)
 				}
 			}
-			if tt.wantClean && len(rep.Findings) != 0 {
-				t.Errorf("findings = %+v, want none", rep.Findings)
+			if got := otherFindings(rep); tt.wantClean && len(got) != 0 {
+				t.Errorf("findings = %v, want none besides inventory", got)
 			}
 			if rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen || len(rep.Coverage.Skipped) != 0 {
 				t.Errorf("coverage seen/analyzed/skipped = %d/%d/%v, want all analyzed", rep.Coverage.FilesSeen, rep.Coverage.FilesAnalyzed, rep.Coverage.Skipped)
