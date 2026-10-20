@@ -56,7 +56,7 @@ func TestAgentAnalyzeIOC(t *testing.T) {
 			}
 			out := filepath.Join(t.TempDir(), "out")
 			// When the agent analyzes it
-			stdout, stderr, code := runAgent(t, "analyze", "-o", out, filepath.Join(dir, "notes.txt"))
+			stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, filepath.Join(dir, "notes.txt"))
 			if code != tt.wantCode {
 				t.Fatalf("analyze exit = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout, stderr)
 			}
