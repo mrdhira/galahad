@@ -49,8 +49,9 @@ func clean(raw string, limit int, size func(string) int) string {
 	return b.String()
 }
 
-// CleanPath makes an untrusted path safe to print: control and bidi characters
-// become literal \uXXXX text and the result is cut at MaxPath bytes.
+// CleanPath makes an untrusted path safe to print: invalid UTF-8 bytes become
+// literal \xNN text, control and bidi characters become literal \uXXXX text,
+// and the result is cut at MaxPath bytes.
 func CleanPath(raw string) string {
 	return clean(raw, MaxPath, func(s string) int { return len(s) })
 }
