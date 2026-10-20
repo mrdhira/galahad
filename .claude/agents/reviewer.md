@@ -14,7 +14,7 @@ Check:
 4. Limits on all untrusted input: size, depth, time, paths (zip-slip, bombs).
 5. Errors are handled, not swallowed. No panics on bad input.
 6. Findings carry evidence (file and line) where the task needs it.
-7. Unit tests cover the new behavior, including failure cases.
+7. Unit tests cover the new behavior, including failure cases, and follow "Tests" in `CLAUDE.md`: `package <name>_test`, the standard table-driven shape, success path first, then branches in code order.
 8. No real malware, secrets or personal data in fixtures.
 9. No unrequested features, abstractions or dead code.
 10. Commit and doc text has no AI or tool attribution.

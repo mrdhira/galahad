@@ -38,10 +38,39 @@ At most 3 fix loops per task. After that, escalate to opus with high effort, the
 `make gate` runs, in order: `gofmt -l`, `go vet`, `golangci-lint run`, cross-build for linux/darwin/windows x amd64/arm64, `govulncheck`, `gosec`, `go test -race -count=1 -cover ./...`, `go mod verify` plus the dependency allowlist, and the acceptance smoke tests. CI runs the same target.
 
 ## Tests
-- Unit tests: table-driven, next to the code, no heavy mocks.
-- Acceptance tests: `test/acceptance/`, black-box. They build the binary and run it with `os/exec`, then assert exit code, verdict, evidence and report files.
+- Unit tests sit next to the code and are black-box: `package <name>_test`, exported API only. White-box tests (`package <name>`) are not used for now.
+- Acceptance tests: `test/acceptance/` (`package acceptance_test`). They build the binary and run it with `os/exec`, then assert exit code, verdict, evidence and report files.
 - Acceptance scenarios trace to the problems P1-P10 in `docs/plan.md`. A green unit suite that does not answer those problems is not done.
-- No fuzzing, no e2e frameworks.
+- No fuzzing, no e2e frameworks, no heavy mocks.
+
+### Table-driven shape (all unit and acceptance tests)
+Every test function is table-driven with the same shape:
+
+```go
+func TestRun(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		args []string
+		// expectations, each prefixed with "want"
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{name: "version prints build info", args: []string{"version"}, wantCode: 0, wantStdout: "galahad"},
+		// ...
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// arrange, act, assert
+		})
+	}
+}
+```
+
+- Field order: `name`, then inputs, then `want*` fields. Cases use keyed fields.
+- The loop variable is `tt`; every case runs in `t.Run(tt.name, ...)`.
+- Case order: the full success path first. Then one case per branch, in the order the branches appear in the code from top to bottom, whether that branch succeeds or fails.
 
 ## Exit codes
 `0` clean, `10` suspicious, `20` malicious, `1` error, `2` usage error.
