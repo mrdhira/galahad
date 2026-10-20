@@ -6,12 +6,15 @@ It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archi
 
 > Status: early development. Do not rely on it yet.
 
-## Build
+## Development
 
 ```sh
-go build -o bin/galahad ./cmd/galahad
-bin/galahad version
+make tools   # install golangci-lint, gosec, govulncheck at pinned versions
+make build   # build bin/galahad
+make gate    # run the full quality gate
 ```
+
+Set `SKIP_VULN=1` for `make gate` only where vuln.go.dev is unreachable.
 
 ## License
 
