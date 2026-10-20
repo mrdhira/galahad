@@ -10,6 +10,7 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/ident"
 	"github.com/mrdhira/galahad/internal/analyze/static/eml"
+	"github.com/mrdhira/galahad/internal/protocol"
 )
 
 const lure = "From: \"Talent\" <recruiter@recruit-sinkhole.test>\n" +
@@ -51,6 +52,10 @@ func TestAnalyze(t *testing.T) {
 	for i := range many {
 		many[i] = "Content-Type: text/plain\n\nhi"
 	}
+	manyLinks := ""
+	for i := 0; i < 300; i++ {
+		manyLinks += fmt.Sprintf(`<a href="http://t.test/">s%d.example</a>`, i)
+	}
 	rtlo := "setup\u202egnp.js"
 	tests := []struct {
 		name string
@@ -79,7 +84,6 @@ func TestAnalyze(t *testing.T) {
 			name: "text with From and MIME-Version is sniffed without the extension",
 			file: "message", data: simple("Content-Type: text/plain\n", "see http://a.sinkhole.test/x\n"),
 			wantFindings: []string{"GAL-EML-001 message:1 From: a@a.test"},
-			wantIOCs:     []string{"url http://a.sinkhole.test/x 5", "domain a.sinkhole.test 5"},
 		},
 		{name: "headers over the limit are a parse error", file: "big.eml", data: "From: a@a.test\nX: " + strings.Repeat("a", eml.MaxHeaderSize) + "\n\nbody", wantSkips: []string{"parse_error"}},
 		{name: "no header block is a parse error", file: "bad.eml", data: "not a message\n\nbody", wantSkips: []string{"parse_error"}},
@@ -89,7 +93,42 @@ func TestAnalyze(t *testing.T) {
 			file: "a.eml", data: "From: a@A.test\nReply-To: b@a.TEST\n\nhello\n",
 			wantFindings: []string{"GAL-EML-001 a.eml:1 From: a@A.test (domain: a.test); Reply-To domain: a.test"},
 		},
-		{name: "unparsable sender is ignored", file: "a.eml", data: "From: <<>\n\nhello\n"},
+		{name: "unparsable sender with no address is ignored", file: "a.eml", data: "From: <<>\n\nhello\n"},
+		{
+			name: "sender list: first address; any differing reply-to is flagged",
+			file: "a.eml", data: "From: a@a.test, b@b.test\nReply-To: c@a.test, d@d.test\n\nhello\n",
+			wantFindings: []string{"GAL-EML-001 a.eml:1 From: a@a.test (domain: a.test); Reply-To domain: a.test", "GAL-EML-002 a.eml:2 d@d.test"},
+		},
+		{
+			name: "unknown charset in the display name still gives the addresses",
+			file: "a.eml", data: "From: =?koi8-r?B?8NLJ18XU?= <a@a.test>\nReply-To: =?koi8-r?B?8NLJ18XU?= <r@r.test>\n\nhello\n",
+			wantFindings: []string{"GAL-EML-001 a.eml:1 From: a@a.test", "GAL-EML-002 a.eml:2 r@r.test"},
+		},
+		{
+			name: "malformed sender falls back to the addresses in the text",
+			file: "a.eml", data: "From: (oops <a@a.test>\nReply-To: (oops r@r.test\n\nhello\n",
+			wantFindings: []string{"GAL-EML-001 a.eml:1 From: a@a.test", "GAL-EML-002 a.eml:2 r@r.test"},
+		},
+		{
+			name: "a blank line with CRLF after LF ends the headers like net/mail",
+			file: "a.eml", data: "From: a@a.test\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"B\"\n\r\n--B\nContent-Disposition: attachment; filename=x.bin\n\nbody\n--B--\n",
+			wantFindings: []string{"GAL-EML-001 a.eml:1 "},
+			wantChildren: []string{"x.bin"},
+		},
+		{
+			name:         "duplicate parameters: still an attachment, without a name",
+			file:         "a.eml",
+			data:         multi("Content-Type: application/zip; name=a; name=b\nContent-Disposition: attachment; x=1; x=2\n\nPK"),
+			wantFindings: []string{"GAL-EML-001 a.eml:1 "},
+			wantChildren: []string{"attachment-2"},
+		},
+		{
+			name:         "multipart with a duplicate boundary parameter is kept whole as a child",
+			file:         "a.eml",
+			data:         "From: a@a.test\nContent-Type: multipart/mixed; boundary=B; boundary=C\n\n--B\nContent-Type: text/plain\n\nhi\n--B--\n",
+			wantFindings: []string{"GAL-EML-001 a.eml:1 "},
+			wantChildren: []string{"attachment-1"},
+		},
 		{name: "multipart nested too deep", file: "a.eml", data: deep, wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"depth"}},
 		{name: "too many parts", file: "a.eml", data: multi(many...), wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"budget"}},
 		{
@@ -106,8 +145,7 @@ func TestAnalyze(t *testing.T) {
 			data: multi("Content-Type: text/plain\nContent-Transfer-Encoding: quoted-printable\n\nsee http://q.sinkhole.test/=\nx=20ok",
 				"Content-Type: text/plain; name=\"..\\dir/run.sh\"\n\necho"),
 			wantFindings: []string{"GAL-EML-001 a.eml:1 "},
-			wantChildren: []string{"run.sh"},
-			wantIOCs:     []string{"url http://q.sinkhole.test/x 9", "domain q.sinkhole.test 9"},
+			wantChildren: []string{"body-2.txt", "run.sh"},
 		},
 		{
 			name: "nested message and unnamed parts get names; duplicates are made unique",
@@ -128,10 +166,17 @@ func TestAnalyze(t *testing.T) {
 			wantIOCs:     []string{"url https://www.a.test/ 5", "domain www.a.test 5", "url https://x.a.test/ 5", "domain x.a.test 5", "url https://a.test/r.pdf 5", "domain a.test 5"},
 		},
 		{
+			name: "link findings are capped per file",
+			file: "a.eml", data: simple("Content-Type: text/html\n", manyLinks),
+			wantFindings: append([]string{"GAL-EML-001 a.eml:1 "}, slices.Repeat([]string{"GAL-EML-003 a.eml:5 "}, protocol.MaxFindingsPerRulePerFile)...),
+			wantIOCs:     []string{"url http://t.test/ 5", "domain t.test 5"},
+		},
+		{
 			name: "html in base64 maps links to the start of the part; nested anchors; unclosed anchor; first domain only",
 			file: "a.eml",
 			data: simple("Content-Type: text/html\nContent-Transfer-Encoding: base64\n",
 				"PGEgaHJlZj0iaHR0cDovL3gudGVzdC8iPm9uZS5leGFtcGxlIHR3by5leGFtcGxlPGEgaHJlZj0iaHR0cDovL3kudGVzdC8iPnRocmVlLmV4YW1wbGU="),
+			wantChildren: []string{"body-1.html"},
 			wantFindings: []string{"GAL-EML-001 a.eml:1 ", "GAL-EML-003 a.eml:6 one.example goes to x.test", "GAL-EML-003 a.eml:6 three.example goes to y.test"},
 			wantIOCs:     []string{"url http://x.test/ 6", "domain x.test 6", "url http://y.test/ 6", "domain y.test 6"},
 		},

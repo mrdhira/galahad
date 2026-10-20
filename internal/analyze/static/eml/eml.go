@@ -69,7 +69,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if end < 0 {
 		return parseError, nil
 	}
-	msg, err := mail.ReadMessage(bytes.NewReader(f.Data))
+	msg, err := mail.ReadMessage(bytes.NewReader(f.Data[:end]))
 	if err != nil {
 		return parseError, nil
 	}
@@ -91,17 +91,21 @@ func matches(f analyze.File) bool {
 	return fromRe.Match(head) && mimeRe.Match(head)
 }
 
-// headerEnd returns the offset of the first body byte, or -1 if the header
-// block does not end within MaxHeaderSize.
+// headerEnd returns the offset of the first body byte: the byte after the
+// first empty line, as net/mail sees it. It is -1 if that line is not reached
+// within MaxHeaderSize.
 func headerEnd(data []byte) int {
-	head := data[:min(len(data), MaxHeaderSize+4)]
-	best := -1
-	for _, sep := range []string{"\r\n\r\n", "\n\n"} {
-		if i := bytes.Index(head, []byte(sep)); i >= 0 && i <= MaxHeaderSize && (best < 0 || i+len(sep) < best) {
-			best = i + len(sep)
+	for pos := 0; pos < len(data) && pos <= MaxHeaderSize; {
+		line, next := data[pos:], len(data)
+		if nl := bytes.IndexByte(line, '\n'); nl >= 0 {
+			line, next = line[:nl], pos+nl+1
 		}
+		if len(bytes.TrimSuffix(line, []byte{'\r'})) == 0 {
+			return next
+		}
+		pos = next
 	}
-	return best
+	return -1
 }
 
 type walker struct {
@@ -115,6 +119,7 @@ type walker struct {
 	names  map[string]bool
 	iocs   map[string]bool
 	stop   bool
+	links  int // GAL-EML-003 findings so far
 }
 
 func (w *walker) skip(reason string) {
@@ -138,36 +143,55 @@ func (w *walker) evidence(off int, snippet string) protocol.Evidence {
 
 // headers reports the sender, and a Reply-To domain that differs from it.
 func (w *walker) headers(h mail.Header) {
-	from, ok := firstAddress(h, "From")
-	if !ok {
+	froms := addresses(h, "From")
+	if len(froms) == 0 {
 		return
 	}
+	from := froms[0]
 	fromDom := domainOf(from)
 	snippet := fmt.Sprintf("From: %s (domain: %s)", from, fromDom)
-	replyTo, hasReply := firstAddress(h, "Reply-To")
-	if hasReply {
-		snippet += fmt.Sprintf("; Reply-To domain: %s", domainOf(replyTo))
+	replyTos := addresses(h, "Reply-To")
+	if len(replyTos) > 0 {
+		snippet += fmt.Sprintf("; Reply-To domain: %s", domainOf(replyTos[0]))
 	}
-	if ret, ok := firstAddress(h, "Return-Path"); ok {
-		snippet += fmt.Sprintf("; Return-Path domain: %s", domainOf(ret))
+	if ret := addresses(h, "Return-Path"); len(ret) > 0 {
+		snippet += fmt.Sprintf("; Return-Path domain: %s", domainOf(ret[0]))
 	}
 	w.out.Findings = append(w.out.Findings, ruleSender.Finding(w.evidence(w.headerOffset("From"), snippet)))
-	if hasReply && domainOf(replyTo) != fromDom {
-		w.out.Findings = append(w.out.Findings, ruleReplyTo.Finding(
-			w.evidence(w.headerOffset("Reply-To"), fmt.Sprintf("Reply-To: %s (domain: %s)", replyTo, domainOf(replyTo)))))
+	for _, r := range replyTos {
+		if domainOf(r) != fromDom {
+			w.out.Findings = append(w.out.Findings, ruleReplyTo.Finding(
+				w.evidence(w.headerOffset("Reply-To"), fmt.Sprintf("Reply-To: %s (domain: %s)", r, domainOf(r)))))
+			break
+		}
 	}
 }
 
-func firstAddress(h mail.Header, name string) (string, bool) {
+// addrParser accepts every charset without converting: only the addresses matter.
+var addrParser = &mail.AddressParser{WordDecoder: &mime.WordDecoder{
+	CharsetReader: func(_ string, r io.Reader) (io.Reader, error) { return r, nil },
+}}
+
+// addresses returns the addresses of a header. If the value does not parse, it
+// returns the email addresses found in the raw text.
+func addresses(h mail.Header, name string) []string {
 	raw := h.Get(name)
 	if raw == "" {
-		return "", false
+		return nil
 	}
-	a, err := mail.ParseAddress(raw)
-	if err != nil {
-		return "", false
+	var out []string
+	if list, err := addrParser.ParseList(raw); err == nil {
+		for _, a := range list {
+			out = append(out, a.Address)
+		}
+		return out
 	}
-	return a.Address, true
+	for _, m := range ioc.Extract([]byte(raw)) {
+		if m.Type == ioc.TypeEmail {
+			out = append(out, m.Value)
+		}
+	}
+	return out
 }
 
 func domainOf(addr string) string {
@@ -187,7 +211,7 @@ func (w *walker) entity(get func(string) string, body io.Reader, off, depth int)
 		w.stop = true
 		return
 	}
-	ctype, params, _ := mime.ParseMediaType(get("Content-Type"))
+	ctype, params := mediaType(get("Content-Type"))
 	if ctype == "" {
 		ctype = "text/plain"
 	}
@@ -222,18 +246,36 @@ func (w *walker) entity(get func(string) string, body io.Reader, off, depth int)
 	}
 	w.budget -= len(data)
 
+	identity := enc != "base64" && enc != "quoted-printable"
 	name := attachmentName(get, params)
-	disp, _, _ := mime.ParseMediaType(get("Content-Disposition"))
+	disp, _ := mediaType(get("Content-Disposition"))
 	switch {
 	case ctype == "message/rfc822":
 		w.child(name, "message", ".eml", data)
 	case disp == "attachment" || name != "" || !strings.HasPrefix(ctype, "text/"):
 		w.child(name, "attachment", "", data)
+	case !identity:
+		// The engine scans decoded bodies as children, so every analyzer sees them.
+		ext := ".txt"
+		if ctype == "text/html" {
+			ext = ".html"
+			w.html(data, off, false)
+		}
+		w.child("", "body", ext, data)
 	case ctype == "text/html":
-		w.html(data, off, enc != "base64" && enc != "quoted-printable")
-	default:
-		w.text(data, off, enc != "base64" && enc != "quoted-printable")
+		w.html(data, off, true)
 	}
+}
+
+// mediaType parses a Content-Type or Content-Disposition value. If the
+// parameters are invalid, it still returns the type, with no parameters.
+func mediaType(v string) (string, map[string]string) {
+	t, p, err := mime.ParseMediaType(v)
+	if t == "" && err != nil {
+		t, _, _ = strings.Cut(v, ";")
+		t = strings.ToLower(strings.TrimSpace(t))
+	}
+	return t, p
 }
 
 // locate finds the file offset of a part body that was read from the file.
@@ -260,7 +302,7 @@ func (w *walker) child(name, fallback, ext string, data []byte) {
 
 // attachmentName returns the raw RFC 2047 decoded file name of a part, cut to its last path element.
 func attachmentName(get func(string) string, ctypeParams map[string]string) string {
-	_, dp, _ := mime.ParseMediaType(get("Content-Disposition"))
+	_, dp := mediaType(get("Content-Disposition"))
 	name := dp["filename"]
 	if name == "" {
 		name = ctypeParams["name"]
@@ -312,13 +354,6 @@ func (w *walker) addIOC(typ, value string, off int) {
 	w.out.IOCs = append(w.out.IOCs, protocol.IOC{Type: typ, Value: value, Path: w.f.Path, Line: analyze.EvidenceAt(w.f, off).Line})
 }
 
-// text lists the indicators in a plain text body.
-func (w *walker) text(data []byte, base int, identity bool) {
-	for _, m := range ioc.Extract(data) {
-		w.addIOC(m.Type, m.Value, offsetOf(base, m.Offset, identity))
-	}
-}
-
 // html reads the anchors of an HTML body and flags links whose text names another domain.
 func (w *walker) html(data []byte, base int, identity bool) {
 	z := html.NewTokenizer(bytes.NewReader(data))
@@ -334,6 +369,9 @@ func (w *walker) html(data []byte, base int, identity bool) {
 	}
 	for {
 		if n++; n%checkEvery == 0 && w.ctx.Err() != nil {
+			return
+		}
+		if w.links >= protocol.MaxFindingsPerRulePerFile && len(w.out.IOCs) >= protocol.MaxIOCs {
 			return
 		}
 		tt := z.Next()
@@ -377,8 +415,13 @@ func (w *walker) link(href, text string, off int) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return
 	}
-	for _, m := range ioc.Extract([]byte(href)) {
-		w.addIOC(m.Type, m.Value, off)
+	if len(w.out.IOCs) < protocol.MaxIOCs {
+		for _, m := range ioc.Extract([]byte(href)) {
+			w.addIOC(m.Type, m.Value, off)
+		}
+	}
+	if w.links >= protocol.MaxFindingsPerRulePerFile {
+		return
 	}
 	target := strings.ToLower(u.Hostname())
 	for _, m := range textDomainRe.FindAllStringSubmatch(text, -1) {
@@ -386,6 +429,7 @@ func (w *walker) link(href, text string, off int) {
 		if fileExts[shown[strings.LastIndexByte(shown, '.')+1:]] || sameSite(shown, target) {
 			continue
 		}
+		w.links++
 		w.out.Findings = append(w.out.Findings, ruleLink.Finding(
 			w.evidence(off, fmt.Sprintf("link text %s goes to %s", shown, target))))
 		return

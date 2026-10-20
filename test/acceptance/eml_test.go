@@ -12,7 +12,8 @@ func TestAgentAnalyzeEML(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		fixture string
+		fixture string // directory in testdata/corpus; empty means content is used
+		content string // email written to x.eml at test time
 		// expectations
 		wantMinCode  int      // exit code must be at least this; 0 means exactly 0
 		wantFindings []string // "RULE path:line" that must be present
@@ -27,6 +28,13 @@ func TestAgentAnalyzeEML(t *testing.T) {
 			wantFiles:    []string{"lure.eml", "lure.eml!/setup.js"},
 		},
 		{
+			name:         "base64 html body is scanned as a child",
+			content:      "From: a@a.example.test\nMIME-Version: 1.0\nContent-Type: text/html\nContent-Transfer-Encoding: base64\n\nPGEgaHJlZj0iaHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTIzL3Rva2VuIj5ub3Rlcy5leGFtcGxlLnRlc3Q8L2E+Cg==\n",
+			wantMinCode:  10,
+			wantFindings: []string{"GAL-IOC-002 x.eml!/body-1.html:1"},
+			wantFiles:    []string{"x.eml", "x.eml!/body-1.html"},
+		},
+		{
 			name:      "benign newsletter has no findings and is fully analyzed",
 			fixture:   "benign-eml-newsletter",
 			wantFiles: []string{"newsletter.eml"},
@@ -36,13 +44,22 @@ func TestAgentAnalyzeEML(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Given a committed email fixture
-			root, err := moduleRoot()
-			if err != nil {
-				t.Fatal(err)
+			target := ""
+			if tt.fixture != "" {
+				root, err := moduleRoot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				target = filepath.Join(root, "testdata", "corpus", tt.fixture)
+			} else {
+				target = filepath.Join(t.TempDir(), "x.eml")
+				if err := os.WriteFile(target, []byte(tt.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			out := filepath.Join(t.TempDir(), "out")
 			// When the agent analyzes it
-			stdout, stderr, code := runAgent(t, "analyze", "-o", out, filepath.Join(root, "testdata", "corpus", tt.fixture))
+			stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, target)
 			// Then the exit code, findings and files match
 			if (tt.wantMinCode == 0 && code != 0) || code < tt.wantMinCode || code > 20 {
 				t.Fatalf("exit = %d, want >= %d\nstdout: %s\nstderr: %s", code, tt.wantMinCode, stdout, stderr)
