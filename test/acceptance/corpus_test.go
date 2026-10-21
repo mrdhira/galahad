@@ -330,6 +330,17 @@ func TestCorpus(t *testing.T) {
 					t.Errorf("summary.md lacks %q:\n%s", want, summary)
 				}
 			}
+			// And the target line matches its kind: a file shows its SHA-256, a folder its file count
+			switch rep.Target.Kind {
+			case "file":
+				if rep.Target.SHA256 == "" || !strings.Contains(summary, "- SHA-256: "+rep.Target.SHA256) {
+					t.Errorf("file target sha256 %q is not in summary.md:\n%s", rep.Target.SHA256, summary)
+				}
+			default:
+				if !strings.Contains(summary, "- Kind: folder, ") || strings.Contains(summary, "SHA-256") {
+					t.Errorf("summary.md of a folder target is wrong:\n%s", summary)
+				}
+			}
 			for _, name := range []string{"summary.md", "report.html"} {
 				if m := liveLink.FindString(readFile(t, filepath.Join(out, name))); m != "" {
 					t.Errorf("%s has a live link %q", name, m)

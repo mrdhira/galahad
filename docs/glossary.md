@@ -64,7 +64,7 @@ Security and project terms used in Galahad's code, reports and docs, in plain la
 : The share of files Galahad actually analyzed. Files that were too large, encrypted or unsupported lower coverage, and the report lists them.
 
 **Defang**
-: Rewriting a dangerous link so it cannot be clicked or auto-opened, while staying readable. `https://evil.test/x` becomes `hxxps://evil[.]test/x`, and `a@evil.test` becomes `a[@]evil[.]test`. Galahad defangs every link in `summary.md`, `report.html` and terminal output. `report.json` keeps the raw value for tools.
+: Rewriting a dangerous link so it cannot be clicked or auto-opened, while staying readable. `https://evil.test/x` becomes `hxxps://evil[.]test/x`, and `a@evil.test` becomes `a[@]evil[.]test`. `ftp://` becomes `fxp://`, `ftps://` becomes `fxps://` and `file:///C:/x.exe` becomes `fxle:///C:/x[.]exe`. A bare domain or IP address that is in the report's IOC list is also defanged where it appears in free text (snippets, titles and reasons), for example `hostname: 'collect.sinkhole.test'` becomes `hostname: 'collect[.]sinkhole[.]test'`. Only exact matches of IOC hosts change; file names such as `setup.js` and evidence paths are never touched. Galahad defangs every link in `summary.md`, `report.html` and terminal output. `report.json` keeps the raw value for tools.
 
 **Dynamic analysis (detonation)**
 : Actually running a sample inside a sealed VM and watching what it does. Planned for M4 and later.

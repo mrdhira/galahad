@@ -35,7 +35,7 @@ func TestDemo(t *testing.T) {
 			wantCode:     20,
 			wantStdout:   []string{"Verdict: MALICIOUS", "report.html"},
 			wantEvidence: []string{"GAL-AUTOEXEC-010 .vscode/tasks.json:7", "GAL-EXFIL-001 scripts/setup.js:3"},
-			wantSummary:  []string{".vscode/tasks.json:7", "scripts/setup.js:3"},
+			wantSummary:  []string{".vscode/tasks.json:7", "scripts/setup.js:3", "- Kind: folder, "},
 			wantFiles:    []string{"summary.md", "report.html", "report.json"},
 			wantVerdict:  "malicious",
 		},
