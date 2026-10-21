@@ -409,8 +409,9 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 // path that the code builds, and the path is one that signals.SecretRefs
 // counts: .ssh and .gnupg, .aws followed by credentials, .kube by config,
 // .docker by config.json, and .env on a line that reads, and not for dotenv.
-// A path that only defines where a file lives (an arrow function or a function
-// expression) is not a read.
+// A path that is the return value of an arrow function or a function ("() =>
+// process.env.X || join(", "return path.join(") only defines where a file
+// lives and is not a read.
 func (s *scan) builtPath(data []byte, off int, name string) bool {
 	if !s.spend(pathLook) {
 		return false
@@ -420,7 +421,7 @@ func (s *scan) builtPath(data []byte, off int, name string) bool {
 	}
 	if !pathlibOperand(data, off) {
 		call := enclosingPathCall(data, off)
-		if call < 0 || bytes.Contains(lineBefore(data, call), []byte("=>")) || bytes.Contains(lineBefore(data, call), []byte("function")) {
+		if call < 0 || returned(data, call) {
 			return false
 		}
 	}
@@ -440,9 +441,10 @@ func pathlibOperand(data []byte, off int) bool {
 	return bytes.HasSuffix(bytes.TrimRight(data[max(0, off-pathLook):off], " \t\r\n"), []byte("/"))
 }
 
-// enclosingPathCall returns the offset of the "(" of a join, joinpath or
-// resolve call that is still open at off, looking back across lines, or -1.
-// It counts parentheses and stops at a semicolon.
+// enclosingPathCall returns the offset where the callee of a join, joinpath or
+// resolve call that is still open at off starts (path.join starts at path),
+// looking back across lines, or -1. It counts parentheses and stops at a
+// semicolon.
 func enclosingPathCall(data []byte, off int) int {
 	depth := 0
 	for i := off - 1; i >= max(0, off-pathLook); i-- {
@@ -464,7 +466,10 @@ func enclosingPathCall(data []byte, off int) int {
 			}
 			switch string(data[start:end]) {
 			case "join", "joinpath", "resolve":
-				return i
+				for start > 0 && (isWord(data[start-1]) || data[start-1] == '.') {
+					start--
+				}
+				return start
 			}
 		case ';':
 			if depth == 0 {
@@ -475,10 +480,32 @@ func enclosingPathCall(data []byte, off int) int {
 	return -1
 }
 
-// lineBefore returns the text of the line of off that comes before off.
-func lineBefore(data []byte, off int) []byte {
-	lo := max(0, off-pathLook)
-	return data[lo+bytes.LastIndexByte(data[lo:off], '\n')+1 : off]
+// returnedRE matches the text between "=>" or "return" and a callee when the
+// callee is the value that the function returns: nothing, or a chain of names
+// joined by || or ??.
+var returnedRE = regexp.MustCompile(`^\s*\(?\s*(?:[\w$.]+\s*(?:\|\||\?\?)\s*)*[\w$.]*$`)
+
+// returned reports whether the callee that starts at callee is the return
+// value of an arrow function or a function.
+func returned(data []byte, callee int) bool {
+	lo := max(0, callee-pathLook)
+	before := data[lo:callee]
+	end := -1
+	if i := bytes.LastIndex(before, []byte("=>")); i >= 0 {
+		end = i + 2
+	}
+	for from := len(before); ; {
+		i := bytes.LastIndex(before[:from], []byte("return"))
+		if i < 0 {
+			break
+		}
+		if wordStart(before, i) && (i+6 == len(before) || !isWord(before[i+6])) {
+			end = max(end, i+6)
+			break
+		}
+		from = i
+	}
+	return end >= 0 && returnedRE.Match(before[end:])
 }
 
 // followedBy reports whether the quoted segment seg follows after a comma or

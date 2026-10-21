@@ -242,42 +242,48 @@ func (a *aliasSet) scanJS(d *doc, base, minEnd int, text string) {
 }
 
 // scanPy finds Python aliases in text. The searches for __import__,
-// import_module and plain imports are capped per file (maxPyImports matches),
-// and a match counts only in a statement of its own, after an equals sign.
+// import_module and plain imports count only the modules that reach the
+// network, at most maxPyImports of them per file; past that the rest of the
+// search is left out and s.limited says so. A match counts only in a statement
+// of its own.
 func (a *aliasSet) scanPy(s *scan, text string) {
+	over := func() bool {
+		if s.pyImports++; s.pyImports > maxPyImports {
+			s.limited = true
+			return true
+		}
+		return false
+	}
 	for _, re := range pyDynREs {
-		for _, m := range re.FindAllStringSubmatchIndex(text, maxPyImports) {
-			if a.full() {
-				break
-			}
-			if s.pyImports++; s.pyImports > maxPyImports {
-				s.limited = true
-				return
-			}
+		eachSubmatch(re, text, func(m []int) bool {
 			if _, ok := pyNetNames[text[m[2]:m[3]]]; !ok {
-				continue
+				return true
+			}
+			if a.full() || over() {
+				return false
 			}
 			if t := strings.TrimRight(tailBefore(text, m[0]), " \t"); !strings.HasSuffix(t, "=") && !strings.HasSuffix(t, "= await") {
-				continue
+				return true
 			}
 			if g := tailAssignRE.FindStringSubmatch(tailBefore(text, m[0])); g != nil {
 				a.add(&a.ns, g[1])
 			}
-		}
+			return true
+		})
 	}
-	for _, m := range pyImportRE.FindAllStringSubmatchIndex(text, maxPyImports) {
-		if s.pyImports++; s.pyImports > maxPyImports {
-			s.limited = true
-			return
-		}
+	eachSubmatch(pyImportRE, text, func(m []int) bool {
 		mod := text[m[2]:m[3]]
-		if _, ok := pyNetNames[mod]; !ok || len(a.seeds) >= len(pyNetNames) || !statementStart(text, m[0]) {
-			continue
+		if _, ok := pyNetNames[mod]; !ok || !statementStart(text, m[0]) {
+			return true
+		}
+		if len(a.seeds) >= len(pyNetNames) || over() {
+			return false
 		}
 		if name, _, _ := strings.Cut(mod, "."); !slices.Contains(a.seeds, name) {
 			a.seeds = append(a.seeds, name)
 		}
-	}
+		return true
+	})
 	for _, m := range pyImportAsRE.FindAllStringSubmatch(text, -1) {
 		if _, ok := pyNetNames[m[1]]; ok {
 			a.add(&a.ns, m[2])
@@ -322,6 +328,27 @@ func splitAs(item, sep string) (orig, local string) {
 		return strings.TrimSpace(item[:i]), strings.TrimSpace(item[i+len(sep):])
 	}
 	return item, item
+}
+
+// eachSubmatch calls fn with the indices of each match of re in text until fn
+// returns false. It finds one match at a time, so it needs no memory for the
+// matches and fn can stop early.
+func eachSubmatch(re *regexp.Regexp, text string, fn func(m []int) bool) {
+	for pos := 0; pos < len(text); {
+		m := re.FindStringSubmatchIndex(text[pos:])
+		if m == nil {
+			return
+		}
+		for i := range m {
+			if m[i] >= 0 {
+				m[i] += pos
+			}
+		}
+		if !fn(m) {
+			return
+		}
+		pos = max(m[1], m[0]+1)
+	}
 }
 
 // statementStart reports whether only white space separates off from the start

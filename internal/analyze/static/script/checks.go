@@ -19,7 +19,7 @@ import (
 // .then(eval).
 func (s *scan) sinks(d *doc, f *found) {
 	for _, off := range f.thenEval {
-		if net := s.fetchedBefore(d, off, false); net >= 0 {
+		if net := s.fetchedBefore(d, off, ""); net >= 0 {
 			s.emit(ruleDownload, s.sinkEvidence(d, off, net))
 		}
 	}
@@ -47,7 +47,7 @@ func (s *scan) sinks(d *doc, f *found) {
 			decoded, download, via = s.assigned(d, m[0], string(id))
 		}
 		if !decoded && !download && !timer && dataArgRE.Match(arg) {
-			if via = s.fetchedBefore(d, m[0], true); via >= 0 {
+			if via = s.fetchedBefore(d, m[0], rootName(arg)); via >= 0 {
 				download = true
 			}
 		}
@@ -116,11 +116,26 @@ var dataArgRE = regexp.MustCompile(`^(?:await\s+)?\(?[A-Za-z_$][\w$]*(?:\s*\.\s*
 // callbackWords show that code runs when a network call has finished.
 var callbackWords = words(".then", ".on(", "await ")
 
+// rootName returns the name that a data argument starts with: r for
+// "await r.text()", body for "body".
+func rootName(arg []byte) string {
+	if rest, ok := bytes.CutPrefix(arg, []byte("await")); ok && len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n') {
+		arg = rest
+	}
+	return string(identRE.Find(bytes.TrimLeft(arg, "( \t\r\n")))
+}
+
+// loopVarRE ends the text before a name that a for loop declares.
+var loopVarRE = regexp.MustCompile(`\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+$`)
+
 // fetchedBefore looks at the windowLines lines (at most windowBytes) before
-// off for a network call and returns the offset of the last one, or -1. With
-// callback set, the window must also have a callback or an await, which carry
-// the response to off.
-func (s *scan) fetchedBefore(d *doc, off int, callback bool) int {
+// off for a network call and returns the offset of the last one, or -1. With a
+// root name, the data must flow from the call to off: the name must appear
+// from the line of the network call on, and not only as the variable that a
+// for loop declares. Without a name (.then(eval)) the call alone counts. A
+// name also asks for a callback or an await in the window, which carry the
+// response to off.
+func (s *scan) fetchedBefore(d *doc, off int, root string) int {
 	n := min(off, windowBytes)
 	if s.argBytes += n; s.argBytes > argBudget {
 		s.limited = true
@@ -136,13 +151,31 @@ func (s *scan) fetchedBefore(d *doc, off int, callback bool) int {
 		}
 	}
 	win := d.data[lo:off]
-	if callback && !anyIn(win, callbackWords) {
+	if root != "" && !anyIn(win, callbackWords) {
 		return -1
 	}
-	if at := s.networkAt(d, win); at >= 0 {
-		return lo + at
+	at := s.networkAt(d, win)
+	if at < 0 || root != "" && !flows(win[bytes.LastIndexByte(win[:at], '\n')+1:], root) {
+		return -1
 	}
-	return -1
+	return lo + at
+}
+
+// flows reports whether text uses name as a whole word anywhere but in the
+// declaration of a for loop variable.
+func flows(text []byte, name string) bool {
+	for from := 0; ; {
+		i := bytes.Index(text[from:], []byte(name))
+		if i < 0 {
+			return false
+		}
+		i += from
+		from = i + 1
+		end := i + len(name)
+		if wordStart(text, i) && (end == len(text) || !isWord(text[end])) && !loopVarRE.Match(text[max(0, i-40):i]) {
+			return true
+		}
+	}
 }
 
 // maxString is the longest string literal that argAt skips over.
