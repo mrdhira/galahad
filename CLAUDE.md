@@ -36,7 +36,7 @@ PLAN -> CODE -> QUALITY GATE -> CODE REVIEW -> TEST (QA) -> DONE
 At most 3 fix loops per task. After that, escalate to opus with high effort, then to the repository owner.
 
 ## Quality gate
-`make gate` runs, in order: `gofmt -l`, `go vet`, `golangci-lint run`, cross-build for linux/darwin/windows x amd64/arm64, `govulncheck`, `gosec`, `go test -race -count=1 -cover ./...`, `go mod verify` plus the dependency allowlist, and the acceptance smoke tests. CI runs the same target.
+`make gate` runs, in order: `gofmt -l`, `go vet`, `golangci-lint run`, cross-build for linux/darwin/windows x amd64/arm64, `govulncheck`, `gosec`, `go test -race -count=1 -cover ./...`, `go mod verify` plus the dependency allowlist, and the acceptance smoke tests. CI runs the same target. On a pull request that only changes docs (Markdown under `docs/` and `.claude/`, skill `LICENSE` files, top-level Markdown, `LICENSE`, `.gitignore` or the Dependabot config), the `gate` and `test` jobs skip their steps but still report, so the required checks pass quickly. If the change detection fails, everything runs. Pushes to `main` always run in full.
 
 ## Tests
 - Unit tests sit next to the code and are black-box: `package <name>_test`, exported API only. White-box tests (`package <name>`) are not used for now.
