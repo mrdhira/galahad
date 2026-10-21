@@ -44,7 +44,10 @@ var (
 	topPypi = load(pypiSnapshot)
 )
 
-const maxJSONDepth = 32
+const (
+	maxJSONDepth = 32
+	minSquatLen  = 5 // shortest popular name a one-edit match is made against
+)
 
 var (
 	npmHosts  = map[string]bool{"registry.npmjs.org": true}
@@ -122,7 +125,7 @@ func packageJSON(_ context.Context, f analyze.File) ([]protocol.Finding, error) 
 		if alias, ok := strings.CutPrefix(lower, "npm:"); ok {
 			name = aliasTarget(alias)
 		}
-		if topNpm.squat(npmName(name)) && !full(found, ruleTypo) {
+		if npmSquat(name) && !full(found, ruleTypo) {
 			found = append(found, ruleTypo.Finding(analyze.EvidenceAt(f, m.off)))
 		}
 	}
@@ -166,6 +169,9 @@ func yarnLock(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
 		}
 		val, _, _ := strings.Cut(strings.Trim(strings.TrimSpace(rest), `"`), "#")
 		if foreignHost(val, yarnHosts) {
+			if full(found, ruleLock) {
+				return
+			}
 			found = append(found, ruleLock.Finding(where{f.Path, n, line}.evidence()))
 		}
 	})
@@ -368,15 +374,29 @@ func foreignHost(raw string, allowed map[string]bool) bool {
 	return err != nil || !allowed[strings.ToLower(u.Hostname())]
 }
 
-// npmName returns the name to compare: the bare name of a scoped package.
-func npmName(name string) string {
+// npmScopes are well-known scopes. Every package in one of them is treated as
+// legitimate, and a scope one edit away from one is a typosquat of it.
+var npmScopes = []string{
+	"@angular", "@apollo", "@aws-cdk", "@aws-sdk", "@azure", "@babel", "@emotion", "@eslint",
+	"@eslint-community", "@fortawesome", "@google-cloud", "@humanwhocodes", "@jest", "@jridgewell",
+	"@mui", "@nestjs", "@npmcli", "@octokit", "@opentelemetry", "@playwright", "@reduxjs", "@rollup",
+	"@sentry", "@sigstore", "@smithy", "@storybook", "@swc", "@tanstack", "@testing-library",
+	"@tsconfig", "@types", "@typescript-eslint", "@vitejs", "@vue",
+}
+
+// npmSquat reports whether an npm package name looks like a popular package.
+// A scoped name is compared by its scope: the bare name of a scoped package
+// belongs to its owner, so it says nothing about the popular unscoped packages.
+func npmSquat(name string) bool {
 	name = strings.ToLower(name)
-	if strings.HasPrefix(name, "@") {
-		if _, bare, ok := strings.Cut(name, "/"); ok {
-			return bare
-		}
+	scope, _, scoped := strings.Cut(name, "/")
+	if !scoped || !strings.HasPrefix(name, "@") {
+		return topNpm.squat(name)
 	}
-	return name
+	if slices.Contains(npmScopes, scope) {
+		return false
+	}
+	return slices.ContainsFunc(npmScopes, func(s string) bool { return len(s) > minSquatLen && oneEdit(scope, s) })
 }
 
 // pypiName applies the PEP 503 normalization.
@@ -388,7 +408,7 @@ func pypiName(name string) string {
 type popular struct {
 	names    map[string]bool
 	stripped map[string]bool  // names without - _ .
-	long     map[int][]string // names of at least 5 characters, by length
+	long     map[int][]string // names of at least minSquatLen characters, by length
 }
 
 func load(snapshot string) popular {
@@ -400,7 +420,7 @@ func load(snapshot string) popular {
 		}
 		p.names[line] = true
 		p.stripped[strip(line)] = true
-		if len(line) >= 5 {
+		if len(line) >= minSquatLen {
 			p.long[len(line)] = append(p.long[len(line)], line)
 		}
 	}
@@ -408,14 +428,18 @@ func load(snapshot string) popular {
 }
 
 // squat reports whether name is not popular itself but looks like a popular
-// name: one edit away from a name of 5 or more characters, or the same once
-// separators are dropped.
+// name: one edit away from a name of minSquatLen or more characters, or the same
+// once separators are dropped. A name shorter than minSquatLen+1 is only compared
+// for separators, because short real names collide by chance (socks and sockjs).
 func (p popular) squat(name string) bool {
 	if p.names[name] {
 		return false
 	}
 	if p.stripped[strip(name)] {
 		return true
+	}
+	if len(name) <= minSquatLen {
+		return false
 	}
 	// one edit changes the length by at most one
 	for l := len(name) - 1; l <= len(name)+1; l++ {

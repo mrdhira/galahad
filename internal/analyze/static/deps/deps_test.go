@@ -143,18 +143,21 @@ a = { git = "https://git.sinkhole.test/a.git" }
 func TestAnalyze(t *testing.T) {
 	filler := strings.Repeat("x", 3<<19) // 1.5 MiB, above MaxConfigSize
 	deep := strings.Repeat(`{"a":`, 40) + "1" + strings.Repeat("}", 40)
-	var manyGit, manyLock strings.Builder
-	var wantManyGit, wantManyLock []string
+	var manyGit, manyLock, manyYarn strings.Builder
+	var wantManyGit, wantManyLock, wantManyYarn []string
 	for i := range 25 {
 		fmt.Fprintf(&manyGit, "\"g%d\": \"git+https://git.sinkhole.test/g%d.git\",\n", i, i)
 		fmt.Fprintf(&manyLock, "\"node_modules/l%d\": {\"resolved\": \"https://npm.sinkhole.test/l%d.tgz\"},\n", i, i)
+		fmt.Fprintf(&manyYarn, "a%d@^1:\n  resolved \"https://npm.sinkhole.test/a%d.tgz#x\"\n", i, i)
 		if i < 20 {
+			wantManyYarn = append(wantManyYarn, fmt.Sprintf("GAL-DEPS-003@%d", 2*i+2))
 			wantManyGit = append(wantManyGit, fmt.Sprintf("GAL-DEPS-002@%d", i+3))
 			wantManyLock = append(wantManyLock, fmt.Sprintf("GAL-DEPS-003@%d", i+3))
 		}
 	}
 	slices.Sort(wantManyGit)
 	slices.Sort(wantManyLock)
+	slices.Sort(wantManyYarn)
 	tomlAtLimit := "[project]\noptional-dependencies = " + strings.Repeat("{a=", 31) + `["pkg @ https://dl.sinkhole.test/p.zip"]` + strings.Repeat("}", 31) + "\n"
 	tomlTooDeep := "[tool]\nx = " + strings.Repeat("{a=", 33) + `"v"` + strings.Repeat("}", 33) + "\n"
 	tests := []struct {
@@ -192,10 +195,27 @@ func TestAnalyze(t *testing.T) {
 			wantFindings: []string{"GAL-DEPS-002@3", "GAL-DEPS-002@4", "GAL-DEPS-002@5"},
 		},
 		{
-			name:         "popular and scoped names are fine, a scoped typosquat is caught by its bare name",
+			name:         "popular names are fine, a typo of a popular name is caught",
 			file:         "package.json",
-			data:         "{\n\"dependencies\": {\n\"express\": \"1\",\n\"@types/react\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"Ex_Press\": \"1\"\n}\n}",
+			data:         "{\n\"dependencies\": {\n\"express\": \"1\",\n\"@types/react\": \"1\",\n\"lodahs\": \"1\",\n\"Ex_Press\": \"1\"\n}\n}",
 			wantFindings: []string{"GAL-DEPS-001@5", "GAL-DEPS-001@6"},
+		},
+		{
+			name: "real packages one edit from a popular name are not typosquats",
+			file: "package.json",
+			data: "{\n\"devDependencies\": {\"socks\": \"1\", \"eclint\": \"1\", \"jsdoc\": \"1\", \"json-schema\": \"1\", \"npm-run-all2\": \"1\"}\n}",
+		},
+		{name: "a five-character name one edit from a popular name is not a typosquat", file: "package.json", data: "{\n\"dependencies\": {\"reacx\": \"1\"}\n}"},
+		{
+			name: "packages in a popular scope are never typosquats",
+			file: "package.json",
+			data: "{\n\"devDependencies\": {\"@typescript-eslint/parser\": \"1\", \"@types/estree\": \"1\", \"@babel/parser\": \"1\", \"@types/lodahs\": \"1\"}\n}",
+		},
+		{
+			name:         "a scoped name is compared by its scope, not its bare name",
+			file:         "package.json",
+			data:         "{\n\"dependencies\": {\n\"@typscript-eslint/parser\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"@jest/core\": \"1\",\n\"@babell/core\": \"1\"\n}\n}",
+			wantFindings: []string{"GAL-DEPS-001@3", "GAL-DEPS-001@6"},
 		},
 		{
 			name:         "package.json reports only the findings per rule the engine keeps",
@@ -222,6 +242,12 @@ func TestAnalyze(t *testing.T) {
 			file:         "yarn.lock",
 			data:         "# yarn lockfile v1\n\na@^1:\n  version \"1.0.0\"\n  resolved \"https://registry.yarnpkg.com/a/-/a-1.0.0.tgz#abc\"\n\nb@^1:\n  version \"1.0.0\"\n  resolved \"https://npm.sinkhole.test/b/-/b-1.0.0.tgz#def\"\n",
 			wantFindings: []string{"GAL-DEPS-003@9"},
+		},
+		{
+			name:         "yarn lock reports only the findings the engine keeps",
+			file:         "yarn.lock",
+			data:         manyYarn.String(),
+			wantFindings: wantManyYarn,
 		},
 		{
 			name:         "pyproject project, build-system and dependency-group requirements",
@@ -362,7 +388,7 @@ func TestAnalyze(t *testing.T) {
 		{
 			name:         "npm alias targets are checked",
 			file:         "package.json",
-			data:         "{\n\"dependencies\": {\n\"x\": \"npm:expresss@1.0.0\",\n\"y\": \"npm:express@1.0.0\",\n\"z\": \"npm:@scope/lodahs\"\n}\n}",
+			data:         "{\n\"dependencies\": {\n\"x\": \"npm:expresss@1.0.0\",\n\"y\": \"npm:express@1.0.0\",\n\"z\": \"npm:@babell/core\"\n}\n}",
 			wantFindings: []string{"GAL-DEPS-001@3", "GAL-DEPS-001@5"},
 		},
 		{

