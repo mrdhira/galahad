@@ -110,6 +110,9 @@ Security and project terms used in Galahad's code, reports and docs, in plain la
 **Firecracker / Virtualization.framework / Hyper-V**
 : The hypervisors Galahad uses on Linux, macOS and Windows to run guest VMs.
 
+**Gatekeeper**
+: The macOS check that blocks a downloaded program that is not signed or notarized. After you have verified a Galahad download, `xattr -d com.apple.quarantine galahad-agent` removes the quarantine flag so it can run.
+
 **Guest / host**
 : The **host** is your real machine. The **guest** is the throwaway VM where untrusted files are opened. Only validated JSON results travel from guest to host.
 
@@ -127,6 +130,9 @@ Security and project terms used in Galahad's code, reports and docs, in plain la
 
 **vsock**
 : A private host-to-guest socket that does not use any network. Galahad's guest has no network card, so vsock is its only channel to the host.
+
+**WSL2 (Windows Subsystem for Linux 2)**
+: A Linux environment on Windows that runs in a lightweight Hyper-V VM, so it counts as a VM for Galahad. WSL1 has no VM and does not count.
 
 ## File formats
 
