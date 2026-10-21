@@ -39,9 +39,12 @@ var (
 	npmSnapshot string
 	//go:embed top-pypi.txt
 	pypiSnapshot string
+	//go:embed real-npm-scopes.txt
+	scopeSnapshot string
 
-	topNpm  = load(npmSnapshot)
-	topPypi = load(pypiSnapshot)
+	topNpm     = load(npmSnapshot)
+	realScopes = load(scopeSnapshot).names
+	topPypi    = load(pypiSnapshot)
 )
 
 const maxJSONDepth = 32
@@ -122,7 +125,7 @@ func packageJSON(_ context.Context, f analyze.File) ([]protocol.Finding, error) 
 		if alias, ok := strings.CutPrefix(lower, "npm:"); ok {
 			name = aliasTarget(alias)
 		}
-		if topNpm.squat(npmName(name)) && !full(found, ruleTypo) {
+		if npmSquat(name) && !full(found, ruleTypo) {
 			found = append(found, ruleTypo.Finding(analyze.EvidenceAt(f, m.off)))
 		}
 	}
@@ -166,6 +169,9 @@ func yarnLock(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
 		}
 		val, _, _ := strings.Cut(strings.Trim(strings.TrimSpace(rest), `"`), "#")
 		if foreignHost(val, yarnHosts) {
+			if full(found, ruleLock) {
+				return
+			}
 			found = append(found, ruleLock.Finding(where{f.Path, n, line}.evidence()))
 		}
 	})
@@ -368,15 +374,30 @@ func foreignHost(raw string, allowed map[string]bool) bool {
 	return err != nil || !allowed[strings.ToLower(u.Hostname())]
 }
 
-// npmName returns the name to compare: the bare name of a scoped package.
-func npmName(name string) string {
+// npmScopes are well-known scopes. Every package in one of them is treated as
+// legitimate, and a scope one edit away from one is a typosquat of it unless it
+// is a real scope itself (realScopes), such as @mdi next to @mui.
+var npmScopes = []string{
+	"@angular", "@apollo", "@aws-cdk", "@aws-sdk", "@azure", "@babel", "@emotion", "@eslint",
+	"@eslint-community", "@fortawesome", "@google-cloud", "@humanwhocodes", "@jest", "@jridgewell",
+	"@mui", "@nestjs", "@npmcli", "@octokit", "@opentelemetry", "@playwright", "@reduxjs", "@rollup",
+	"@sentry", "@sigstore", "@smithy", "@storybook", "@swc", "@tanstack", "@testing-library",
+	"@tsconfig", "@types", "@typescript-eslint", "@vitejs", "@vue",
+}
+
+// npmSquat reports whether an npm package name looks like a popular package.
+// A scoped name is compared by its scope: the bare name of a scoped package
+// belongs to its owner, so it says nothing about the popular unscoped packages.
+func npmSquat(name string) bool {
 	name = strings.ToLower(name)
-	if strings.HasPrefix(name, "@") {
-		if _, bare, ok := strings.Cut(name, "/"); ok {
-			return bare
-		}
+	scope, _, scoped := strings.Cut(name, "/")
+	if !scoped || !strings.HasPrefix(name, "@") {
+		return topNpm.squat(name)
 	}
-	return name
+	if slices.Contains(npmScopes, scope) || realScopes[scope] {
+		return false
+	}
+	return slices.ContainsFunc(npmScopes, func(s string) bool { return oneEdit(scope, s) })
 }
 
 // pypiName applies the PEP 503 normalization.
