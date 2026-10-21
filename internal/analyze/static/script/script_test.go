@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -26,13 +27,20 @@ func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) 
 // unit returns n characters of base64 with 16 different characters.
 func unit(n int) string { return strings.Repeat("aB3dE5fGhJ7kL9mN", n/16+1)[:n] }
 
+const minifiedUnit = `!function(t){var e=Function("return this")()||this;function r(t){return String.fromCharCode.apply(null,t)}t.lib={r:r,g:e,s:setTimeout(function(){r([97])},0)}}(this);`
+
 func pad(n int) string { return strings.Repeat(" ", n) }
 
 // analyzeFile runs the analyzer and returns "<rule suffix>:<line>" of the primary evidence of each finding, sorted.
 func analyzeFile(t *testing.T, path, data string) ([]string, analyze.Output) {
 	t.Helper()
+	return analyzeFileCtx(t, context.Background(), path, data)
+}
+
+func analyzeFileCtx(t *testing.T, ctx context.Context, path, data string) ([]string, analyze.Output) {
+	t.Helper()
 	f := analyze.File{Path: path, Name: path[strings.LastIndex(path, "/")+1:], Data: []byte(data)}
-	out, err := script.New().Analyze(context.Background(), f)
+	out, err := script.New().Analyze(ctx, f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,44 +332,109 @@ func TestAnalyzeCapsFindings(t *testing.T) {
 	}
 }
 
-// TestAnalyzeLimits checks that huge lines stay linear: the analysis finishes
-// within the bound, finds what is there and reports no skip.
+// hangGuard ends a run that never finishes. It is far above any real run time,
+// so a slow or busy machine (or the race detector) cannot trip it; the speed of
+// the analyzer is checked by TestAnalyzeScalesLinearly instead.
+const hangGuard = 5 * time.Minute
+
+// TestAnalyzeLimits checks that huge lines are handled: the analysis finds what
+// is there and ends with the expected skip, or none. A run that hits the hang
+// guard ends with a timeout skip and fails here.
 func TestAnalyzeLimits(t *testing.T) {
-	minified := `!function(t){var e=Function("return this")()||this;function r(t){return String.fromCharCode.apply(null,t)}t.lib={r:r,g:e,s:setTimeout(function(){r([97])},0)}}(this);`
 	tests := []struct {
 		name string
 		// inputs
 		path string
 		data string
 		// expectations
-		wantRules   []string
-		wantSkipped bool
+		wantRules []string
+		wantSkip  string
 	}{
-		{name: "3 MB minified line", path: "big.min.js", data: strings.Repeat(minified, 3<<20/len(minified)) + "\n"},
+		{name: "3 MB minified line", path: "big.min.js", data: strings.Repeat(minifiedUnit, 3<<20/len(minifiedUnit)) + "\n"},
 		{name: "1 MB run of spaces before code", path: "pad.js", data: "a();" + pad(1<<20) + "b();\n", wantRules: []string{"OBF-001:1"}},
 		{name: "1 MB run of spaces only", path: "pad.js", data: pad(1 << 20)},
-		{name: "payload at the end of a 2 MB line", path: "big.js", data: strings.Repeat(minified, 2<<20/len(minified)) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
+		{name: "payload at the end of a 2 MB line", path: "big.js", data: strings.Repeat(minifiedUnit, 2<<20/len(minifiedUnit)) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
 		{name: "payload across a window cut", path: "cut.js", data: strings.Repeat(";", 256<<10-4) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
-		{name: "1 MB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 1<<20/5), wantSkipped: true},
+		{name: "1 MB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 1<<20/5), wantSkip: protocol.SkipTooLarge},
 		{name: "2 MB blob on one line", path: "blob.js", data: "var x='" + unit(2<<20) + "';\n", wantRules: []string{"OBF-003:1"}},
 		{name: "many assignments to look back through", path: "assign.py", data: strings.Repeat("a=", 2<<20) + "\nexec(a)\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start := time.Now()
-			got, out := analyzeFile(t, tt.path, tt.data)
+			ctx, cancel := context.WithTimeout(context.Background(), hangGuard)
+			defer cancel()
 
-			if d := time.Since(start); d > 20*time.Second {
-				t.Errorf("took %v", d)
-			}
+			got, out := analyzeFileCtx(t, ctx, tt.path, tt.data)
+
 			if !slices.Equal(got, tt.wantRules) {
 				t.Errorf("findings = %v, want %v", got, tt.wantRules)
 			}
-			if skipped := len(out.Skips) > 0; skipped != tt.wantSkipped {
-				t.Errorf("skips = %v, want skipped %v", out.Skips, tt.wantSkipped)
+			var skip string
+			if len(out.Skips) > 0 {
+				skip = out.Skips[0].Reason
+			}
+			if len(out.Skips) > 1 || skip != tt.wantSkip {
+				t.Errorf("skips = %v, want %q", out.Skips, tt.wantSkip)
 			}
 		})
 	}
+}
+
+// TestAnalyzeScalesLinearly guards against quadratic work on the inputs that
+// are built to cause it. It compares run times instead of using a fixed limit,
+// so a slow or busy machine (or the race detector) does not make it flaky: a
+// 16x larger input must take well under the 256x a quadratic scan would show
+// (measured: about 7-40x linear, 110x and more quadratic).
+func TestAnalyzeScalesLinearly(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path  string
+		build func(n int) string
+		small int
+		large int
+		// expectations
+		wantMaxRatio float64
+	}{
+		{name: "16x more unclosed calls", path: "eval.js", build: func(n int) string { return strings.Repeat("eval(", n/5) }, small: 16 << 10, large: 256 << 10, wantMaxRatio: 60},
+		{name: "16x longer run of spaces", path: "pad.js", build: func(n int) string { return "a();" + pad(n) + "b();\n" }, small: 256 << 10, large: 4 << 20, wantMaxRatio: 100},
+		{name: "16x longer minified line", path: "big.min.js", build: func(n int) string { return strings.Repeat(minifiedUnit, n/len(minifiedUnit)) + "\n" }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
+		{name: "16x more blobs", path: "blobs.js", build: func(n int) string { return strings.Repeat("var k = '"+unit(256)+"';\n", n/270) }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			small := analyze.File{Path: tt.path, Name: tt.path, Data: []byte(tt.build(tt.small))}
+			large := analyze.File{Path: tt.path, Name: tt.path, Data: []byte(tt.build(tt.large))}
+
+			ratio := float64(fastest(t, large)) / float64(fastest(t, small))
+
+			t.Logf("time ratio %.1f", ratio)
+			if ratio > tt.wantMaxRatio {
+				t.Errorf("time ratio %.1f, want at most %.1f", ratio, tt.wantMaxRatio)
+			}
+		})
+	}
+}
+
+// fastest returns the best of three Analyze runs to damp scheduling noise.
+// A run that skips was cut short by a budget, so its time says nothing about scaling.
+func fastest(t *testing.T, f analyze.File) time.Duration {
+	t.Helper()
+	best := time.Duration(math.MaxInt64)
+	for range 3 {
+		ctx, cancel := context.WithTimeout(context.Background(), hangGuard)
+		start := time.Now()
+		out, err := script.New().Analyze(ctx, f)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Skips) > 0 {
+			t.Fatalf("%d bytes: skips = %v, want a full analysis", len(f.Data), out.Skips)
+		}
+		best = min(best, time.Since(start))
+	}
+	return best
 }
 
 // expiring is a context that reports itself done after its first Err call.
