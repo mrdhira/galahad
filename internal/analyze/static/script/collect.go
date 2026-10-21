@@ -25,12 +25,13 @@ type secretHit struct {
 
 // found holds the byte offsets that the patterns matched in a doc.
 type found struct {
-	sinks   [][2]int // calls that run a string as code: [start, end) with the "(" last
-	dl      []int    // shell download-and-run commands
-	dec     []int    // shell decode-and-run commands
-	spawns  []int    // process starts
-	secrets []secretHit
-	nets    []int // network use
+	sinks    [][2]int // calls that run a string as code: [start, end) with the "(" last
+	dl       []int    // shell download-and-run commands
+	dec      []int    // shell decode-and-run commands
+	spawns   []int    // process starts
+	thenEval []int    // .then(eval) callbacks
+	secrets  []secretHit
+	nets     []int // network use
 }
 
 // anchor is a literal (lowercase) that every match of some pattern contains.
@@ -57,7 +58,7 @@ var secretAnchors = []anchor{
 	{"printenv", wordStart}, {"env |", wordStart}, {"env|", wordStart},
 	{"/proc/self/environ", nil}, {".ssh", nil}, {"id_rsa", nil}, {"id_dsa", nil}, {"id_ecdsa", nil},
 	{"id_ed25519", nil}, {".aws", nil}, {".gnupg", nil}, {".kube", nil}, {".docker", nil},
-	{".config", nil}, {"user data", nil}, {"mozilla", nil}, {"wallet.dat", nil}, {".electrum", nil},
+	{".npmrc", nil}, {".netrc", nil}, {".config", nil}, {"user data", nil}, {"mozilla", nil}, {"wallet.dat", nil}, {".electrum", nil},
 	{"nkbihfbeogaeaoehlefnkodbefgpgknn", nil}, {"exodus", nil},
 }
 
@@ -249,6 +250,9 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 		sinks = sinksPy
 	}
 	eachMatch(d, sinks, base, minEnd, text, func(off, end int) { keep(s, &f.sinks, [2]int{off, end}) })
+	if d.lang&langJS != 0 {
+		eachMatch(d, thenEval, base, minEnd, text, func(off, _ int) { keep(s, &f.thenEval, off) })
+	}
 	spawn := func(off, _ int) { keep(s, &f.spawns, off) }
 	if d.lang&langJS != 0 && d.childProc {
 		eachMatch(d, spawnsJS, base, minEnd, text, func(off, end int) {
@@ -392,6 +396,33 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 			keep(s, &f.secrets, secretHit{off: off, kind: kind})
 		}
 	}
+	segments := segmentRE.FindAllStringIndex(text, signals.MaxMatches)
+	s.limited = s.limited || len(segments) == signals.MaxMatches
+	for _, m := range segments {
+		if off, ok := match(d, base, minEnd, text, m[0], m[1]); ok && s.builtPath(d.data, off) {
+			keep(s, &f.secrets, secretHit{off: off, kind: secretFile})
+		}
+	}
+}
+
+// builtPath reports whether the quoted directory name at off is a segment of a
+// path that the code builds: an argument of join or resolve, or the operand of
+// the / operator of Python's pathlib. A .env segment counts only on a line that
+// reads, and not for dotenv.
+func (s *scan) builtPath(data []byte, off int) bool {
+	lo := max(0, off-256)
+	prefix := data[lo+bytes.LastIndexByte(data[lo:off], '\n')+1 : off]
+	if !s.spend(len(prefix)) {
+		return false
+	}
+	if !joinRE.Match(prefix) && !bytes.HasSuffix(bytes.TrimRight(prefix, " \t"), []byte("/")) {
+		return false
+	}
+	if !bytes.HasPrefix(data[off+1:], []byte(".env")) {
+		return true
+	}
+	line := lineAround(data, off)
+	return envReadRE.Match(line) && !dotenvRE.Match(line)
 }
 
 // spend charges n bytes of text given to the signals patterns, which are slow

