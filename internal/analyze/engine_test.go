@@ -40,13 +40,14 @@ func write(t *testing.T, dir, rel string, data []byte) string {
 
 // pad adds n empty files named f000000, f000001 and so on to dir/sub. They are
 // hard links to a few files, which is much faster than creating n files. A file
-// system caps the links to one file, so each template serves 50000 of them.
+// system caps the links to one file (1023 on NTFS), so each template serves 500.
 func pad(t *testing.T, dir, sub string, n int) {
 	t.Helper()
+	templates := t.TempDir()
 	var template string
 	for i := range n {
-		if i%50000 == 0 {
-			template = write(t, t.TempDir(), "template", nil)
+		if i%500 == 0 {
+			template = write(t, templates, fmt.Sprintf("t%d", i/500), nil)
 		}
 		if err := os.Link(template, filepath.Join(dir, sub, fmt.Sprintf("f%06d", i))); err != nil {
 			t.Fatal(err)
