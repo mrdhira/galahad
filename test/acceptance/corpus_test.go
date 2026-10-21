@@ -56,6 +56,25 @@ func TestCorpus(t *testing.T) {
 			wantRules: []string{"GAL-AUTOEXEC-001 .vscode/tasks.json:7", "GAL-AUTOEXEC-010 .vscode/tasks.json:7"},
 		},
 		{
+			name: "p1-ooxml-evasion: a stray [Content_Types].xml does not hide the zip members (built)",
+			target: builtFile("evade.zip", func(t *testing.T, dest string) {
+				entries := dirEntries(t, corpus(t, "p1-folderopen-curl"), "p1-folderopen-curl/")
+				zipEntries(t, dest, append(entries, zipEntry{name: "sub/[Content_Types].xml", data: []byte("<Types/>")}))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 evade.zip!/p1-folderopen-curl/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 evade.zip!/p1-folderopen-curl/.vscode/tasks.json:7"},
+		},
+		{
+			name: "p1-ooxml-smuggle: a docx still has its extra members inspected (built)",
+			target: builtFile("smuggle.docx", func(t *testing.T, dest string) {
+				extra := dirEntries(t, corpus(t, "p1-folderopen-curl"), "extra/")
+				zipEntries(t, dest, append(benignDocxEntries(), extra...))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 smuggle.docx!/extra/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 smuggle.docx!/extra/.vscode/tasks.json:7"},
+			wantIOCs:  []string{"https://docs.sinkhole.test/guide"},
+		},
+		{
 			name:   "p1-devcontainer-init: initializeCommand pipes a download into sh",
 			target: corpusDir("p1-devcontainer-init"), wantCode: 20,
 			wantRules: []string{"GAL-AUTOEXEC-003 .devcontainer/devcontainer.json:5", "GAL-AUTOEXEC-011 .devcontainer/devcontainer.json:5"},

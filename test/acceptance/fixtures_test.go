@@ -22,9 +22,9 @@ type zipEntry struct {
 	mode fs.FileMode // zero means a regular file
 }
 
-// zipDir zips the files below src into dest. Member names are slash-separated
-// paths relative to src.
-func zipDir(t *testing.T, src, dest string) {
+// dirEntries lists the files below src as zip entries named prefix plus their
+// slash-separated path relative to src.
+func dirEntries(t *testing.T, src, prefix string) []zipEntry {
 	t.Helper()
 	var entries []zipEntry
 	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
@@ -36,13 +36,20 @@ func zipDir(t *testing.T, src, dest string) {
 			return err
 		}
 		b, err := os.ReadFile(p)
-		entries = append(entries, zipEntry{name: filepath.ToSlash(rel), data: b})
+		entries = append(entries, zipEntry{name: prefix + filepath.ToSlash(rel), data: b})
 		return err
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	zipEntries(t, dest, entries)
+	return entries
+}
+
+// zipDir zips the files below src into dest. Member names are slash-separated
+// paths relative to src.
+func zipDir(t *testing.T, src, dest string) {
+	t.Helper()
+	zipEntries(t, dest, dirEntries(t, src, ""))
 }
 
 // zipEntries writes a zip with the entries in order, using their raw names.
@@ -149,8 +156,13 @@ func tarGz(t *testing.T, dest string, entries []tarEntry) {
 // benignDocx writes a minimal docx with one internal and one external hyperlink to dest.
 func benignDocx(t *testing.T, dest string) {
 	t.Helper()
+	zipEntries(t, dest, benignDocxEntries())
+}
+
+// benignDocxEntries are the members of benignDocx.
+func benignDocxEntries() []zipEntry {
 	const relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
-	zipEntries(t, dest, []zipEntry{
+	return []zipEntry{
 		{name: "[Content_Types].xml", data: []byte(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`)},
 		{name: "word/document.xml", data: []byte(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Guide</w:t></w:r></w:p></w:body></w:document>`)},
 		{name: "word/_rels/document.xml.rels", data: []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n" +
@@ -158,5 +170,5 @@ func benignDocx(t *testing.T, dest string) {
 			`  <Relationship Id="rId1" Type="` + relType + `hyperlink" Target="#chapter2"/>` + "\n" +
 			`  <Relationship Id="rId2" Type="` + relType + `hyperlink" Target="https://docs.sinkhole.test/guide" TargetMode="External"/>` + "\n" +
 			`</Relationships>` + "\n")},
-	})
+	}
 }

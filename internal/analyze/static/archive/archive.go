@@ -52,7 +52,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	u := &unpack{ctx: ctx, f: f, left: allowance(len(f.Data))}
 	var err error
 	switch f.Kind {
-	case ident.Zip:
+	case ident.Zip, ident.OOXML:
 		err = u.zip()
 	case ident.Tar:
 		err = u.tar(u.cap(bytes.NewReader(f.Data)))
@@ -182,6 +182,18 @@ func (u *unpack) bomb(name string) {
 	u.skip(u.member(name), protocol.SkipBudget)
 }
 
+// ooxmlPart reports a member of a standard OOXML package: the content types
+// part or anything below the standard top-level folders. The match is exact so
+// that a look-alike name is still unpacked as a child.
+func ooxmlPart(name string) bool {
+	n := strings.ReplaceAll(name, `\`, "/")
+	top, _, nested := strings.Cut(n, "/")
+	if !nested {
+		return n == "[Content_Types].xml"
+	}
+	return slices.Contains([]string{"_rels", "docProps", "customXml", "word", "xl", "ppt"}, top)
+}
+
 func (u *unpack) zip() error {
 	zr, err := zip.NewReader(bytes.NewReader(u.f.Data), int64(len(u.f.Data)))
 	if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
@@ -202,6 +214,8 @@ func (u *unpack) zip() error {
 		case mode&fs.ModeSymlink != 0:
 			u.link(zf.Name, "")
 			continue
+		case u.f.Kind == ident.OOXML && ooxmlPart(zf.Name):
+			continue // the office analyzer inspects the package parts
 		case zf.Flags&1 != 0:
 			u.out.Findings = append(u.out.Findings, ruleEncrypted.Finding(protocol.Evidence{
 				Path: u.member(zf.Name), Snippet: "encrypted entry",

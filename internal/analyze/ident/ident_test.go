@@ -1,6 +1,7 @@
 package ident_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
@@ -31,7 +32,33 @@ func tarHeader() []byte {
 	return b
 }
 
+func zipOf(t *testing.T, names ...string) []byte {
+	t.Helper()
+	return zipWith(t, func(name string) string { return "<x/>" }, names...)
+}
+
+func zipWith(t *testing.T, content func(name string) string, names ...string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range names {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content(name))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func TestIdentify(t *testing.T) {
+	docx := zipOf(t, "[Content_Types].xml", "word/document.xml")
+
 	longText := append(bytes.Repeat([]byte("a"), 8191), []byte("é")...) // multi-byte rune cut by the window
 	peBadOffset := pe()
 	binary.LittleEndian.PutUint32(peBadOffset[0x3c:], 0xffffff)
@@ -46,7 +73,14 @@ func TestIdentify(t *testing.T) {
 		{name: "pdf", file: "a.pdf", data: []byte("%PDF-1.7\n"), wantKind: ident.PDF},
 		{name: "zip", file: "a.zip", data: []byte("PK\x03\x04rest"), wantKind: ident.Zip},
 		{name: "empty zip", file: "a.zip", data: []byte("PK\x05\x06rest"), wantKind: ident.Zip},
-		{name: "ooxml", file: "a.docx", data: []byte("PK\x03\x04...[Content_Types].xml..."), wantKind: ident.OOXML},
+		{name: "ooxml", file: "a.docx", data: docx, wantKind: ident.OOXML},
+		{name: "ooxml with a content types name in other case", file: "a.docx", data: zipOf(t, "[content_types].XML", "word/document.xml"), wantKind: ident.OOXML},
+		{name: "content types file below a folder is a plain zip", file: "a.zip", data: zipOf(t, "p/run.js", "sub/[Content_Types].xml"), wantKind: ident.Zip},
+		{name: "content types text inside a member is a plain zip", file: "a.zip",
+			data:     zipWith(t, func(string) string { return "see [Content_Types].xml" }, "notes.txt"),
+			wantKind: ident.Zip},
+		{name: "truncated zip that names a content types file is a plain zip", file: "a.docx", data: docx[:len(docx)-10], wantKind: ident.Zip},
+		{name: "garbage after the zip magic that names a content types file is a plain zip", file: "a.docx", data: []byte("PK\x03\x04...[Content_Types].xml..."), wantKind: ident.Zip},
 		{name: "gzip", file: "a.gz", data: []byte{0x1f, 0x8b, 8}, wantKind: ident.Gzip},
 		{name: "bzip2", file: "a.bz2", data: []byte("BZh91AY"), wantKind: ident.Bzip2},
 		{name: "ole", file: "a.doc", data: []byte{0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0}, wantKind: ident.OLE},
