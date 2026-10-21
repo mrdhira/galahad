@@ -41,6 +41,7 @@ const (
 	MaxIOCs                   = 1000
 	MaxSnippet                = 200  // runes
 	MaxPath                   = 1024 // bytes
+	MaxIOCValue               = 2048 // bytes; the PDF analyzer keeps link targets up to this length
 	MaxName                   = 64   // bytes: tool, analyzer, file kind, sha256
 	MaxTitle                  = 200  // runes
 	MaxEvidence               = 8    // entries per finding; the producers emit at most 3

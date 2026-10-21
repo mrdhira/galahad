@@ -3,6 +3,7 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -81,6 +82,10 @@ func (r *Result) Validate() error {
 		}
 		if err := checkName("sha256", f.SHA256); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
+		}
+		// JSON has no NaN or infinity, so such an entropy could not be encoded.
+		if math.IsNaN(f.Entropy) || math.IsInf(f.Entropy, 0) {
+			return fmt.Errorf("files[%d]: entropy is not a finite number", i)
 		}
 	}
 	perRuleFile := map[string]int{}
@@ -171,8 +176,8 @@ func (i IOC) validate() error {
 	default:
 		return fmt.Errorf("type %q not allowed", i.Type)
 	}
-	if len(i.Value) > MaxPath {
-		return fmt.Errorf("value is %d bytes, max %d", len(i.Value), MaxPath)
+	if len(i.Value) > MaxIOCValue {
+		return fmt.Errorf("value is %d bytes, max %d", len(i.Value), MaxIOCValue)
 	}
 	if hasUnsafe(i.Value) {
 		return errors.New("value has control or bidi characters")

@@ -36,9 +36,9 @@ import (
 // Format limits.
 const (
 	MaxObjects     = 100000
-	MaxStreamBytes = 16 << 20 // decoded bytes per stream
-	MaxFileBytes   = 64 << 20 // decoded bytes per file
-	MaxURILen      = 2048
+	MaxStreamBytes = 16 << 20             // decoded bytes per stream
+	MaxFileBytes   = 64 << 20             // decoded bytes per file
+	MaxURILen      = protocol.MaxIOCValue // link targets are reported as IOCs, so they share the IOC cap
 )
 
 const (

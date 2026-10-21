@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -131,6 +132,8 @@ func TestValidate(t *testing.T) {
 		{name: "file kind too long", mutate: func(r *protocol.Result) { r.Files[0].Kind = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "files[0]: kind is 65 bytes"},
 		{name: "file sha256 has control character", mutate: func(r *protocol.Result) { r.Files[0].SHA256 = "a\x1b" }, wantErr: "files[0]: sha256 has control"},
 		{name: "file sha256 too long", mutate: func(r *protocol.Result) { r.Files[0].SHA256 = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "files[0]: sha256 is 65 bytes"},
+		{name: "file entropy is not a number", mutate: func(r *protocol.Result) { r.Files[0].Entropy = math.NaN() }, wantErr: "entropy is not a finite number"},
+		{name: "file entropy is infinite", mutate: func(r *protocol.Result) { r.Files[0].Entropy = math.Inf(1) }, wantErr: "entropy is not a finite number"},
 		{name: "rule id malformed", mutate: func(r *protocol.Result) { r.Findings[0].RuleID = "gal-exec-1" }, wantErr: "rule_id"},
 		{name: "rule id category too long", mutate: func(r *protocol.Result) { r.Findings[0].RuleID = "GAL-" + strings.Repeat("A", 17) + "-001" }, wantErr: "rule_id"},
 		{name: "severity unknown", mutate: func(r *protocol.Result) { r.Findings[0].Severity = "huge" }, wantErr: "severity"},
@@ -179,7 +182,8 @@ func TestValidate(t *testing.T) {
 		{name: "ioc type unknown", mutate: func(r *protocol.Result) { r.IOCs[0].Type = "hash" }, wantErr: "iocs[0]: type"},
 		{name: "ioc value has control character", mutate: func(r *protocol.Result) { r.IOCs[0].Value = "http://a\x1b" }, wantErr: "value has control"},
 		{name: "ioc value has bidi character", mutate: func(r *protocol.Result) { r.IOCs[0].Value = "http://a\u202e" }, wantErr: "value has control"},
-		{name: "ioc value too long", mutate: func(r *protocol.Result) { r.IOCs[0].Value = strings.Repeat("a", protocol.MaxPath+1) }, wantErr: "value is 1025 bytes"},
+		{name: "ioc value as long as a pdf link target", mutate: func(r *protocol.Result) { r.IOCs[0].Value = "http://a.test/" + strings.Repeat("a", 1222) }},
+		{name: "ioc value too long", mutate: func(r *protocol.Result) { r.IOCs[0].Value = strings.Repeat("a", protocol.MaxIOCValue+1) }, wantErr: "value is 2049 bytes"},
 		{name: "ioc path is absolute", mutate: func(r *protocol.Result) { r.IOCs[0].Path = "/x" }, wantErr: "iocs[0]: path"},
 		{name: "skip path is absolute", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Path = "/x" }, wantErr: "coverage.skipped[0]: path"},
 		{name: "skip reason unknown", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Reason = "lazy" }, wantErr: "reason"},
@@ -304,7 +308,7 @@ func TestEncodeResult(t *testing.T) {
 				Title: worstTitle, Attack: "T1204.002", Analyzer: worstName, Evidence: ev,
 			}
 		}
-		r.IOCs = slices.Repeat([]protocol.IOC{{Type: "url", Value: quotes(protocol.MaxPath), Path: worstPath, Line: -1 << 62}}, protocol.MaxIOCs)
+		r.IOCs = slices.Repeat([]protocol.IOC{{Type: "url", Value: quotes(protocol.MaxIOCValue), Path: worstPath, Line: -1 << 62}}, protocol.MaxIOCs)
 		r.Coverage.Skipped = slices.Repeat([]protocol.Skip{{Path: worstPath, Reason: protocol.SkipUnsupported}}, protocol.MaxSkipped)
 		r.Coverage.Analyzers = slices.Repeat([]string{worstName}, protocol.MaxAnalyzers)
 		r.Reasons = slices.Repeat([]string{worstReason}, protocol.MaxReasonCount)
