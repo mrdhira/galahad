@@ -142,6 +142,8 @@ a = { git = "https://git.sinkhole.test/a.git" }
 func TestAnalyze(t *testing.T) {
 	filler := strings.Repeat("x", 3<<19) // 1.5 MiB, above MaxConfigSize
 	deep := strings.Repeat(`{"a":`, 40) + "1" + strings.Repeat("}", 40)
+	tomlAtLimit := "[project]\noptional-dependencies = " + strings.Repeat("{a=", 31) + `["pkg @ https://dl.sinkhole.test/p.zip"]` + strings.Repeat("}", 31) + "\n"
+	tomlTooDeep := "[tool]\nx = " + strings.Repeat("{a=", 33) + `"v"` + strings.Repeat("}", 33) + "\n"
 	tests := []struct {
 		name string
 		// inputs
@@ -251,6 +253,15 @@ func TestAnalyze(t *testing.T) {
 			data:         uvTomlSettings,
 			wantFindings: []string{"GAL-DEPS-002@8", "GAL-DEPS-004@2", "GAL-DEPS-004@4", "GAL-DEPS-004@6"},
 		},
+		{
+			name:         "pyproject uv dev, override and constraint dependencies are requirements",
+			file:         "pyproject.toml",
+			data:         "[tool.uv]\ndev-dependencies = [\"pkg @ git+https://git.sinkhole.test/p.git\"]\noverride-dependencies = [\"o @ https://dl.sinkhole.test/o.zip\"]\nconstraint-dependencies = [\"c @ git+https://git.sinkhole.test/c.git\", \"requests>=2\"]\n",
+			wantFindings: []string{"GAL-DEPS-002@2", "GAL-DEPS-002@3", "GAL-DEPS-002@4"},
+		},
+		{name: "pyproject value nested to the depth limit is read", file: "pyproject.toml", data: tomlAtLimit, wantFindings: []string{"GAL-DEPS-002@2"}},
+		{name: "pyproject value nested past the depth limit is skipped", file: "pyproject.toml", data: tomlTooDeep, wantSkip: "depth"},
+		{name: "pyproject inline table key path past the limit is skipped", file: "pyproject.toml", data: "[tool]\nx = { " + strings.Repeat("k", 1100) + " = \"v\" }\n", wantSkip: "depth"},
 		{
 			name:         "requirements index options",
 			file:         "requirements-dev.txt",
@@ -395,6 +406,59 @@ func TestAnalyzeMetadata(t *testing.T) {
 			fd := out.Findings[0]
 			if fd.RuleID != tt.wantRule || string(fd.Severity) != tt.wantSeverity || fd.Attack != tt.wantAttack || fd.Evidence[0].Snippet != tt.wantSnippet {
 				t.Errorf("finding = %s %s %s %q, want %s %s %s %q", fd.RuleID, fd.Severity, fd.Attack, fd.Evidence[0].Snippet, tt.wantRule, tt.wantSeverity, tt.wantAttack, tt.wantSnippet)
+			}
+		})
+	}
+}
+
+func TestAnalyzeLargeTOMLWithinDeadline(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		file string
+		data string
+		// expectations
+		wantFindings []string
+		wantSkip     string
+	}{
+		{
+			name:         "multi-line string over 500k lines",
+			file:         "pyproject.toml",
+			data:         "[project]\ndescription = \"\"\"\n" + strings.Repeat("a\n", 500000) + "\"\"\"\ndependencies = [\"pkg @ https://dl.sinkhole.test/p.zip\"]\n",
+			wantFindings: []string{"GAL-DEPS-002@500004"},
+		},
+		{
+			name:     "long inline table key followed by many strings",
+			file:     "pyproject.toml",
+			data:     "[tool]\nx = {" + strings.Repeat("k", 500000) + "=[\"" + strings.Repeat("\",\"", 150000) + "\"]}\n",
+			wantSkip: "depth",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// the reader is linear: a quadratic one runs past this deadline
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			f := analyze.File{Path: tt.file, Name: tt.file, Data: []byte(tt.data)}
+
+			out, err := deps.New().Analyze(ctx, f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, fd := range out.Findings {
+				got = append(got, fmt.Sprintf("%s@%d", fd.RuleID, fd.Evidence[0].Line))
+			}
+			if !slices.Equal(got, tt.wantFindings) {
+				t.Errorf("findings = %q, want %q", got, tt.wantFindings)
+			}
+			gotSkip := ""
+			if len(out.Skips) > 0 {
+				gotSkip = out.Skips[0].Reason
+			}
+			if gotSkip != tt.wantSkip {
+				t.Errorf("skip = %q, want %q", gotSkip, tt.wantSkip)
 			}
 		})
 	}

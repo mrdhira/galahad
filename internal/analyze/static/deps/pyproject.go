@@ -18,6 +18,14 @@ const (
 	valueSourceString // git or url of a dependency source
 )
 
+// Limits of the TOML reader. A value nested deeper than maxTOMLDepth, or an
+// inline table key whose path grows past maxTOMLPath bytes, stops the read with
+// errDepth, so the file is reported as a skip that may hide content.
+const (
+	maxTOMLDepth = 32
+	maxTOMLPath  = 1024
+)
+
 // tomlContinuation is a TOML line continuation in a multi-line string: a
 // backslash and the blanks and newlines after it.
 var tomlContinuation = regexp.MustCompile(`\\[ \t\r\n]+`)
@@ -41,21 +49,24 @@ type toml struct {
 	f         analyze.File
 	prefix    string
 	section   string
-	base      string  // path of the key being read
-	frames    []frame // open brackets and braces of that value
-	word      string  // last bare word, the key if "=" follows
-	off       int     // offset of the line being read
-	multi     byte    // quote of the multi-line string that is open at the end of the line
-	multiText string  // its text so far
-	multiPath string  // its path
-	multiOff  int     // where it opened
+	base      string          // path of the key being read
+	frames    []frame         // open brackets and braces of that value
+	word      string          // last bare word, the key if "=" follows
+	off       int             // offset of the line being read
+	multi     byte            // quote of the multi-line string that is open at the end of the line
+	multiText strings.Builder // its text so far
+	multiPath string          // its path
+	multiOff  int             // where it opened
 	found     []protocol.Finding
+	err       error // errDepth once a limit is hit; the rest of the file is not read
 }
 
-// frame is an open bracket or brace. A table remembers its latest key.
+// frame is an open bracket or brace. outer is the path of the value it opens,
+// path the path of the strings in it: outer plus the latest key of a table.
 type frame struct {
 	table bool
-	key   string
+	outer string
+	path  string
 }
 
 // lit is a string of a value and its path.
@@ -64,19 +75,28 @@ type lit struct{ val, path string }
 func readTOML(ctx context.Context, f analyze.File, prefix string) ([]protocol.Finding, error) {
 	t := &toml{f: f, prefix: prefix, section: prefix}
 	err := eachLine(ctx, f, t.line)
+	if err == nil {
+		err = t.err
+	}
 	return t.found, err
 }
 
 func (t *toml) line(line string, off int) {
+	if t.err != nil {
+		return
+	}
 	if t.multi != 0 {
 		// inside a multi-line string: brackets and tables there are text
 		end := strings.Index(line, strings.Repeat(string(t.multi), 3))
 		if end < 0 {
-			t.multiText += line + "\n"
+			t.multiText.WriteString(line)
+			t.multiText.WriteByte('\n')
 			return
 		}
-		text := tomlContinuation.ReplaceAllString(t.multiText+line[:end], "")
-		t.multi, t.multiText = 0, ""
+		t.multiText.WriteString(line[:end])
+		text := tomlContinuation.ReplaceAllString(t.multiText.String(), "")
+		t.multi = 0
+		t.multiText.Reset()
 		t.apply(lit{val: strings.TrimSpace(text), path: t.multiPath}, analyze.EvidenceAt(t.f, t.multiOff))
 		t.value(line[end+3:], off)
 		return
@@ -129,6 +149,7 @@ func valueKindOf(p string) int {
 	case strings.HasSuffix(p, ".include-group"):
 		return valueNone
 	case p == "project.dependencies", p == "build-system.requires", p == "project.optional-dependencies", p == "dependency-groups",
+		p == "tool.uv.dev-dependencies", p == "tool.uv.override-dependencies", p == "tool.uv.constraint-dependencies",
 		strings.HasPrefix(p, "project.optional-dependencies."), strings.HasPrefix(p, "dependency-groups."):
 		return valueRequirement
 	case p == "tool.uv.index-url", p == "tool.uv.extra-index-url", p == "tool.uv.pip.index-url", p == "tool.uv.pip.extra-index-url",
@@ -201,17 +222,14 @@ func (t *toml) apply(l lit, ev protocol.Evidence) {
 // path is the path of the string being read: the key line and the key of every
 // open inline table.
 func (t *toml) path() string {
-	p := t.base
-	for _, fr := range t.frames {
-		if fr.table && fr.key != "" {
-			p += "." + fr.key
-		}
+	if n := len(t.frames); n > 0 {
+		return t.frames[n-1].path
 	}
-	return strings.TrimPrefix(p, ".")
+	return t.base
 }
 
 // scan returns the strings of text and keeps track of the open brackets, braces
-// and inline table keys.
+// and inline table keys. At a limit it sets t.err and stops.
 func (t *toml) scan(text string) []lit {
 	var out []lit
 	for i := 0; i < len(text); i++ {
@@ -222,7 +240,9 @@ func (t *toml) scan(text string) []lit {
 			if triple := strings.Repeat(string(c), 3); strings.HasPrefix(text[i:], triple) {
 				end := strings.Index(text[i+3:], triple)
 				if end < 0 {
-					t.multi, t.multiText, t.multiPath, t.multiOff = c, text[i+3:]+"\n", t.path(), t.off
+					t.multi, t.multiPath, t.multiOff = c, t.path(), t.off
+					t.multiText.WriteString(text[i+3:])
+					t.multiText.WriteByte('\n')
 					return out
 				}
 				out = append(out, lit{val: text[i+3 : i+3+end], path: t.path()})
@@ -244,18 +264,31 @@ func (t *toml) scan(text string) []lit {
 			}
 			out = append(out, lit{val: val, path: t.path()})
 		case '[', '{':
-			t.frames = append(t.frames, frame{table: c == '{'})
+			if len(t.frames) >= maxTOMLDepth {
+				t.err = errDepth
+				return out
+			}
+			p := t.path()
+			t.frames = append(t.frames, frame{table: c == '{', outer: p, path: p})
 		case ']', '}':
 			if n := len(t.frames); n > 0 {
 				t.frames = t.frames[:n-1]
 			}
 		case '=':
 			if n := len(t.frames); n > 0 && t.frames[n-1].table {
-				t.frames[n-1].key = t.word
+				fr := &t.frames[n-1]
+				fr.path = fr.outer
+				if t.word != "" {
+					if len(fr.outer)+1+len(t.word) > maxTOMLPath {
+						t.err = errDepth
+						return out
+					}
+					fr.path += "." + t.word
+				}
 			}
 		case ',':
 			if n := len(t.frames); n > 0 && t.frames[n-1].table {
-				t.frames[n-1].key = ""
+				t.frames[n-1].path = t.frames[n-1].outer
 			}
 		case ' ', '\t':
 		default:

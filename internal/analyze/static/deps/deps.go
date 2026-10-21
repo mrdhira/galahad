@@ -56,7 +56,7 @@ var (
 	pyName       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
 	pySeparators = regexp.MustCompile(`[-_.]+`)
 	pyScheme     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
-	errDepth     = errors.New("json nested too deeply")
+	errDepth     = errors.New("nested too deeply")
 )
 
 type analyzer struct{}
