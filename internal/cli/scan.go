@@ -39,6 +39,8 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	cpus := fs.Int("cpus", defaultCPUs, "virtual CPUs of the guest")
 	memory := fs.Int("memory", defaultMemoryMiB, "memory of the guest in MiB")
 	noNetwork := fs.Bool("no-network", false, "give the sandbox no network at all, not even through the proxy")
+	forceGit := fs.Bool("git", false, "treat an https link as a Git repository and clone it")
+	submodules := fs.Bool("submodules", false, "also fetch the submodules of a Git repository")
 	var allowHosts []string
 	fs.Func("allow-host", "let the sandbox reach this host as well; may be repeated", func(h string) error {
 		// The proxy policy is the one that decides what a host name is.
@@ -60,9 +62,13 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "galahad scan: want exactly one path or link, got %d arguments\n\n%s", fs.NArg(), usage)
 		return ExitUsage
 	}
-	tgt, err := classifyTarget(fs.Arg(0))
+	tgt, err := classifyTarget(fs.Arg(0), *forceGit)
 	if err != nil {
 		fmt.Fprintf(stderr, "galahad scan: %v\n\n%s", err, usage)
+		return ExitUsage
+	}
+	if *submodules && tgt.source != protocol.SourceGit {
+		fmt.Fprintf(stderr, "galahad scan: --submodules only applies to a Git repository\n\n%s", usage)
 		return ExitUsage
 	}
 	if tgt.source != protocol.SourceLocal && *noNetwork {
@@ -108,6 +114,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		NoNetwork:  *noNetwork,
 		Source:     tgt.source,
 		AllowHosts: allowHosts,
+		Submodules: *submodules,
 		Progress: func(stage string) {
 			fmt.Fprintf(stderr, "galahad: %s\n", stage)
 		},

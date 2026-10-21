@@ -99,6 +99,7 @@ type guestFrames struct {
 	result   *protocol.Result
 	errMsg   *protocol.Error
 	probe    []byte // the data of the probe artifact
+	ingest   []byte // the data of the ingest.log artifact
 }
 
 // readGuest reads the frames of the guest as the host would: in order, then EOF.
@@ -135,6 +136,8 @@ func readGuest(t *testing.T, c net.Conn) guestFrames {
 				t.Fatalf("artifact: %v", err)
 			}
 			switch a.ID {
+			case protocol.ArtifactIngestLog:
+				got.ingest = a.Data
 			case protocol.ArtifactProbeJSON:
 				got.probe = a.Data
 			case protocol.ArtifactToolsLog:

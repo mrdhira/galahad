@@ -80,9 +80,10 @@ if go list -f '{{join .GoFiles " "}}' ./internal/proxy | grep -F -q testhooks_fa
   echo "a build without tags must not contain the proxy test hooks" >&2
   exit 1
 fi
-# The net-probe job, the bad-result hooks and the Drive base override of the fake guest, and the
-# signature directory hook of the guest tools exist only in galahadtest builds.
-for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galahadtest.go internal/agent/drivebase_galahadtest.go internal/job/netprobe_galahadtest.go internal/analyze/tools/sigroot_galahadtest.go; do
+# The net-probe job, the bad-result hooks and the Drive base override of the fake guest, the
+# signature directory hook of the guest tools and plain http for .test Git hosts exist only in
+# galahadtest builds.
+for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galahadtest.go internal/agent/drivebase_galahadtest.go internal/job/netprobe_galahadtest.go internal/analyze/tools/sigroot_galahadtest.go internal/protocol/githttp_galahadtest.go; do
   pkg="./$(dirname "$f")"
   name="$(basename "$f")"
   if ! go list -tags galahadtest -f '{{join .GoFiles " "}}' "$pkg" | grep -F -q "$name"; then

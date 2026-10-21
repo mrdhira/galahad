@@ -59,10 +59,12 @@ type Spec struct {
 	// NoNetwork gives the guest no proxy port, so it has no network at all.
 	NoNetwork bool
 	// Source says what the target is: protocol.SourceLocal (the default) for a path, or
-	// protocol.SourceURL or protocol.SourceDrive for a link that the guest downloads.
+	// protocol.SourceURL, SourceDrive or SourceGit for a link that the guest fetches.
 	Source string
 	// AllowHosts are the extra hosts the guest may reach (--allow-host).
 	AllowHosts []string
+	// Submodules asks the guest to update the submodules of a Git target.
+	Submodules bool
 	// Progress is called with each stage the guest reports. It may be nil.
 	Progress func(stage string)
 }
@@ -228,7 +230,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	}
 
 	job := protocol.Job{
-		ID: r.job.ID, Kind: protocol.KindScan, Source: r.in.source, Name: r.in.name, URL: cmp.Or(r.in.url, probe),
+		ID: r.job.ID, Kind: protocol.KindScan, Source: r.in.source, Name: r.in.name, URL: cmp.Or(r.in.url, probe), Submodules: r.spec.Submodules,
 		Timeouts: protocol.Timeouts{Job: min(max(int(time.Until(deadline).Seconds()), 1), protocol.MaxTimeoutSec)},
 		Now:      r.start.UTC(),
 	}

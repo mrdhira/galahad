@@ -38,8 +38,8 @@ type entry struct {
 // plan is what the host sends for one target. The host walks the tree but never reads
 // what is in the files, except to copy it. A link has no entries: the guest downloads it.
 type plan struct {
-	source  string // protocol.SourceLocal, SourceURL or SourceDrive
-	url     string // the link of a url or drive target
+	source  string // protocol.SourceLocal, SourceURL, SourceDrive or SourceGit
+	url     string // the link of a url, drive or git target
 	probe   string // the address of a net-probe job, which galahadtest builds can ask for; empty otherwise
 	name    string // base name of the target, the single top-level element of the tar stream
 	isDir   bool
@@ -60,11 +60,11 @@ func newPlan(source, target string) (*plan, error) {
 			p.probe = netProbeURL()
 		}
 		return p, err
-	case protocol.SourceURL, protocol.SourceDrive:
+	case protocol.SourceURL, protocol.SourceDrive, protocol.SourceGit:
 		if len(target) > protocol.MaxURL {
 			return nil, fmt.Errorf("the link is %d bytes, the most is %d", len(target), protocol.MaxURL)
 		}
-		return &plan{source: source, url: target}, nil
+		return &plan{source: source, url: target, isDir: source == protocol.SourceGit}, nil
 	}
 	return nil, fmt.Errorf("the source %q is not supported", source)
 }
