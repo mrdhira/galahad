@@ -32,6 +32,11 @@ type File struct {
 	Kind  ident.Kind
 	Data  []byte
 	Depth int // container depth, 0 for files on disk
+
+	// Member is the cleaned path of a container member inside its own container,
+	// for example "repo/.vscode/tasks.json". It is empty for files on disk. The
+	// engine sets it.
+	Member string
 }
 
 // Output is what an analyzer found in one file. For Children, only Name (the
@@ -196,15 +201,19 @@ func (j *job) walkFile(ctx context.Context, path string) error {
 // an extra file.
 func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) {
 	j.topFiles++
-	if !late && j.bytes >= MaxTotalBytes && !j.priority(cp) {
+	// Past the file cap, or with the job byte budget spent, only an auto-run file is
+	// read, from the extra allowance and not the job budget.
+	extraOnly := late || j.bytes >= MaxTotalBytes
+	if extraOnly && !late && !j.priority(cp) {
 		j.res.Coverage.Truncated = true
 		j.skip(cp, protocol.SkipTooLarge)
 		return
 	}
 	limit := MaxTotalBytes - j.bytes
 	readMax := int64(MaxFileSize)
-	if late {
+	if extraOnly {
 		if j.extraFiles >= MaxExtraFiles || j.extraBytes >= MaxExtraBytes {
+			j.res.Coverage.Truncated = true
 			j.refuse(cp)
 			return
 		}
@@ -218,7 +227,7 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 	}
 	size := int64(len(data))
 	_, _ = h.Write(data) // hash.Hash never fails
-	if size > MaxFileSize && !late {
+	if size > MaxFileSize && !extraOnly {
 		n, err := io.Copy(h, io.LimitReader(r, limit-size+1))
 		size += n
 		if err != nil {
@@ -226,35 +235,44 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 			return
 		}
 	}
-	if late && size > readMax {
+	if extraOnly && size > readMax {
 		// Over MaxFileSize or over what is left of the extra allowance. The bytes
 		// read count against the allowance, so reading them stays bounded.
+		j.res.Coverage.Truncated = true
 		j.extraFiles++
 		j.extraBytes += size
-		j.skip(cp, protocol.SkipBudget)
+		j.skip(cp, j.unreadReason(cp, ident.Identify(name, data[:min(len(data), identifyWindow)])))
 		return
 	}
-	if late || size > limit {
+	if extraOnly || size > limit {
 		j.res.Coverage.Truncated = true
-		switch {
-		case !j.priority(cp):
-			j.skip(cp, protocol.SkipTooLarge)
-		case size > MaxFileSize:
-			j.skip(cp, protocol.SkipBudget) // an auto-run file that no analyzer can read hides content
-		default:
-			j.extra(ctx, cp, name, data, h.Sum(nil))
+		if size > MaxFileSize || !j.priority(cp) {
+			j.skip(cp, j.unreadReason(cp, ident.Identify(name, data[:min(len(data), identifyWindow)])))
+			return
 		}
+		j.extra(ctx, File{Path: cp, Name: name, Data: data}, h.Sum(nil))
 		return
 	}
 	j.bytes += size
 	j.topBytes += size
-	if f, ok := j.accept(cp, name, 0, data, size, h.Sum(nil)); ok {
+	if f, ok := j.accept(File{Path: cp, Name: name, Data: data}, size, h.Sum(nil)); ok {
 		j.dispatch(ctx, f)
 	}
 	j.drain(ctx)
 }
 
-// priority reports whether an analyzer must see the file at cp.
+// unreadReason is the skip for a file over a size limit that no analyzer reads.
+// An auto-run file that stays unread hides content, but an executable in a
+// tool directory, such as a copied interpreter, is not a config file.
+func (j *job) unreadReason(path string, kind ident.Kind) string {
+	if j.priority(path) && kind != ident.ELF && kind != ident.PE && kind != ident.MachO {
+		return protocol.SkipBudget
+	}
+	return protocol.SkipTooLarge
+}
+
+// priority reports whether an analyzer must see the file at cp, a path on disk or
+// a path inside a container.
 func (j *job) priority(cp string) bool {
 	for _, a := range j.analyzers {
 		if p, ok := a.(Priority); ok && p.Priority(cp) {
@@ -267,14 +285,14 @@ func (j *job) priority(cp string) bool {
 // extra analyzes a small file that an analyzer must see although the file cap or
 // the byte budget is spent. It draws on its own allowance and does not charge the
 // job budget.
-func (j *job) extra(ctx context.Context, cp, name string, data, sum []byte) {
-	if j.extraFiles >= MaxExtraFiles || j.extraBytes+int64(len(data)) > MaxExtraBytes {
-		j.refuse(cp)
+func (j *job) extra(ctx context.Context, c File, sum []byte) {
+	if j.extraFiles >= MaxExtraFiles || j.extraBytes+int64(len(c.Data)) > MaxExtraBytes {
+		j.refuse(c.Path)
 		return
 	}
 	j.extraFiles++
-	j.extraBytes += int64(len(data))
-	if f, ok := j.accept(cp, name, 0, data, int64(len(data)), sum); ok {
+	j.extraBytes += int64(len(c.Data))
+	if f, ok := j.accept(c, int64(len(c.Data)), sum); ok {
 		j.dispatch(ctx, f)
 	}
 	j.drain(ctx)
@@ -307,26 +325,27 @@ func (j *job) admit() (ok, more bool) {
 
 // accept records a file's info and returns it for analysis, unless it is too
 // large to hand to analyzers.
-func (j *job) accept(cp, name string, depth int, data []byte, size int64, sum []byte) (File, bool) {
+func (j *job) accept(c File, size int64, sum []byte) (File, bool) {
 	large := size > MaxFileSize
-	head := data[:min(len(data), identifyWindow)]
+	head := c.Data[:min(len(c.Data), identifyWindow)]
 	if !large {
-		head = data
+		head = c.Data
 	}
-	kind := ident.Identify(name, head)
-	info := protocol.FileInfo{Path: cp, Size: size, Kind: string(kind), SHA256: hex.EncodeToString(sum)}
+	kind := ident.Identify(c.Name, head)
+	info := protocol.FileInfo{Path: c.Path, Size: size, Kind: string(kind), SHA256: hex.EncodeToString(sum)}
 	if large {
 		j.res.Files = append(j.res.Files, info)
-		if j.priority(cp) {
-			j.skip(cp, protocol.SkipBudget) // an auto-run file that no analyzer can read hides content
-		} else {
-			j.skip(cp, protocol.SkipTooLarge)
+		p := c.Path
+		if c.Member != "" {
+			p = c.Member
 		}
+		j.skip(c.Path, j.unreadReason(p, kind))
 		return File{}, false
 	}
-	info.Entropy = ident.Entropy(data)
+	info.Entropy = ident.Entropy(c.Data)
 	j.res.Files = append(j.res.Files, info)
-	return File{Path: cp, Name: name, Kind: kind, Data: data, Depth: depth}, true
+	c.Kind = kind
+	return c, true
 }
 
 // dispatch runs every analyzer on f and merges what they return. The file
@@ -438,6 +457,7 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 		// ignores empty and "." segments, so path rules must see the same path.
 		c.Name = path.Clean(strings.ReplaceAll(c.Name, `\`, "/"))
 		c.Path = protocol.CleanPath(parent.Path + "!/" + c.Name)
+		c.Member = c.Name
 		c.Name = c.Name[strings.LastIndexByte(c.Name, '/')+1:]
 		c.Depth = parent.Depth + 1
 		if j.bytes+int64(len(c.Data)) > MaxTotalBytes {
@@ -471,20 +491,36 @@ func (j *job) drain(ctx context.Context) {
 			j.dropMember(c.Path)
 			j.queue = nil
 		case !ok:
-			j.dropMember(c.Path)
+			// Past the file cap. A member an analyzer asks for is still analyzed from
+			// the extra allowance, and any other is only counted.
+			j.extraMember(ctx, c)
 		case c.Depth > MaxNesting:
 			j.skip(c.Path, protocol.SkipDepth)
 		default:
 			sum := sha256.Sum256(c.Data)
-			if f, ok := j.accept(c.Path, c.Name, c.Depth, c.Data, int64(len(c.Data)), sum[:]); ok {
+			if f, ok := j.accept(c, int64(len(c.Data)), sum[:]); ok {
 				j.dispatch(ctx, f)
 			}
 		}
 	}
 }
 
-// dropMember records that members past the file cap were not analyzed. They could
-// hold a payload, so one budget skip, at the first of them, says so.
+// extraMember analyzes a member past the file cap if an analyzer asks for it.
+func (j *job) extraMember(ctx context.Context, c File) {
+	switch {
+	case !j.priority(c.Member):
+	case c.Depth > MaxNesting:
+		j.skip(c.Path, protocol.SkipDepth)
+	case int64(len(c.Data)) > MaxFileSize:
+		j.skip(c.Path, j.unreadReason(c.Member, ident.Identify(c.Name, c.Data[:identifyWindow])))
+	default:
+		sum := sha256.Sum256(c.Data)
+		j.extra(ctx, c, sum[:])
+	}
+}
+
+// dropMember records that members past the counting limit were not analyzed.
+// They could hold a payload, so one budget skip, at the first of them, says so.
 func (j *job) dropMember(path string) {
 	if !j.memberCut {
 		j.memberCut = true

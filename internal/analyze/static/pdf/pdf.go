@@ -24,7 +24,6 @@ import (
 	"compress/flate"
 	"context"
 	"encoding/ascii85"
-	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -79,11 +78,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if f.Kind != ident.PDF {
 		return analyze.Output{}, nil
 	}
-	maxDecoded, byJob := int64(MaxFileBytes), false
-	if b, ok := analyze.Budget(ctx); ok && b < maxDecoded {
-		maxDecoded, byJob = b, true
-	}
-	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, strs: map[int]stringVal{}, lineNo: 1, maxDecoded: int(maxDecoded), byJob: byJob}
+	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, strs: map[int]stringVal{}, lineNo: 1}
 	return s.run()
 }
 
@@ -160,26 +155,23 @@ type stringVal struct {
 }
 
 type scanner struct {
-	ctx        context.Context
-	f          analyze.File
-	objs       []*object
-	byNum      map[int]*object
-	hits       map[string]*hit
-	seenURI    map[string]bool
-	memo       map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
-	strs       map[int]stringVal
-	iocs       []protocol.IOC
-	decoded    int
-	maxDecoded int  // decoded bytes allowed for the file
-	byJob      bool // the job budget, not MaxFileBytes, sets maxDecoded
-	overBudget bool // decoding stopped at the job budget: budget
-	lineOff    int  // lineAt cursor: offset in the file and its line number
-	lineNo     int
-	encrypted  bool
-	undecoded  bool
-	truncated  bool // the token limit cut a dictionary, trailer or object stream: budget
-	cutPlain   bool // the token limit cut plain stream content: too_large
-	tooMany    bool
+	ctx       context.Context
+	f         analyze.File
+	objs      []*object
+	byNum     map[int]*object
+	hits      map[string]*hit
+	seenURI   map[string]bool
+	memo      map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
+	strs      map[int]stringVal
+	iocs      []protocol.IOC
+	decoded   int
+	lineOff   int // lineAt cursor: offset in the file and its line number
+	lineNo    int
+	encrypted bool
+	undecoded bool
+	truncated bool // the token limit cut a dictionary, trailer or object stream: budget
+	cutPlain  bool // the token limit cut plain stream content: too_large
+	tooMany   bool
 }
 
 // tok tokenizes b and remembers that the token limit was hit.
@@ -218,7 +210,7 @@ func (s *scanner) run() (analyze.Output, error) {
 		out.Findings = append(out.Findings, r.Finding(evs...))
 	}
 	out.IOCs = s.iocs
-	if s.tooMany || s.truncated || s.overBudget {
+	if s.tooMany || s.truncated {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipBudget})
 	} else if s.cutPlain {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipTooLarge})
@@ -526,12 +518,6 @@ func (s *scanner) prepareStream(o *object, raw []byte, rawAt int) {
 	for _, f := range filters {
 		out, err := s.decode(f, data)
 		data = out
-		if err == reasonBudget {
-			// The job ran out of budget, which says nothing about the stream. The
-			// budget skip covers it, with no GAL-PDF-007 and no unsupported skip.
-			s.overBudget = true
-			break
-		}
 		if err != "" {
 			s.addAt(ruleOpaque, o.hdr, err, evidenceKey(keyStream, o.hdr))
 			s.undecoded = true
@@ -551,13 +537,10 @@ func slicesAny(filters []string, set map[string]bool) bool {
 	return false
 }
 
-// reasonBudget is the reason decode gives when the job budget cut the stream short.
-const reasonBudget = "job budget"
-
 // decode applies one filter within the per-stream and per-file limits. It returns
 // the bytes it got and, when it could not decode everything, a reason.
 func (s *scanner) decode(filter string, in []byte) ([]byte, string) {
-	limit := min(MaxStreamBytes, s.maxDecoded-s.decoded)
+	limit := min(MaxStreamBytes, MaxFileBytes-s.decoded)
 	var r io.Reader
 	switch filter {
 	case "FlateDecode", "Fl":
@@ -573,9 +556,6 @@ func (s *scanner) decode(filter string, in []byte) ([]byte, string) {
 		out, over := decodeHexFilter(in, limit)
 		s.decoded += len(out)
 		if over {
-			if s.byJob && limit < MaxStreamBytes {
-				return out, reasonBudget
-			}
 			return out, "ASCIIHexDecode stream over the size limit"
 		}
 		return out, ""
@@ -595,9 +575,6 @@ func (s *scanner) decode(filter string, in []byte) ([]byte, string) {
 		err = io.ErrShortBuffer
 	}
 	s.decoded += len(out)
-	if errors.Is(err, io.ErrShortBuffer) && s.byJob && limit < MaxStreamBytes {
-		return out, reasonBudget
-	}
 	if err != nil {
 		return out, "undecodable " + filter + " stream"
 	}

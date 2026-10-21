@@ -1,6 +1,7 @@
 package acceptance_test
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
 	"path/filepath"
@@ -37,6 +38,28 @@ func zipUnsupportedMember(t *testing.T, dest string) {
 	writeBytes(t, dest, buf.Bytes())
 }
 
+// tarBadHeader writes a tar with a benign a.txt, then a header with a bad checksum, then a folder-open
+// task. GNU tar skips the bad header and still extracts the task.
+func tarBadHeader(t *testing.T, dest string) {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range []struct{ name, data string }{{"a.txt", "hello\n"}, {".vscode/tasks.json", string(p1Tasks(t))}} {
+		if err := tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.data)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(e.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := buf.Bytes()
+	copy(b[1024+148:], "9999999\x00") // the checksum field of the second header
+	writeBytes(t, dest, b)
+}
+
 // TestSkipAccounting checks that input the agent could not read never gives a clean verdict, and
 // that a skip does not count a file twice.
 func TestSkipAccounting(t *testing.T) {
@@ -58,6 +81,21 @@ func TestSkipAccounting(t *testing.T) {
 			wantCode: 10,
 			wantSkip: "unreadable",
 			wantSeen: 3, wantAnalyzed: 2,
+		},
+		{
+			name:     "tar with a bad header before the task is not clean",
+			setup:    builtFile("bad.tar", tarBadHeader),
+			wantCode: 10,
+			wantSkip: "unreadable",
+		},
+		{
+			name: "copied interpreter in a virtualenv is not a hidden payload",
+			setup: filesRepo(map[string]string{
+				".venv/bin/python": "\x7fELF\x02\x01\x01" + strings.Repeat("\x00", 2<<20),
+				"app.py":           "print('hi')\n",
+			}),
+			wantCode: 0,
+			wantSkip: "too_large",
 		},
 		{
 			name: "7z inside a zip is unsupported but not a hidden payload",

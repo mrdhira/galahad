@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -227,7 +228,12 @@ func (w *walker) entity(get func(string) string, body io.Reader, off, depth int)
 		mr := multipart.NewReader(body, params["boundary"])
 		for !w.stop && w.ctx.Err() == nil {
 			p, err := mr.NextRawPart()
+			if errors.Is(err, io.EOF) {
+				return
+			}
 			if err != nil {
+				// The parts after a broken one were not read, and a lenient reader might.
+				w.skip(protocol.SkipUnreadable)
 				return
 			}
 			w.entity(p.Header.Get, p, -1, depth+1)

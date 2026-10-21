@@ -131,6 +131,7 @@ func TestAnalyze(t *testing.T) {
 		},
 		{name: "multipart nested too deep", file: "a.eml", data: deep, wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"depth"}},
 		{name: "too many parts", file: "a.eml", data: multi(many...), wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"budget"}},
+		{name: "part with a malformed header leaves the rest unreadable", file: "a.eml", data: multi("Content-Type: text/plain\n\nhi", "no colon in this header\n\nx"), wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"unreadable"}},
 		{
 			name: "base64 attachment keeps the raw decoded name with RTLO",
 			file: "a.eml",

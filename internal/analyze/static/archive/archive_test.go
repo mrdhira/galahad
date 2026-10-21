@@ -469,7 +469,14 @@ func TestAnalyze(t *testing.T) {
 		{name: "tar members become children", file: "in.tar", data: tarOf(t, tarEntry{name: "d/", typeflag: tar.TypeDir}, tarEntry{name: "a.txt", data: "a", typeflag: tar.TypeReg}),
 			wantChildren: []string{"a.txt"}},
 		{name: "tar that cannot be read", file: "in.tar", data: bytes.Repeat([]byte("x"), 1024),
-			wantSkips: []string{"in.tar parse_error"}},
+			wantSkips: []string{"in.tar unreadable"}},
+		{name: "tar with a bad header after a member keeps the member and reports the rest unreadable", file: "in.tar",
+			data: func() []byte {
+				b := tarOf(t, tarEntry{name: "a.txt", data: "a", typeflag: tar.TypeReg}, tarEntry{name: ".vscode/tasks.json", data: "{}", typeflag: tar.TypeReg})
+				copy(b[1024+148:], "9999999\x00") // the checksum of the second header
+				return b
+			}(),
+			wantChildren: []string{"a.txt"}, wantSkips: []string{"in.tar unreadable"}},
 		{name: "tar entry that escapes", file: "in.tar", data: tarOf(t, tarEntry{name: "../x", data: "x", typeflag: tar.TypeReg}),
 			wantFindings: []string{"GAL-ARCHIVE-001 in.tar!/../x"}},
 		{name: "tar symlink", file: "in.tar", data: tarOf(t, tarEntry{name: "link", link: "/etc/passwd", typeflag: tar.TypeSymlink}),

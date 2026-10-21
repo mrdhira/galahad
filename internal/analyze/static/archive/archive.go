@@ -578,7 +578,8 @@ func (u *unpack) tar(r io.Reader) error {
 			return nil
 		}
 		if err != nil {
-			u.skip(u.f.Path, protocol.SkipParseError)
+			// GNU tar may still extract what follows a header this reader rejects.
+			u.skip(u.f.Path, protocol.SkipUnreadable)
 			return nil
 		}
 		ok, stop := u.admit(hdr.Name)

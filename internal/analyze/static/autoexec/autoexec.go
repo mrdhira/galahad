@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/mrdhira/galahad/internal/analyze"
+	"github.com/mrdhira/galahad/internal/analyze/ident"
 	"github.com/mrdhira/galahad/internal/analyze/static/signals"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
@@ -75,7 +76,7 @@ func (analyzer) Name() string { return "autoexec" }
 // list where automation exists (Makefile, build.rs, CI workflows) are left out:
 // a large tree has thousands of them, and they cannot run anything by themselves.
 func (analyzer) Priority(path string) bool {
-	t := route(path, false)
+	t := route(path)
 	return t != none && t != inventoryFile
 }
 
@@ -106,15 +107,10 @@ const (
 	inventoryFile
 )
 
-// route says which kind of file the path names. The path is matched
-// case-insensitively. For a member of a container, member is true and the path is
-// matched by what follows the last "!/". A path on disk is matched whole, because
-// a directory there may be called "x!".
-func route(filePath string, member bool) trigger {
-	rel := filePath
-	if i := strings.LastIndex(rel, "!/"); member && i >= 0 {
-		rel = rel[i+2:]
-	}
+// route says which kind of file the path names, matched case-insensitively. The
+// path is relative to the target or, for a container member, to its container
+// (analyze.File.Member), never cut at a "!/" that a directory name may hold.
+func route(rel string) trigger {
 	segs := strings.Split(strings.ToLower(rel), "/")
 	base := segs[len(segs)-1]
 	dirs := segs[:len(segs)-1]
@@ -184,7 +180,12 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	s := &scan{ctx: ctx, f: f, out: &out, counts: map[string]int{}}
 
 	var run func()
-	switch route(f.Path, f.Depth > 0) {
+	rel := f.Path
+	if f.Member != "" {
+		rel = f.Member
+	}
+	trig := route(rel)
+	switch trig {
 	case toolBinFile, huskyGenerated:
 		run = s.riskFile
 	case tasksFile:
@@ -230,8 +231,13 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 		return out, nil
 	}
 	if len(f.Data) > analyze.MaxConfigSize {
-		// Too big to read, and a file that runs code is where a payload hides behind padding.
-		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipBudget})
+		// Too big to read, and a file that runs code is where a payload hides behind
+		// padding. A copied interpreter or native tool is not a config file, though.
+		reason := protocol.SkipBudget
+		if (trig == toolBinFile || trig == huskyGenerated) && (f.Kind == ident.ELF || f.Kind == ident.PE || f.Kind == ident.MachO) {
+			reason = protocol.SkipTooLarge
+		}
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: reason})
 		return out, nil
 	}
 	run()

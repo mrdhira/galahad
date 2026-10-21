@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mrdhira/galahad/internal/analyze"
+	"github.com/mrdhira/galahad/internal/analyze/ident"
 	"github.com/mrdhira/galahad/internal/analyze/static/autoexec"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
@@ -277,20 +278,22 @@ func TestAnalyzeMemberPath(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		path  string
-		depth int
-		data  string
+		path   string
+		member string
+		depth  int
+		data   string
 		// expectations: "<rule suffix>:<line>" of the primary evidence
 		want []string
 	}{
-		{name: "member of a container is matched by what follows the last separator", path: "my!/x.zip!/.vscode/tasks.json", depth: 1, data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
+		{name: "member of a container is matched by its path in the container", path: "my!/x.zip!/.vscode/tasks.json", member: ".vscode/tasks.json", depth: 1, data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
+		{name: "member in a directory called x! is matched by its whole path in the container", path: "x.zip!/repo/.devcontainer/py!/devcontainer.json", member: "repo/.devcontainer/py!/devcontainer.json", depth: 1, data: initCmd, want: []string{"003:1", "011:1"}},
 		{name: "directory on disk called x! is matched whole", path: ".devcontainer/py!/devcontainer.json", depth: 0, data: initCmd, want: []string{"003:1", "011:1"}},
 		{name: "file on disk is not cut at a separator in a directory name", path: "app!/.vscode/tasks.json", depth: 0, data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
-		{name: "member whose cut path names nothing", path: "x.zip!/readme.txt", depth: 1, data: initCmd},
+		{name: "member whose path in the container names nothing", path: "x.zip!/readme.txt", member: "readme.txt", depth: 1, data: initCmd},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Data: []byte(tt.data), Depth: tt.depth}
+			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Data: []byte(tt.data), Depth: tt.depth, Member: tt.member}
 
 			out, err := autoexec.New().Analyze(context.Background(), f)
 
@@ -356,6 +359,37 @@ func TestAnalyzePaddedPnpmfile(t *testing.T) {
 
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("findings = %v, want %v", got, tt.want)
+			}
+			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
+				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)
+			}
+		})
+	}
+}
+
+func TestAnalyzeOversizeKind(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		kind ident.Kind
+		// expectations
+		wantReason string
+	}{
+		{name: "copied interpreter in a virtualenv is too large and not a hidden payload", path: ".venv/bin/python", kind: ident.ELF, wantReason: "too_large"},
+		{name: "native tool in node_modules/.bin", path: "node_modules/.bin/esbuild", kind: ident.MachO, wantReason: "too_large"},
+		{name: "Windows launcher in a virtualenv", path: "venv/Scripts/python.exe", kind: ident.PE, wantReason: "too_large"},
+		{name: "text script in a virtualenv hides behind its size", path: ".venv/bin/activate", kind: ident.Text, wantReason: "budget"},
+		{name: "executable named like a tasks file still hides", path: ".vscode/tasks.json", kind: ident.ELF, wantReason: "budget"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Kind: tt.kind, Data: make([]byte, analyze.MaxConfigSize+1)}
+
+			out, err := autoexec.New().Analyze(context.Background(), f)
+
+			if err != nil {
+				t.Fatal(err)
 			}
 			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
 				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)
