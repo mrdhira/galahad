@@ -9,6 +9,9 @@ import (
 	"io"
 	"runtime"
 	"runtime/debug"
+	"time"
+
+	"github.com/mrdhira/galahad/internal/sandbox"
 )
 
 // Exit codes. 10 and 20 are reserved for scan verdicts.
@@ -33,8 +36,30 @@ Commands:
   help      Show this help
 `
 
+// Env holds the parts of the environment a command depends on, so tests can replace them.
+type Env struct {
+	// Home is the galahad state directory. Empty means config.Home, looked up when a
+	// command needs it.
+	Home string
+	// Now returns the current time. Nil means time.Now.
+	Now func() time.Time
+	// Backend returns the sandbox backend. Nil means sandbox.Select.
+	Backend func() (sandbox.Backend, error)
+}
+
 // Run executes the command in args (without the program name) and returns the exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
+	return RunWithEnv(args, stdout, stderr, Env{})
+}
+
+// RunWithEnv is Run with an explicit environment.
+func RunWithEnv(args []string, stdout, stderr io.Writer, env Env) int {
+	if env.Now == nil {
+		env.Now = time.Now
+	}
+	if env.Backend == nil {
+		env.Backend = sandbox.Select
+	}
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)
 		return ExitClean

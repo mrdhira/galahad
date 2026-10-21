@@ -50,7 +50,7 @@ func testMain(m *testing.M) int {
 		{"./cmd/galahad", binPath, "cli"},
 		{"./cmd/galahad-agent", agentPath, "agent"},
 	} {
-		build := exec.Command("go", "build",
+		build := exec.Command("go", "build", "-tags", "galahadtest",
 			"-ldflags", "-X github.com/mrdhira/galahad/internal/"+b.module+".version="+stampedVersion+
 				" -X github.com/mrdhira/galahad/internal/"+b.module+".commit="+stampedCommit,
 			"-o", b.out, b.pkg)

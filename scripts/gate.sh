@@ -38,10 +38,14 @@ fi
 
 step vet
 go vet ./...
+go vet -tags galahadtest ./...
+# The vm tag is for tests that need a real VM. No file has it yet, which is not an error.
+go vet -tags vm ./test/acceptance/
 
 step lint
 golangci_lint="$(tool golangci-lint)"
 "$golangci_lint" run ./...
+"$golangci_lint" run --build-tags galahadtest ./...
 
 step build
 for goos in linux darwin windows; do
@@ -52,14 +56,20 @@ for goos in linux darwin windows; do
 done
 
 step "host imports"
-# The host binary must never link the analysis code, which parses untrusted bytes.
+# The host binary must never link the code that parses untrusted bytes or runs in the guest.
+main_module="$(go list -m)"
 host_deps="$(go list -deps ./cmd/galahad)"
-case "$host_deps" in
-  *"$(go list -m)/internal/analyze"*)
-    echo "cmd/galahad must not depend on internal/analyze (host never parses untrusted bytes)" >&2
+for pkg in analyze ingest vsock agent; do
+  if printf '%s\n' "$host_deps" | grep -E -q "^$main_module/internal/$pkg(/|$)"; then
+    echo "cmd/galahad must not depend on internal/$pkg (host never parses untrusted bytes)" >&2
     exit 1
-    ;;
-esac
+  fi
+done
+# The fake sandbox backend exists only in galahadtest builds.
+if printf '%s\n' "$host_deps" | grep -F -q "$main_module/internal/sandbox/fake"; then
+  echo "a build without tags must not contain internal/sandbox/fake" >&2
+  exit 1
+fi
 
 step vuln
 if [ "${SKIP_VULN:-}" = "1" ]; then
@@ -75,10 +85,11 @@ gosec="$(tool gosec)"
 
 step test
 go test -race -count=1 -cover ./...
+# The acceptance tests build their own binaries with the tag, so they run once above.
+go test -race -count=1 -tags galahadtest ./cmd/... ./internal/...
 
 step deps
 go mod verify
-main_module="$(go list -m)"
 mods="$(go list -m -f '{{.Path}}' all)"
 bad="$(printf '%s\n' "$mods" | grep -v -x -F -e "$main_module" | grep -v '^golang\.org/x/' || true)"
 if [ -n "$bad" ]; then
