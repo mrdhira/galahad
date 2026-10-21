@@ -39,9 +39,12 @@ var (
 	npmSnapshot string
 	//go:embed top-pypi.txt
 	pypiSnapshot string
+	//go:embed real-npm-scopes.txt
+	scopeSnapshot string
 
-	topNpm  = load(npmSnapshot)
-	topPypi = load(pypiSnapshot)
+	topNpm     = load(npmSnapshot)
+	realScopes = load(scopeSnapshot).names
+	topPypi    = load(pypiSnapshot)
 )
 
 const maxJSONDepth = 32
@@ -372,7 +375,8 @@ func foreignHost(raw string, allowed map[string]bool) bool {
 }
 
 // npmScopes are well-known scopes. Every package in one of them is treated as
-// legitimate, and a scope one edit away from one is a typosquat of it.
+// legitimate, and a scope one edit away from one is a typosquat of it unless it
+// is a real scope itself (realScopes), such as @mdi next to @mui.
 var npmScopes = []string{
 	"@angular", "@apollo", "@aws-cdk", "@aws-sdk", "@azure", "@babel", "@emotion", "@eslint",
 	"@eslint-community", "@fortawesome", "@google-cloud", "@humanwhocodes", "@jest", "@jridgewell",
@@ -390,7 +394,7 @@ func npmSquat(name string) bool {
 	if !scoped || !strings.HasPrefix(name, "@") {
 		return topNpm.squat(name)
 	}
-	if slices.Contains(npmScopes, scope) {
+	if slices.Contains(npmScopes, scope) || realScopes[scope] {
 		return false
 	}
 	return slices.ContainsFunc(npmScopes, func(s string) bool { return oneEdit(scope, s) })

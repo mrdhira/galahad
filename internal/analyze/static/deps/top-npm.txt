@@ -61,7 +61,6 @@ basic-auth
 basic-ftp
 bcrypt
 bcryptjs
-benchmark
 better-sqlite3
 big.js
 bignumber.js

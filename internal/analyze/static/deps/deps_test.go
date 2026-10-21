@@ -217,10 +217,15 @@ func TestAnalyze(t *testing.T) {
 			data: "{\n\"devDependencies\": {\"@typescript-eslint/parser\": \"1\", \"@types/estree\": \"1\", \"@babel/parser\": \"1\", \"@types/lodahs\": \"1\"}\n}",
 		},
 		{
+			name: "real scopes one edit from a known scope are not typosquats",
+			file: "package.json",
+			data: "{\n\"dependencies\": {\"@mdi/js\": \"1\", \"@mux/mux-player\": \"1\", \"@lwc/engine-dom\": \"1\", \"@bazel/typescript\": \"1\", \"@remotion/player\": \"1\", \"@typed/navigation\": \"1\"}\n}",
+		},
+		{
 			name:         "a scoped name is compared by its scope, not its bare name",
 			file:         "package.json",
-			data:         "{\n\"dependencies\": {\n\"@typscript-eslint/parser\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"@jest/core\": \"1\",\n\"@babell/core\": \"1\",\n\"@jset/core\": \"1\",\n\"@vuee/x\": \"1\",\n\"@mu/x\": \"1\",\n\"@swd/x\": \"1\"\n}\n}",
-			wantFindings: []string{"GAL-DEPS-001@10", "GAL-DEPS-001@3", "GAL-DEPS-001@6", "GAL-DEPS-001@7", "GAL-DEPS-001@8", "GAL-DEPS-001@9"},
+			data:         "{\n\"dependencies\": {\n\"@typscript-eslint/parser\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"@jest/core\": \"1\",\n\"@babell/core\": \"1\",\n\"@jset/core\": \"1\",\n\"@vuee/x\": \"1\",\n\"@mu/x\": \"1\",\n\"@swd/x\": \"1\",\n\"@wypes/x\": \"1\",\n\"@babeli/x\": \"1\",\n\"@typeis/x\": \"1\"\n}\n}",
+			wantFindings: []string{"GAL-DEPS-001@10", "GAL-DEPS-001@11", "GAL-DEPS-001@12", "GAL-DEPS-001@13", "GAL-DEPS-001@3", "GAL-DEPS-001@6", "GAL-DEPS-001@7", "GAL-DEPS-001@8", "GAL-DEPS-001@9"},
 		},
 		{
 			name:         "package.json reports only the findings per rule the engine keeps",
