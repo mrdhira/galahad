@@ -22,7 +22,7 @@ var ruleYARA = protocol.Rule{ID: "GAL-YARA-001", Severity: protocol.SeverityMedi
 var yaraRule = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
 func init() {
-	registered = append(registered, func() Tool { return NewYARA(filepath.Join(sigRoot, "yara", "core.yarc")) })
+	registered = append(registered, func(Env) Tool { return NewYARA(filepath.Join(sigRoot, "yara", "core.yarc")) })
 }
 
 type yara struct{ rules string }

@@ -15,7 +15,7 @@ var (
 	testSHA = strings.Repeat("ab", 32)
 	testJob = protocol.Job{
 		ID: "20261021-153012-a1b2c3", Kind: protocol.KindScan, Source: protocol.SourceGit,
-		Name: "repo", URL: "https://github.com/a/b.git", Submodules: true,
+		Name: "repo", URL: "https://github.com/a/b.git", Submodules: true, Image: protocol.ImageRE,
 		Timeouts: protocol.Timeouts{Job: 600, Ingest: 300},
 		Now:      time.Date(2026, 10, 21, 15, 30, 12, 0, time.UTC),
 	}
@@ -110,6 +110,9 @@ func TestMessageValidate(t *testing.T) {
 		{name: "job source unknown", msg: job(func(j *protocol.Job) { j.Source = "ftp" }), wantErr: `source "ftp" not allowed`},
 		{name: "job scan without a source", msg: job(func(j *protocol.Job) { j.Source = "" }), wantErr: "source"},
 		{name: "job source on an update", msg: job(func(j *protocol.Job) { j.Kind = protocol.KindUpdate }), wantErr: "source"},
+		{name: "job image core", msg: job(func(j *protocol.Job) { j.Image = protocol.ImageCore })},
+		{name: "job image empty means core", msg: job(func(j *protocol.Job) { j.Image = "" })},
+		{name: "job image unknown", msg: job(func(j *protocol.Job) { j.Image = "full" }), wantErr: `image "full" not allowed`},
 		{name: "job name too long", msg: job(func(j *protocol.Job) { j.Name = runes("a", protocol.MaxPath+1) }), wantErr: "name is"},
 		{name: "job name with a bidi character", msg: job(func(j *protocol.Job) { j.Name = "invoice\u202efdp.exe" })},
 		{name: "job name has NUL", msg: job(func(j *protocol.Job) { j.Name = "a\x00" }), wantErr: "name is not valid"},

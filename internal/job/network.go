@@ -72,12 +72,37 @@ func networkOf(events []proxy.Event) *protocol.Network {
 	return n
 }
 
+// countsAsBlocked reports whether a blocked request to host counts against the input. A block for the
+// infrastructure host that the guest contacts by itself on every scan (api.osv.dev) does not: the
+// input did not make the request, and the host blocks it only when the DNS of the computer that
+// runs Galahad answers with a non-public address, as fake-IP proxies, Pi-hole and split-horizon DNS
+// do. It is decided here from the record of the host proxy, by the exact host name. The guest only
+// loses the OSV lookup.
+func countsAsBlocked(host string, blocked bool) bool {
+	return blocked && !proxy.IsInfraHost(host)
+}
+
+// addInfraReason adds a line to the reasons of res when the host proxy blocked a request to an
+// infrastructure host, so that a report that lacks OSV says why. The verdict does not change.
+func addInfraReason(res *protocol.Result) {
+	if len(res.Reasons) >= protocol.MaxReasonCount {
+		return
+	}
+	for _, e := range res.Network.Events {
+		if e.Blocked && !countsAsBlocked(e.Host, e.Blocked) {
+			res.Reasons = append(res.Reasons, protocol.CleanPath(fmt.Sprintf(
+				"the OSV lookup was blocked: %s resolved to an address that is not public (%s), which is usually a setting of the DNS of this computer; OSV was left out and no network finding was added", e.Host, e.Reason)))
+			return
+		}
+	}
+}
+
 // addNetworkFinding adds GAL-NET-001 to res when a request was blocked. It has one finding with an
 // evidence entry for each blocked destination, up to the evidence limit.
 func addNetworkFinding(res *protocol.Result) {
 	var ev []protocol.Evidence
 	for _, e := range res.Network.Events {
-		if !e.Blocked || len(ev) == protocol.MaxEvidence {
+		if !countsAsBlocked(e.Host, e.Blocked) || len(ev) == protocol.MaxEvidence {
 			continue
 		}
 		snippet := protocol.Snippet(fmt.Sprintf("CONNECT %s:%d denied: %s", e.Host, e.Port, e.Reason))

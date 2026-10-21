@@ -1,6 +1,7 @@
 // Package tools runs the signature scanners of the guest image, ClamAV and YARA, on the
 // input and turns their hits into findings. The scanners are command line programs that the
-// image installs; Galahad never links them. A scanner that is missing, has no signatures, runs
+// image installs; Galahad never links them. capa runs only in the re image, and the OSV lookup
+// reaches the network only through the relay of the guest. A scanner that is missing, has no signatures, runs
 // out of time, crashes or prints something that does not parse is left out of the coverage and
 // the reason goes to tools.log. It never counts as a clean scan.
 //
@@ -46,23 +47,36 @@ type Tool interface {
 	Run(ctx context.Context, target string) (Result, error)
 }
 
+// Env is what a tool may need to know about the guest it runs in.
+type Env struct {
+	// Image is the guest image, protocol.ImageCore or protocol.ImageRE. The empty string means core.
+	Image string
+	// Relay is the host:port of the relay that reaches the host proxy. Empty means the job has no network.
+	Relay string
+}
+
 // Result is what a tool that scanned found.
 type Result struct {
 	Findings []protocol.Finding
+	// Partial is set when the tool did not cover all of its input, for example because it stopped at
+	// a limit. Like a tool that is left out, it lowers the confidence of a clean verdict.
+	Partial bool
 	// Note is a problem that did not stop the scan, such as output that did not parse in full.
 	// It goes to tools.log.
 	Note string
 }
 
 // registered holds one constructor per tool, so that a tool picks up sigRoot when All is
-// called and not when the package starts.
-var registered []func() Tool
+// called and not when the package starts. A constructor returns nil for a tool that does not run in env.
+var registered []func(Env) Tool
 
-// All returns the registered tools sorted by name.
-func All() []Tool {
-	all := make([]Tool, len(registered))
-	for i, mk := range registered {
-		all[i] = mk()
+// All returns the registered tools that run in env, sorted by name.
+func All(env Env) []Tool {
+	var all []Tool
+	for _, mk := range registered {
+		if t := mk(env); t != nil {
+			all = append(all, t)
+		}
 	}
 	slices.SortFunc(all, func(a, b Tool) int { return strings.Compare(a.Name(), b.Name()) })
 	return all
@@ -86,6 +100,7 @@ func Apply(ctx context.Context, ts []Tool, target string, res *protocol.Result, 
 			continue
 		}
 		analyze.AddFindings(res, t.Name(), r.Findings)
+		res.Coverage.Truncated = res.Coverage.Truncated || r.Partial
 		res.Coverage.Analyzers = append(res.Coverage.Analyzers, t.Name())
 		slices.Sort(res.Coverage.Analyzers)
 		fmt.Fprintf(&log, "%s: ok, %d findings\n", t.Name(), len(r.Findings))
@@ -107,6 +122,11 @@ type output struct {
 // time or its output cap is killed and gives an error. A tool that exits non-zero is not an
 // error here, since the exit code can mean a hit.
 func execute(ctx context.Context, limit time.Duration, path string, args ...string) (output, error) {
+	return executeMax(ctx, limit, maxOutput, path, args...)
+}
+
+// executeMax is execute with a cap of maxOut bytes of stdout.
+func executeMax(ctx context.Context, limit time.Duration, maxOut int, path string, args ...string) (output, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
@@ -114,7 +134,7 @@ func execute(ctx context.Context, limit time.Duration, path string, args ...stri
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	cmd.WaitDelay = waitDelay
 	ownGroup(cmd)
-	out := &capped{max: maxOutput, stop: cancel}
+	out := &capped{max: maxOut, stop: cancel}
 	errb := &capped{max: maxStderr}
 	cmd.Stdout, cmd.Stderr = out, errb
 	err := cmd.Run()
@@ -122,7 +142,7 @@ func execute(ctx context.Context, limit time.Duration, path string, args ...stri
 	var ee *exec.ExitError
 	switch {
 	case out.over:
-		return output{}, fmt.Errorf("output is over %d bytes", maxOutput)
+		return output{}, fmt.Errorf("output is over %d bytes", maxOut)
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return output{}, fmt.Errorf("timed out after %s", time.Since(start).Round(time.Second))
 	case ctx.Err() != nil:

@@ -109,8 +109,15 @@ type Timeouts struct {
 	Ingest int `json:"ingest"`
 }
 
+// Guest images, as in Job.Image.
+const (
+	ImageCore = "core"
+	ImageRE   = "re"
+)
+
 // Job tells the guest what to do. Source is set for scan jobs only. Name is the
-// target name, URL the address to fetch for the url, drive and git sources.
+// target name, URL the address to fetch for the url, drive and git sources. Image is the
+// guest image the host booted; the empty string means core.
 type Job struct {
 	ID         string    `json:"id"`
 	Kind       string    `json:"kind"`
@@ -118,6 +125,7 @@ type Job struct {
 	Name       string    `json:"name"`
 	URL        string    `json:"url"`
 	Submodules bool      `json:"submodules"`
+	Image      string    `json:"image"`
 	Timeouts   Timeouts  `json:"timeouts"`
 	Now        time.Time `json:"now"`
 }
@@ -136,6 +144,9 @@ func (j Job) Validate() error {
 		}
 	} else if j.Source != "" {
 		return fmt.Errorf("source %q on a %s job", j.Source, j.Kind)
+	}
+	if err := oneOf("image", j.Image, "", ImageCore, ImageRE); err != nil {
+		return err
 	}
 	if len(j.Name) > MaxPath {
 		return fmt.Errorf("name is %d bytes, max %d", len(j.Name), MaxPath)
