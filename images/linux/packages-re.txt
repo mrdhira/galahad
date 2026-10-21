@@ -7,4 +7,4 @@ busybox
 util-linux
 e2fsprogs
 unzip
-openjdk-21-jre-headless
+openjdk-21-jdk-headless
