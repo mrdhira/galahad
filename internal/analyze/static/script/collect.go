@@ -271,7 +271,7 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 	})
 	eachMatch(d, bulkEnvVar, base, minEnd, text, func(off, _ int) {
 		before := d.data[max(0, off-160):off]
-		if g := assignRE.FindSubmatch(before); g != nil && !bytes.ContainsRune(g[0], '\n') && !envOption(before) && !returnRE.Match(before) {
+		if g := assignRE.FindSubmatch(before); g != nil && !bytes.ContainsRune(g[0], '\n') && !envOption(d.data, off) && !returnRE.Match(before) {
 			keep(s, &f.secrets, secretHit{off: off, kind: secretDump, name: string(g[1])})
 		}
 	})
@@ -283,7 +283,7 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 // that is the env option of a call, the environment of a child process.
 func copyName(data []byte, off int) (name string, ok bool) {
 	before := data[max(0, off-160):off]
-	if envOption(before) {
+	if envOption(data, off) {
 		return "", false
 	}
 	if g := copyRE.FindSubmatchIndex(before); g != nil && !unclosed(before[:g[2]]) {
@@ -295,11 +295,90 @@ func copyName(data []byte, off int) (name string, ok bool) {
 	return "", true
 }
 
-// envOption reports whether the copy of the environment that follows before is
-// the env option of a call: an "env" inside a bracket, not a variable named env.
-func envOption(before []byte) bool {
-	loc := envOptionRE.FindIndex(before)
-	return loc != nil && unclosed(before[:loc[0]])
+const (
+	envLook   = 512 // bytes before an env option that are searched for the call that holds it
+	envHolder = 512 // bytes of the object or call that holds an env option that are read
+)
+
+// envOption reports whether the copy of the environment at data[off] is the
+// environment of a child process: the value of "env" in an object or a keyword
+// list that is passed straight to a call (not dict, Object.assign,
+// JSON.stringify or a network call), or that also has a key that only a child
+// process has (stdio, shell, ...). An env in a report object that is built and
+// kept in a variable is data, not an option.
+func envOption(data []byte, off int) bool {
+	lo := max(0, off-160)
+	loc := envOptionRE.FindIndex(data[lo:off])
+	if loc == nil {
+		return false
+	}
+	at := lo + loc[0]
+	from := max(0, at-envLook)
+	before := data[from:at]
+	p := openBracket(before)
+	if p < 0 {
+		return false
+	}
+	if childKeyRE.Match(heldBy(data[from+p : min(len(data), from+p+envHolder)])) {
+		return true
+	}
+	q := p
+	if before[p] == '{' {
+		prev := bytes.TrimRight(before[:p], " \t\r\n")
+		if len(prev) == 0 || prev[len(prev)-1] != '(' && prev[len(prev)-1] != ',' {
+			return false
+		}
+		q = openBracket(before[:p])
+	}
+	if q < 0 || before[q] != '(' {
+		return false
+	}
+	callee := before[:q]
+	callee = bytes.TrimRight(callee, " \t\r\n")
+	start := len(callee)
+	for start > 0 && (isWord(callee[start-1]) || callee[start-1] == '.') {
+		start--
+	}
+	name := string(callee[start:])
+	if name == "" {
+		return false
+	}
+	last := name[strings.LastIndexByte(name, '.')+1:]
+	return last != "dict" && last != "assign" && last != "stringify" && !hasNetwork([]byte(name+"("))
+}
+
+// openBracket returns the index of the innermost bracket that text opens and
+// does not close, or -1.
+func openBracket(text []byte) int {
+	depth := 0
+	for i := len(text) - 1; i >= 0; i-- {
+		switch text[i] {
+		case ')', ']', '}':
+			depth++
+		case '(', '[', '{':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
+}
+
+// heldBy returns text, which starts with a bracket, up to the bracket that closes it.
+func heldBy(text []byte) []byte {
+	depth := 0
+	for i, c := range text {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth--; depth == 0 {
+				return text[:i+1]
+			}
+		}
+	}
+	return text
 }
 
 // unclosed reports whether text ends inside a bracket that it opens.
@@ -476,7 +555,12 @@ func (s *scan) builtPath(data []byte, off int, name string) bool {
 		return false
 	}
 	if counts, ok := segmentNext[name]; ok {
-		if seg, ok := nextSegment(data, off+len(name)+2); !counts(seg, ok) {
+		seg, next, ok := nextSegment(data, off+len(name)+2)
+		more := false
+		if ok {
+			_, _, more = nextSegment(data, next)
+		}
+		if !counts(seg, ok, more) {
 			return false
 		}
 	}
@@ -573,8 +657,9 @@ func returned(data []byte, callee int) bool {
 const maxSegment = 64
 
 // nextSegment returns the quoted segment that follows after a comma or a /
-// operator at data[i:], across lines, or false if there is none.
-func nextSegment(data []byte, i int) (string, bool) {
+// operator at data[i:], across lines, and the offset after it, or false if
+// there is none.
+func nextSegment(data []byte, i int) (seg string, next int, ok bool) {
 	skip := func(i int) int {
 		for n := 0; n < pathLook && i < len(data) && strings.IndexByte(" \t\r\n", data[i]) >= 0; n++ {
 			i++
@@ -583,17 +668,17 @@ func nextSegment(data []byte, i int) (string, bool) {
 	}
 	i = skip(i)
 	if i >= len(data) || data[i] != ',' && data[i] != '/' {
-		return "", false
+		return "", 0, false
 	}
 	i = skip(i + 1)
 	if i >= len(data) || strings.IndexByte("'\"`", data[i]) < 0 {
-		return "", false
+		return "", 0, false
 	}
 	end := bytes.IndexByte(data[i+1:min(len(data), i+1+maxSegment)], data[i])
 	if end < 0 {
-		return "", false
+		return "", 0, false
 	}
-	return string(data[i+1 : i+1+end]), true
+	return string(data[i+1 : i+1+end]), i + 2 + end, true
 }
 
 // spend charges n bytes of text given to the signals patterns, which are slow

@@ -154,7 +154,11 @@ func (s *scan) fetchedBefore(d *doc, off int, root string) int {
 		return -1
 	}
 	at := s.networkAt(d, win)
-	if at < 0 || root != "" && !s.bound(d, win[bytes.LastIndexByte(win[:at], '\n')+1:], root, maxBindHops) {
+	if at < 0 {
+		return -1
+	}
+	line := bytes.LastIndexByte(win[:at], '\n') + 1
+	if root != "" && !s.bound(d, win[line:], root, maxBindHops, at-line) {
 		return -1
 	}
 	return lo + at
@@ -167,23 +171,25 @@ var responseReads = words("await", ".text(", ".json(", ".blob(", ".buffer(", ".a
 var loopVarRE = regexp.MustCompile(`\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+$`)
 
 const (
-	maxBindHops = 2   // plain assignments followed from a name to the one that gets the response
-	maxBindUses = 64  // places where a name is looked at in one window
-	maxBindSpan = 100 // bytes searched around a name for its parameter list or braces
-	maxStmt     = 400 // bytes of a statement that are read
+	maxBindHops   = 2   // plain assignments followed from a name to the one that gets the response
+	maxBindUses   = 64  // places where a name is looked at in one window
+	maxBindSpan   = 100 // bytes searched around a name for its parameter list or braces
+	maxStmt       = 400 // bytes of a statement that are read
+	maxBindIdents = 4   // names of a right side that are followed
 )
 
 // bound reports whether the name root gets a value from the response of the
-// network call that text starts at the line of. Its uses are looked at from the
-// last one back. It is a parameter of a callback ("(t) =>", "t =>", "function
-// (t)"), it is appended to ("body +=", "parts.push(await ...)"), it is
-// assigned from an await or a response read ("const r = await ...", "d =
-// res.data"), it is destructured from an await ("const { data } = await ..."),
-// it is assigned from a name that is bound, up to hops assignments away, or it
-// is the variable of a for loop over a network call. A name that is assigned
-// from something else, such as process.argv, is not bound. The bytes searched
-// are charged to the call argument budget.
-func (s *scan) bound(d *doc, text []byte, root string, hops int) bool {
+// network call that text starts at the line of, and that is net bytes into
+// text. Its uses are looked at from the last one back. It is a parameter of a
+// callback after the call ("(t) =>", "t =>", "function (t)"), it is appended to
+// ("body +=", "parts.push(await ...)"), it is assigned from an await or a
+// response read ("const r = await ...", "d = res.data", "st.code = await
+// ..."), it is destructured from an await ("const { data } = await ..."), it is
+// assigned from an expression that uses a name that is bound, up to hops
+// assignments away, or it is the variable of a for loop over a network call. A
+// name that is assigned from something else, such as process.argv, is not
+// bound. The bytes searched are charged to the call argument budget.
+func (s *scan) bound(d *doc, text []byte, root string, hops, net int) bool {
 	if s.argBytes += len(text); s.argBytes > argBudget {
 		s.limited = true
 		return false
@@ -201,7 +207,7 @@ func (s *scan) bound(d *doc, text []byte, root string, hops int) bool {
 			continue
 		}
 		uses++
-		if s.binds(d, text, i, after, hops) {
+		if s.binds(d, text, i, after, hops, net) {
 			return true
 		}
 	}
@@ -210,7 +216,7 @@ func (s *scan) bound(d *doc, text []byte, root string, hops int) bool {
 
 // binds reports whether the use of a name at text[i:after] gives it a value
 // from a response: see bound.
-func (s *scan) binds(d *doc, text []byte, i, after, hops int) bool {
+func (s *scan) binds(d *doc, text []byte, i, after, hops, net int) bool {
 	rest := bytes.TrimLeft(text[after:], " \t")
 	switch {
 	case bytes.HasPrefix(rest, []byte("+=")), bytes.HasPrefix(rest, []byte("=>")):
@@ -220,22 +226,102 @@ func (s *scan) binds(d *doc, text []byte, i, after, hops int) bool {
 		if anyIn(stmt, responseReads) {
 			return true
 		}
-		other := bytes.TrimSpace(stmt)
-		return hops > 0 && len(other) > 0 && len(identRE.Find(other)) == len(other) && s.bound(d, text[:i], string(other), hops-1)
+		if hops > 0 {
+			for _, id := range identsIn(stmt, maxBindIdents) {
+				if s.bound(d, text[:i], id, hops-1, net) {
+					return true
+				}
+			}
+		}
+		return false
 	case bytes.HasPrefix(rest, []byte(".push(")), bytes.HasPrefix(rest, []byte(".concat(")):
 		return anyIn(statement(rest), responseReads)
+	case bytes.HasPrefix(rest, []byte(".")) && propAssigned(rest):
+		return anyIn(statement(rest[bytes.IndexByte(rest, '=')+1:]), responseReads)
 	case loopVarRE.Match(text[max(0, i-40):i]) && bytes.HasPrefix(rest, []byte("of ")):
 		return s.networkAt(d, firstLine(rest)) >= 0
 	}
-	return inParams(text, i, after) || destructured(text, i, after)
+	return i > net && inParams(text, i, after) || destructured(text, i, after)
+}
+
+// propAssigned reports whether rest starts with a property that is assigned:
+// ".code = ". It is false for a comparison and an arrow.
+func propAssigned(rest []byte) bool {
+	n := 1
+	for n < len(rest) && isWord(rest[n]) {
+		n++
+	}
+	tail := bytes.TrimLeft(rest[n:], " \t")
+	return n > 1 && bytes.HasPrefix(tail, []byte("=")) && !bytes.HasPrefix(tail, []byte("==")) && !bytes.HasPrefix(tail, []byte("=>"))
+}
+
+// notIdents are the words of a right side that are not names.
+var notIdents = map[string]bool{
+	"await": true, "new": true, "typeof": true, "void": true, "true": true, "false": true, "null": true,
+	"undefined": true, "this": true, "function": true, "async": true, "in": true, "of": true,
+	"instanceof": true, "delete": true, "yield": true, "None": true, "True": true, "False": true,
+	"not": true, "and": true, "or": true, "if": true, "else": true, "lambda": true,
+}
+
+// identsIn returns the first limit names that the code in b uses, in order.
+// It skips keywords, numbers, names right after a dot, the text of string
+// literals, and the text of a template literal outside of ${ }.
+func identsIn(b []byte, limit int) []string {
+	var out []string
+	var quote byte // the quote of the string that is open
+	expr := 0      // braces open in a ${ } of a template literal
+	for i := 0; i < len(b) && len(out) < limit; i++ {
+		c := b[i]
+		if quote != 0 && expr == 0 {
+			switch {
+			case c == '\\':
+				i++
+			case c == quote:
+				quote = 0
+			case quote == '`' && c == '$' && i+1 < len(b) && b[i+1] == '{':
+				expr = 1
+				i++
+			}
+			continue
+		}
+		switch {
+		case expr > 0 && c == '{':
+			expr++
+		case expr > 0 && c == '}':
+			expr--
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case isWord(c) && (i == 0 || !isWord(b[i-1])):
+			j := i
+			for j < len(b) && isWord(b[j]) {
+				j++
+			}
+			word := string(b[i:j])
+			if (c < '0' || c > '9') && !notIdents[word] && (i == 0 || b[i-1] != '.') {
+				out = append(out, word)
+			}
+			i = j - 1
+		}
+	}
+	return out
 }
 
 // statement returns the text up to the end of the statement: a semicolon or a
-// line break, at most maxStmt bytes.
+// line break outside a string literal, at most maxStmt bytes.
 func statement(b []byte) []byte {
 	b = b[:min(len(b), maxStmt)]
-	if k := bytes.IndexAny(b, ";\n"); k >= 0 {
-		b = b[:k]
+	var quote byte
+	for i, c := range b {
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == ';' || c == '\n':
+			return b[:i]
+		}
 	}
 	return b
 }
@@ -275,8 +361,8 @@ func around(text []byte, i, after int, open, closing byte) (lo, hi int, ok bool)
 	return 0, 0, false
 }
 
-// inParams reports whether the name is in a parameter list: "(a, t) =>" or
-// "function name(t)".
+// inParams reports whether the name is in the parameter list of a callback:
+// "(a, t) =>" or "function (t)".
 func inParams(text []byte, i, after int) bool {
 	lo, hi, ok := around(text, i, after, '(', ')')
 	if !ok {
@@ -285,14 +371,10 @@ func inParams(text []byte, i, after int) bool {
 	if bytes.HasPrefix(bytes.TrimLeft(text[hi+1:], " \t"), []byte("=>")) {
 		return true
 	}
+	// A function without a name is a callback. A declared function is not
+	// handed to the call, so its parameters are not the response.
 	head := bytes.TrimRight(text[:lo], " \t")
-	if bytes.HasSuffix(head, []byte("function")) {
-		return true
-	}
-	for len(head) > 0 && isWord(head[len(head)-1]) {
-		head = head[:len(head)-1]
-	}
-	return bytes.HasSuffix(bytes.TrimRight(head, " \t"), []byte("function"))
+	return bytes.HasSuffix(head, []byte("function")) && (len(head) == len("function") || !isWord(head[len(head)-len("function")-1]))
 }
 
 // destructured reports whether the name is in "{ a, t } = await".

@@ -87,7 +87,8 @@ func SecretRefs(text string) []Match {
 	return slices.DeleteFunc(find(secretPatterns, text), func(m Match) bool {
 		ref := text[m.Start:m.End]
 		if name, ok := strings.CutPrefix(ref, ".ssh"); ok && name != "" && (name[0] == '/' || name[0] == '\\') {
-			return SSHPlain(name[1:])
+			// A name followed by more path ("known_hosts/../id_rsa") is not the last component.
+			return SSHPlain(name[1:]) && (m.End >= len(text) || text[m.End] != '/' && text[m.End] != '\\')
 		}
 		return strings.HasSuffix(ref, ".pub")
 	})

@@ -28,6 +28,7 @@ func TestSignals(t *testing.T) {
 		{name: "ssh private key with a custom name", find: signals.SecretRefs, text: `cat ~/.ssh/github_ed25519`, wantText: ".ssh/github_ed25519"},
 		{name: "ssh pem key", find: signals.SecretRefs, text: `cp ~/.ssh/deploy.pem /tmp`, wantText: ".ssh/deploy.pem"},
 		{name: "ssh private key in upper case", find: signals.SecretRefs, text: `cat ~/.ssh/ID_ED25519`, wantText: ".ssh/ID_ED25519"},
+		{name: "ssh plain file name followed by a parent segment", find: signals.SecretRefs, text: `cat ~/.ssh/known_hosts/../github_key`, wantText: ".ssh/known_hosts"},
 		{name: "ssh config in upper case is not secret", find: signals.SecretRefs, text: `cat ~/.ssh/CONFIG`},
 		{name: "ssh old known_hosts is not secret", find: signals.SecretRefs, text: `cat ~/.ssh/known_hosts.old`},
 		{name: "ssh authorized_keys2 is not secret material", find: signals.SecretRefs, text: `cat ~/.ssh/authorized_keys2`},

@@ -119,11 +119,13 @@ var (
 	copyRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*(?:[\w$.]+\s*\(\s*)*$`)
 
 	// envOptionRE ends the text before a copy of the environment that is the
-	// env option of a call: "env=", "env: ", "env={**". It is the option only
-	// when "env" is inside a bracket that the text opens (see envForChild).
+	// value of an "env" key: "env=", "env: ", "env={**". It is the option of
+	// a child process only in the shapes that envOption accepts.
+	// childKeyRE matches a key that only a child process has.
 	// returnRE ends the text before a copy that a function returns: "return
-	// {...". Both are the environment for a child process.
+	// {...". That is the environment for a child process.
 	envOptionRE = regexp.MustCompile(`\benv\s*[:=]\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*|Object\s*\.\s*assign\(\s*\{\s*\}\s*,\s*)?$`)
+	childKeyRE  = regexp.MustCompile(`\b(?:stdio|shell|detached|windowsHide|maxBuffer|killSignal|argv0|uid|gid)\s*[:=]`)
 	returnRE    = regexp.MustCompile(`\breturn\b\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*|Object\s*\.\s*assign\(\s*\{\s*\}\s*,\s*)?$`)
 
 	// assignRE ends at the end of a line prefix and captures the name in
@@ -137,14 +139,16 @@ var (
 	// a path built with join, joinpath, resolve or the / operator. These are
 	// the paths that signals.SecretRefs counts when they are written in one
 	// literal, so segmentNext says which quoted segment after the directory
-	// makes it a credential file. ok is false when none follows.
+	// makes it a credential file. ok is false when none follows, and more is
+	// set when yet another segment follows seg.
 	segmentRE   = regexp.MustCompile("['\"`](\\.ssh|\\.aws|\\.gnupg|\\.docker|\\.kube|\\.env)['\"`]")
-	segmentNext = map[string]func(seg string, ok bool) bool{
+	segmentNext = map[string]func(seg string, ok, more bool) bool{
 		".aws":    file("credentials"),
 		".kube":   file("config"),
 		".docker": file("config.json"),
-		// The directory itself, or a file that is secret.
-		".ssh": func(seg string, ok bool) bool { return !ok || !signals.SSHPlain(seg) },
+		// The directory itself, a file that is secret, or a plain file that
+		// is not the last segment ("config", "..", "id_rsa").
+		".ssh": func(seg string, ok, more bool) bool { return !ok || more || !signals.SSHPlain(seg) },
 	}
 
 	// Secret classification of a signals.SecretRefs match.
@@ -164,8 +168,8 @@ var (
 )
 
 // file accepts the segment name only.
-func file(name string) func(string, bool) bool {
-	return func(seg string, ok bool) bool { return ok && seg == name }
+func file(name string) func(string, bool, bool) bool {
+	return func(seg string, ok, _ bool) bool { return ok && seg == name }
 }
 
 func words(w ...string) [][]byte {
