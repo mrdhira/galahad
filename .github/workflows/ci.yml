@@ -86,6 +86,11 @@ jobs:
       - if: needs.changes.outputs.code != 'false'
         run: go vet ./...
         shell: bash
+      # Failing test names also go to annotations, which are readable without the job log.
       - if: needs.changes.outputs.code != 'false'
-        run: go test -race -count=1 ./...
+        run: |
+          set -o pipefail
+          go test -race -count=1 ./... 2>&1 | tee test.log && exit 0
+          grep -E -- '--- FAIL|^FAIL|^panic:|_test\.go:[0-9]+:' test.log | head -n 10 | sed 's/^/::error::/'
+          exit 1
         shell: bash

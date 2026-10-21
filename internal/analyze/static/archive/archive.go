@@ -69,7 +69,8 @@ func New() analyze.Analyzer { return analyzer{} }
 func (analyzer) Name() string { return "archive" }
 
 func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
-	u := &unpack{ctx: ctx, f: f, left: allowance(len(f.Data))}
+	left, byJob := allowance(ctx, len(f.Data))
+	u := &unpack{ctx: ctx, f: f, left: left, byJob: byJob}
 
 	var err error
 	switch f.Kind {
@@ -100,9 +101,15 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	return u.out, err
 }
 
-// allowance is how many bytes an archive of n compressed bytes may expand to.
-func allowance(n int) int64 {
-	return min(MaxArchiveBytes, max(minRatioBytes, int64(n)*MaxRatio))
+// allowance is how many bytes an archive of n compressed bytes may expand to,
+// and never more than the job budget that is left. byJob says the job budget is
+// the smaller limit.
+func allowance(ctx context.Context, n int) (left int64, byJob bool) {
+	left = min(MaxArchiveBytes, max(minRatioBytes, int64(n)*MaxRatio))
+	if b, ok := analyze.Budget(ctx); ok && b < left {
+		return b, true
+	}
+	return left, false
 }
 
 // unsupported reports a 7z, rar or iso image, which are not expanded.
@@ -117,6 +124,7 @@ type unpack struct {
 	f       analyze.File
 	out     analyze.Output
 	left    int64 // decompressed bytes still allowed
+	byJob   bool  // the job budget, not the archive, sets left
 	entries int
 	bombed  bool
 
@@ -232,7 +240,7 @@ func (u *unpack) read(r io.Reader, name string) error {
 		u.bomb(name)
 		return err
 	case err != nil:
-		u.skip(u.member(name), protocol.SkipParseError)
+		u.skip(u.member(name), protocol.SkipUnreadable)
 		return err
 	case len(data) > analyze.MaxFileSize:
 		u.skip(u.member(name), protocol.SkipTooLarge)
@@ -247,9 +255,12 @@ func (u *unpack) bomb(name string) {
 		return
 	}
 	u.bombed = true
-	u.out.Findings = append(u.out.Findings, ruleBomb.Finding(protocol.Evidence{
-		Path: u.f.Path, Snippet: "expands beyond 100:1 or 256 MiB at " + protocol.Snippet(name),
-	}))
+	if !u.byJob {
+		// Running out of the job budget says nothing about this archive, but the skip still hides content.
+		u.out.Findings = append(u.out.Findings, ruleBomb.Finding(protocol.Evidence{
+			Path: u.f.Path, Snippet: "expands beyond 100:1 or 256 MiB at " + protocol.Snippet(name),
+		}))
+	}
 	u.skip(u.member(name), protocol.SkipBudget)
 }
 
@@ -379,10 +390,44 @@ func directory(data []byte) (start, base int64, ok bool) {
 	if dirOff+base < 0 || dirOff+base >= size {
 		return 0, 0, false
 	}
-	if base > 0 && dirOff+dirHeadLen <= size && bytes.HasPrefix(data[dirOff:], dirSig) {
+	if base > 0 && validRecord(data[dirOff:]) {
 		base = 0 // the records are valid without the shift, which the reader prefers
 	}
 	return dirOff + base, base, true
+}
+
+// validRecord reports whether rec starts with a central directory record that the
+// zip reader accepts: the name, extra field and comment lie within rec, and every
+// zip64 extra field is long enough for the values whose 32-bit fields are full.
+// Like the reader, it does not ask for a zip64 field to be there.
+func validRecord(rec []byte) bool {
+	if len(rec) < dirHeadLen || !bytes.HasPrefix(rec, dirSig) {
+		return false
+	}
+	nameLen, extraLen, commentLen := int(le.Uint16(rec[28:])), int(le.Uint16(rec[30:])), int(le.Uint16(rec[32:]))
+	if dirHeadLen+nameLen+extraLen+commentLen > len(rec) {
+		return false
+	}
+	full := 8 * (b2i(le.Uint32(rec[24:]) == max32) + b2i(le.Uint32(rec[20:]) == max32) + b2i(le.Uint32(rec[42:]) == max32))
+	extra := rec[dirHeadLen+nameLen : dirHeadLen+nameLen+extraLen]
+	for len(extra) >= 4 {
+		id, n := le.Uint16(extra), int(le.Uint16(extra[2:]))
+		if extra = extra[4:]; n > len(extra) {
+			break
+		}
+		if id == 1 && n < full {
+			return false
+		}
+		extra = extra[n:]
+	}
+	return true
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // zip64Offset reads the offset of a local header from the zip64 extra field of a
@@ -481,7 +526,7 @@ func (u *unpack) members(zr *zip.Reader) error {
 		}
 		rc, err := zf.Open()
 		if err != nil {
-			u.skip(u.member(zf.Name), protocol.SkipParseError)
+			u.skip(u.member(zf.Name), protocol.SkipUnreadable)
 			continue
 		}
 		before := len(u.out.Children)
@@ -533,7 +578,8 @@ func (u *unpack) tar(r io.Reader) error {
 			return nil
 		}
 		if err != nil {
-			u.skip(u.f.Path, protocol.SkipParseError)
+			// GNU tar may still extract what follows a header this reader rejects.
+			u.skip(u.f.Path, protocol.SkipUnreadable)
 			return nil
 		}
 		ok, stop := u.admit(hdr.Name)

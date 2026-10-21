@@ -42,8 +42,10 @@ var (
 const usage = `Usage: galahad-agent <command> [flags]
 
 Commands:
-  analyze [-o dir] [-timeout d] [--unsafe-host] <path>
+  analyze [-o dir] [-timeout d] [--memory-limit size] [--unsafe-host] <path>
             Analyze a file or directory and write report.json, summary.md and report.html to dir.
+            --memory-limit sets the soft memory limit in bytes, with an optional KiB, MiB or GiB
+            suffix; the default is 75% of the memory, at most 4 GiB, unless GOMEMLIMIT is set.
             Refuses to run outside a VM unless --unsafe-host is given.
   version   Print version information
   help      Show this help
@@ -53,6 +55,8 @@ Commands:
 type Env struct {
 	// DetectVM reports whether the process runs inside a VM, and why. Nil means vmguard.Detect.
 	DetectVM func() (inVM bool, reason string)
+	// SetMemoryLimit sets the soft memory limit of the process. Nil means debug.SetMemoryLimit.
+	SetMemoryLimit func(bytes int64)
 }
 
 // Run executes the command in args (without the program name) and returns the exit code.
@@ -64,6 +68,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 func RunWithEnv(args []string, stdout, stderr io.Writer, env Env) int {
 	if env.DetectVM == nil {
 		env.DetectVM = vmguard.Detect
+	}
+	if env.SetMemoryLimit == nil {
+		env.SetMemoryLimit = func(n int64) { debug.SetMemoryLimit(n) }
 	}
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)
@@ -139,6 +146,11 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 	outDir := fs.String("o", "", "output directory (default: a new temporary directory)")
 	timeout := fs.Duration("timeout", analyze.DefaultJobTimeout, "time limit for the whole job")
 	unsafeHost := fs.Bool("unsafe-host", false, "analyze on this host even though it is not a VM; you accept the risk")
+	var memoryLimit int64
+	fs.Func("memory-limit", "soft memory limit in bytes, with an optional KiB, MiB or GiB suffix", func(s string) (err error) {
+		memoryLimit, err = ParseSize(s)
+		return err
+	})
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -171,6 +183,12 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 	if *outDir != "" && info.IsDir() && inside(target, *outDir) {
 		fmt.Fprintf(stderr, "galahad-agent analyze: output directory %q is inside the target\n", *outDir)
 		return ExitUsage
+	}
+
+	ram, _ := physicalMemory()                  // 0 when unknown
+	gomemlimit := os.Getenv("GOMEMLIMIT") != "" // an empty value counts as unset
+	if limit, ok := MemoryLimit(ram, gomemlimit, memoryLimit); ok {
+		env.SetMemoryLimit(limit)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)

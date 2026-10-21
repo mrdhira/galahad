@@ -598,6 +598,13 @@ func TestAnalyze(t *testing.T) {
 			wantSkips: []string{"unsupported"},
 		},
 		{
+			name:      "a spent job budget does not stop the decoding of an object stream with JavaScript",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{catalog, action}, "/FlateDecode", flate, ""),
+			ctx:       analyze.WithBudget(context.Background(), 0),
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-002"},
+		},
+		{
 			name:      "too many objects",
 			kind:      ident.PDF,
 			data:      doc(manyObjs),

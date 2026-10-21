@@ -85,7 +85,7 @@ func (r *Result) Validate() error {
 			return fmt.Errorf("coverage.skipped[%d]: %w", i, err)
 		}
 		switch s.Reason {
-		case SkipTooLarge, SkipBudget, SkipDepth, SkipUnsupported, SkipEncrypted, SkipParseError, SkipTimeout, SkipPanic:
+		case SkipTooLarge, SkipBudget, SkipDepth, SkipUnsupported, SkipEncrypted, SkipParseError, SkipUnreadable, SkipTimeout, SkipPanic:
 		default:
 			return fmt.Errorf("coverage.skipped[%d]: reason %q not allowed", i, s.Reason)
 		}
