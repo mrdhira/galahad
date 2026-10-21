@@ -173,6 +173,7 @@ func TestCorpus(t *testing.T) {
 			target: corpusDir("p3-padded-js"), wantCode: 20,
 			wantRules:    []string{"GAL-OBF-001 index.js:12"},
 			wantSnippets: []string{"decoded:", "c2.sinkhole.test"},
+			wantIOCs:     []string{"https://c2.sinkhole.test/collect"},
 		},
 		{
 			name:   "p3-padded-py: environment sent away from hidden code",
