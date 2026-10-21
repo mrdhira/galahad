@@ -1,0 +1,92 @@
+# Galahad guest kernel: fragment applied on top of "make tinyconfig" (x86_64, Linux 6.1.y).
+#
+# The guest is a Firecracker microVM. Firecracker gives it virtio devices on the MMIO bus (no PCI,
+# no ACPI), an 8250 serial console and a vsock device, and no network card. The approach follows
+# Firecracker's own microVM guest configs, cut down to what the guest really uses: the Go agent,
+# git, ClamAV and YARA.
+#
+# kernel/build.sh checks that every line below survived "make olddefconfig". A symbol that is
+# silently dropped (a missing dependency or a typo) fails the build.
+
+# Architecture and virtual machine support.
+CONFIG_64BIT=y
+CONFIG_SMP=y
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_KVM_GUEST=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+
+# tinyconfig hides many ordinary features behind EXPERT and turns them off. The guest needs these:
+# Go and git use futex, epoll, eventfd, timerfd and madvise; setuid needs MULTIUSER (the agent drops
+# to uid 1000); tmpfs needs SHMEM.
+CONFIG_EXPERT=y
+CONFIG_PRINTK=y
+CONFIG_BUG=y
+CONFIG_MULTIUSER=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_EVENTFD=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_ADVISE_SYSCALLS=y
+CONFIG_FILE_LOCKING=y
+CONFIG_SHMEM=y
+# tinyconfig picks the SLOB allocator, which copes badly with a 3 GiB guest running ClamAV.
+CONFIG_SLUB=y
+# CONFIG_SLOB is not set
+
+# Programs: static and dynamic ELF binaries, and the #! of /sbin/galahad-init. No initramfs.
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+# CONFIG_BLK_DEV_INITRD is not set
+
+# Console. Firecracker boots with console=ttyS0.
+CONFIG_TTY=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+
+# Pseudo filesystems and the filesystems of the four drives (vda root, vdb scratch, vdc agent
+# image, vdd signatures).
+CONFIG_PROC_FS=y
+CONFIG_PROC_SYSCTL=y
+CONFIG_SYSFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_TMPFS=y
+CONFIG_EXT4_FS=y
+
+# Drives: virtio-blk over virtio-mmio. Firecracker passes the MMIO devices on the kernel command line.
+CONFIG_BLOCK=y
+CONFIG_BLK_DEV=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+
+# Networking: the loopback interface (the proxy relay listens on 127.0.0.1), unix sockets, and vsock
+# to the host. There is no network card and no driver for one.
+CONFIG_NET=y
+CONFIG_NETDEVICES=y
+CONFIG_INET=y
+CONFIG_UNIX=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+# CONFIG_ETHERNET is not set
+# CONFIG_WLAN is not set
+# CONFIG_VIRTIO_NET is not set
+
+# Nothing else the guest could use to reach the host or load code.
+# CONFIG_MODULES is not set
+# CONFIG_PCI is not set
+# CONFIG_ACPI is not set
+# CONFIG_VIRTIO_PCI is not set
+# CONFIG_NET_9P is not set
+# CONFIG_9P_FS is not set
+# CONFIG_FUSE_FS is not set
+# CONFIG_USB_SUPPORT is not set
+
+# Version string.
+CONFIG_LOCALVERSION="-galahad"
+# CONFIG_LOCALVERSION_AUTO is not set
+CONFIG_DEFAULT_HOSTNAME="galahad"

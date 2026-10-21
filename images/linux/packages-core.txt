@@ -1,0 +1,9 @@
+ca-certificates
+git
+clamav
+clamav-freshclam
+yara
+busybox
+util-linux
+e2fsprogs
+unzip

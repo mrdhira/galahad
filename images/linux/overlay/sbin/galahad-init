@@ -1,0 +1,54 @@
+#!/bin/busybox sh
+# shellcheck shell=ash
+# PID 1 of the guest VM (kernel command line: init=/sbin/galahad-init). The root filesystem is
+# read-only, so everything writable is a tmpfs or a drive. Drives, in Firecracker's order:
+#   vda root (read-only)   vdb scratch (empty, formatted here)   vdc agent binary   vdd signatures (optional)
+# Every tool is called through busybox, so no applet links are needed in the image.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+bb=/bin/busybox
+
+# die MESSAGE: the host sees the VM exit; nothing is left running.
+die() {
+	echo "galahad-init: $*" >&2
+	"$bb" sync
+	exec "$bb" reboot -f
+}
+
+"$bb" mount -t proc -o nosuid,nodev,noexec proc /proc || die "cannot mount /proc"
+"$bb" mount -t sysfs -o nosuid,nodev,noexec sysfs /sys || die "cannot mount /sys"
+"$bb" mount -t devtmpfs -o nosuid,noexec devtmpfs /dev || die "cannot mount /dev"
+"$bb" mount -t tmpfs -o nosuid,nodev,mode=0755,size=64m tmpfs /run || die "cannot mount /run"
+"$bb" mount -t tmpfs -o nosuid,nodev,mode=1777,size=256m tmpfs /tmp || die "cannot mount /tmp"
+
+# The proxy relay listens on 127.0.0.1. There is no other network interface.
+"$bb" ip link set lo up || "$bb" ifconfig lo up || die "cannot bring up lo"
+
+# The limits are inherited by the agent and stay when it drops to uid 1000. There is no PAM
+# session in this VM, so limits.conf would not apply.
+ulimit -u 512 || die "cannot set the process limit"
+ulimit -n 4096 || die "cannot set the open file limit"
+
+# The scratch drive is a fresh sparse file on every boot. The kernel is 6.1, which cannot mount
+# a filesystem with the orphan_file feature that e2fsprogs 1.47 enables by default.
+[ -b /dev/vdb ] || die "scratch drive /dev/vdb is missing"
+mkfs.ext4 -q -F -m 0 -O '^has_journal,^orphan_file' -E lazy_itable_init=1,lazy_journal_init=1 /dev/vdb || die "cannot format /dev/vdb"
+"$bb" mount -t ext4 -o nosuid,nodev,noatime /dev/vdb /work || die "cannot mount /dev/vdb"
+"$bb" chown 1000:1000 /work || die "cannot chown /work"
+"$bb" chmod 0700 /work || die "cannot chmod /work"
+
+# The signatures drive is optional and never writable here.
+if [ -b /dev/vdd ]; then
+	"$bb" mount -t ext4 -o ro,noload,nosuid,nodev,noexec /dev/vdd /sig || echo "galahad-init: cannot mount /dev/vdd, going on without signatures" >&2
+fi
+
+# The host pads the agent drive to a multiple of 512 bytes, so the copy ends in zeros. That is
+# harmless: the agent is a static ELF, and the kernel loads only the segments its headers name.
+[ -b /dev/vdc ] || die "agent drive /dev/vdc is missing"
+"$bb" cat /dev/vdc >/run/galahad-agent || die "cannot copy the agent"
+"$bb" chmod 0755 /run/galahad-agent || die "cannot chmod the agent"
+
+# The agent runs as a child so that PID 1 stays alive to reboot. It drops to uid 1000 itself.
+/run/galahad-agent guest --control vsock:2:1024 --proxy vsock:2:1025
+echo "galahad-init: the agent exited with status $?" >&2
+"$bb" sync
+exec "$bb" reboot -f

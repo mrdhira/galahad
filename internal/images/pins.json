@@ -1,0 +1,27 @@
+{
+  "version": "0.1.0",
+  "tag": "images-0.1.0",
+  "assets": [
+    {
+      "name": "vmlinux.gz",
+      "file": "vmlinux",
+      "sha256": "ff3d5cca3cf2166938e9bd03738baaad2c22bd75d7a910005c8bd32d2adb57b6",
+      "size": 2781313,
+      "raw_sha256": "411315743109653a457668f545d8a17c6aae62804d44638bcdd95d42e2808878",
+      "raw_size": 18412784
+    },
+    {
+      "name": "core.ext4.gz",
+      "file": "core.ext4",
+      "sha256": "2103116499bcdb75c968d6b7c6c1c6549a9d67fdde238187f8664cd6345b52b4",
+      "size": 96743431,
+      "raw_sha256": "e0c3911aed01c10b458f3ac205ebd074021ce4fd882975d8cd7b6b11562a5caf",
+      "raw_size": 402653184
+    }
+  ],
+  "firecracker": {
+    "version": "v1.17.0",
+    "url": "https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz",
+    "sha256": "06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558"
+  }
+}
