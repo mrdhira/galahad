@@ -1,6 +1,7 @@
 package job
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,7 +34,6 @@ const (
 	writeGrace    = 5 * time.Second  // how long the guest's own answer is awaited after a failed write
 	maxArtifact   = 1 << 20          // bytes kept of one artifact
 	readSlack     = time.Second      // how long after the job deadline a read gives up
-	targetKind    = "path"
 )
 
 // artifactNames are the file names of the artifacts below the job directory. galahadtest builds
@@ -57,6 +58,11 @@ type Spec struct {
 	MemoryMiB int
 	// NoNetwork gives the guest no proxy port, so it has no network at all.
 	NoNetwork bool
+	// Source says what the target is: protocol.SourceLocal (the default) for a path, or
+	// protocol.SourceURL or protocol.SourceDrive for a link that the guest downloads.
+	Source string
+	// AllowHosts are the extra hosts the guest may reach (--allow-host).
+	AllowHosts []string
 	// Progress is called with each stage the guest reports. It may be nil.
 	Progress func(stage string)
 }
@@ -69,20 +75,25 @@ type Outcome struct {
 	Paths  report.Paths
 }
 
-// Run scans a local file or folder in a machine of backend and writes the reports into the
-// job directory. It checks the input first, so an input over the caps fails before anything boots.
+// Run scans a local file or folder, or a link the guest downloads (spec.Source), in a machine of
+// backend and writes the reports into the job directory. It checks the input first, so an input
+// over the caps fails before anything boots.
 // The error says why the job did not end in the state done; job.json has that state. The
 // machine is always killed before Run returns.
 func Run(ctx context.Context, backend sandbox.Backend, spec Spec, target string) (Outcome, error) {
 	if spec.Timeout < MinTimeout {
 		return Outcome{}, fmt.Errorf("the timeout %s is shorter than the minimum %s", spec.Timeout, MinTimeout)
 	}
-	in, err := newPlan(target)
+	in, err := newPlan(spec.Source, target)
+	if err != nil {
+		return Outcome{}, err
+	}
+	pol, err := in.policy(spec.AllowHosts)
 	if err != nil {
 		return Outcome{}, err
 	}
 	now := spec.Now()
-	j, err := Create(spec.JobsDir, now, Target{Input: protocol.CleanPath(filepath.Clean(target)), Kind: targetKind}, spec.Image, backend.Name())
+	j, err := Create(spec.JobsDir, now, in.jobTarget(target), spec.Image, backend.Name())
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -90,7 +101,7 @@ func Run(ctx context.Context, backend sandbox.Backend, spec Spec, target string)
 
 	ctx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
-	r := &runner{backend: backend, spec: spec, in: in, jobDir: Dir(spec.JobsDir, j.ID), job: &out.Job, start: now}
+	r := &runner{backend: backend, spec: spec, in: in, pol: pol, jobDir: Dir(spec.JobsDir, j.ID), job: &out.Job, start: now}
 	runErr := r.run(ctx, &out)
 
 	switch {
@@ -125,6 +136,7 @@ type runner struct {
 	backend sandbox.Backend
 	spec    Spec
 	in      *plan
+	pol     proxy.Policy
 	jobDir  string
 	job     *Job
 	start   time.Time
@@ -148,15 +160,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 		return err
 	}
 	ports := []uint32{controlPort}
-	probe := netProbeURL()
-	in := proxy.Input{Kind: protocol.KindScan, Source: protocol.SourceLocal}
-	if probe != "" {
-		in.Source, in.Target = protocol.SourceURL, probe
-	}
-	pol, err := proxy.NewPolicy(in)
-	if err != nil {
-		return err
-	}
+	probe := r.in.probe
 	if !r.spec.NoNetwork {
 		ports = append(ports, proxyPort)
 	}
@@ -174,7 +178,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 		if pl == nil {
 			return errors.New("the sandbox has no proxy listener")
 		}
-		if r.px, err = startProxy(ctx, pl, r.jobDir, pol); err != nil {
+		if r.px, err = startProxy(ctx, pl, r.jobDir, r.pol); err != nil {
 			return err
 		}
 		defer func() { _, _ = r.px.stop() }()
@@ -224,7 +228,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	}
 
 	job := protocol.Job{
-		ID: r.job.ID, Kind: protocol.KindScan, Source: protocol.SourceLocal, Name: r.in.name, URL: probe,
+		ID: r.job.ID, Kind: protocol.KindScan, Source: r.in.source, Name: r.in.name, URL: cmp.Or(r.in.url, probe),
 		Timeouts: protocol.Timeouts{Job: min(max(int(time.Until(deadline).Seconds()), 1), protocol.MaxTimeoutSec)},
 		Now:      r.start.UTC(),
 	}
@@ -295,7 +299,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 				if err := decode(ev.payload, &e); err != nil {
 					return fmt.Errorf("error frame: %w", err)
 				}
-				return fmt.Errorf("the guest failed (%s): %s", e.Code, e.Message)
+				return r.guestError(e)
 			case protocol.FrameResult:
 				if !endSent.Load() {
 					return errors.New("the guest sent a result before the end of the input")
@@ -373,7 +377,9 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 	if res.Target.Kind != wantKind {
 		return fmt.Errorf("the result is for a %s, the input is a %s", res.Target.Kind, wantKind)
 	}
-	if !r.in.isDir && res.Target.SHA256 != fileSHA {
+	// The host cannot hash what the guest downloaded, so for a link the hash is the guest's own
+	// word, like the rest of the Result: Validate above checked its format and no more.
+	if !r.in.isDir && !r.in.remote() && res.Target.SHA256 != fileSHA {
 		return fmt.Errorf("the result has sha256 %s for the target, the host sent %s", res.Target.SHA256, fileSHA)
 	}
 	if res.Network != nil {
@@ -391,6 +397,7 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 		return fmt.Errorf("the proxy: %w", err)
 	}
 	res.Network = networkOf(events)
+	r.job.Blocked = slices.ContainsFunc(events, func(e proxy.Event) bool { return e.Blocked })
 	addNetworkFinding(&res)
 	scoring.Apply(&res)
 	paths, err := report.Write(r.jobDir, &res)
@@ -458,4 +465,48 @@ func minTime(a, b time.Time) time.Time {
 		return a
 	}
 	return b
+}
+
+// guestError is the error for an Error frame of the guest. For the codes about the network the text
+// is the host's own, built from its proxy record, so nothing the guest wrote is repeated, and the host
+// named in the hint is one the proxy saw and refused.
+func (r *runner) guestError(e protocol.Error) error {
+	var why string
+	switch e.Code {
+	case protocol.CodeDrivePrivate:
+		why = "the Drive file is not public; share it with anyone who has the link, or download it and scan the file"
+	case protocol.CodeDriveQuota:
+		why = "Drive refuses the download because of its quota; try again later"
+	case protocol.CodeNotAllowed:
+		why = r.deniedText()
+	default:
+		return fmt.Errorf("the guest failed (%s): %s", e.Code, e.Message)
+	}
+	return fmt.Errorf("the guest failed (%s): %s", e.Code, why)
+}
+
+// deniedText says what the proxy refused last. A request to an address that is not public is
+// reported with GAL-NET-001, and a host that is only not on the allowlist comes with the flag to
+// allow it.
+func (r *runner) deniedText() string {
+	events, _ := r.px.stop() // the decisions are final once the guest has failed; a stop error does not change the text
+	last := -1
+	for i, e := range events {
+		if e.Decision == proxy.Denied {
+			last = i
+		}
+	}
+	if last < 0 {
+		return "the proxy refused a connection"
+	}
+	d := events[last]
+	text := fmt.Sprintf("CONNECT %s:%d denied: %s", d.Host, d.Port, d.Reason)
+	if d.Blocked {
+		r.job.Blocked = true
+		return "GAL-NET-001: " + text
+	}
+	if _, err := proxy.NewPolicy(proxy.Input{AllowHosts: []string{d.Host}}); err == nil && d.Reason == proxy.ReasonHostNotAllowed {
+		text += fmt.Sprintf("; if you trust %s, rerun with --allow-host %s", d.Host, d.Host)
+	}
+	return text
 }

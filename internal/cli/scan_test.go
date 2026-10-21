@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/mrdhira/galahad/internal/cli"
+	"github.com/mrdhira/galahad/internal/job"
 	"github.com/mrdhira/galahad/internal/protocol"
 	"github.com/mrdhira/galahad/internal/sandbox"
 )
@@ -143,6 +144,7 @@ func TestRunScan(t *testing.T) {
 		wantStdout  string // substring
 		wantStderr  string // substring
 		wantJob     bool   // a job directory exists
+		wantKind    string // the target kind in job.json, when not empty
 		wantSpec    sandbox.Spec
 		wantTimeout int // seconds of the job timeout the guest got; 0 means it was not checked
 	}{
@@ -165,8 +167,17 @@ func TestRunScan(t *testing.T) {
 			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024}}, wantTimeout: 600,
 		},
 		{name: "-h prints usage", args: []string{"-h"}, wantCode: cli.ExitClean, wantStdout: "Usage: galahad"},
-		{name: "no path", wantCode: cli.ExitUsage, wantStderr: "want exactly one path, got 0"},
-		{name: "two paths", args: []string{"a", "b"}, wantCode: cli.ExitUsage, wantStderr: "want exactly one path, got 2"},
+		{name: "no path", wantCode: cli.ExitUsage, wantStderr: "want exactly one path or link, got 0"},
+		{name: "two paths", args: []string{"a", "b"}, wantCode: cli.ExitUsage, wantStderr: "want exactly one path or link, got 2"},
+		{name: "allow-host is not a host name", args: []string{"--allow-host", "a b", file}, wantCode: cli.ExitUsage, wantStderr: `--allow-host "a b" is not a host name`},
+		{name: "allow-host is an IP address", args: []string{"--allow-host", "10.0.0.1", file}, wantCode: cli.ExitUsage, wantStderr: "is not a host name"},
+		{name: "a link with a space", args: []string{"https://example.com/a b"}, wantCode: cli.ExitUsage, wantStderr: "percent-encode"},
+		{name: "a link that is not http", args: []string{"ftp://example.com/a"}, wantCode: cli.ExitUsage, wantStderr: "only http and https links are supported"},
+		{name: "a link that is too long", args: []string{"https://example.com/" + strings.Repeat("a", 2100)}, wantCode: cli.ExitUsage, wantStderr: "the most is 2048"},
+		{name: "a link without a host", args: []string{"https:///a"}, wantCode: cli.ExitUsage, wantStderr: "has no host"},
+		{name: "a link with a password", args: []string{"https://user:secret@example.com/a"}, wantCode: cli.ExitUsage, wantStderr: "user name or password"},
+		{name: "a Drive link that is not a file", args: []string{"https://drive.google.com/drive/folders/1AbCdEfGhIjKl"}, wantCode: cli.ExitUsage, wantStderr: "is not a Google Drive file link"},
+		{name: "a link without the network", args: []string{"--no-network", "https://example.com/a.pdf"}, wantCode: cli.ExitUsage, wantStderr: "a link needs the network"},
 		{name: "unknown flag", args: []string{"--nope", file}, wantCode: cli.ExitUsage, wantStderr: "flag provided but not defined"},
 		{name: "cpus is not a number", args: []string{"--cpus", "many", file}, wantCode: cli.ExitUsage, wantStderr: "invalid value"},
 		{name: "unknown image", args: []string{"--image", "full", file}, wantCode: cli.ExitUsage, wantStderr: `--image "full": want core or re`},
@@ -183,7 +194,13 @@ func TestRunScan(t *testing.T) {
 		},
 		{name: "missing target", args: []string{filepath.Join(t.TempDir(), "missing")}, backend: broken, wantCode: cli.ExitError, wantStderr: "galahad scan:"},
 		{name: "missing target with escape codes in its name", args: []string{hostile}, backend: broken, wantCode: cli.ExitError, wantStderr: `\u001b]0;PWNED\u0007\u001b[2J`},
-		{name: "the machine does not start", args: []string{file}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true},
+		{name: "the machine does not start", args: []string{file}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "path"},
+		{name: "a link starts a job", args: []string{"--allow-host", "Files.Example.com", "--allow-host", "cdn.example.com", "https://example.com/a.pdf"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "url"},
+		{name: "a Drive link starts a job", args: []string{"https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "drive"},
+		{name: "a Drive open link starts a job", args: []string{"HTTPS://Drive.Google.com/open?id=1AbCdEfGhIjKlMnOp"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "drive"},
+		{name: "a Drive uc link starts a job", args: []string{"http://drive.google.com/uc?export=download&id=1AbCdEfGhIjKlMnOp"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "drive"},
+		{name: "a link on another Google host is a plain link", args: []string{"https://docs.google.com/uc?id=1AbCdEfGhIjKlMnOp"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "url"},
+		{name: "a link to a host the policy refuses", args: []string{"http://a_b.example.com/x"}, backend: broken, wantCode: cli.ExitError, wantStderr: "is not a valid host name"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -206,6 +223,15 @@ func TestRunScan(t *testing.T) {
 			entries, _ := os.ReadDir(filepath.Join(home, "jobs"))
 			if (len(entries) > 0) != tt.wantJob {
 				t.Errorf("job directories = %v, want one: %v", entries, tt.wantJob)
+			}
+			if tt.wantKind != "" {
+				saved, err := job.Load(filepath.Join(home, "jobs"), entries[0].Name())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if saved.Target.Kind != tt.wantKind {
+					t.Errorf("job.json target kind = %q, want %q", saved.Target.Kind, tt.wantKind)
+				}
 			}
 			if tt.wantTimeout > 0 {
 				seen.mu.Lock()

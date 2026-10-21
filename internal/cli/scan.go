@@ -16,6 +16,7 @@ import (
 	"github.com/mrdhira/galahad/internal/config"
 	"github.com/mrdhira/galahad/internal/job"
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/proxy"
 	"github.com/mrdhira/galahad/internal/report"
 )
 
@@ -29,7 +30,7 @@ const (
 	maxScanTimeout   = 24 * time.Hour
 )
 
-// runScan scans a local file or folder in the sandbox and exits with the code of the verdict.
+// runScan scans a local file or folder, or a link, in the sandbox and exits with the code of the verdict.
 func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -38,6 +39,15 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	cpus := fs.Int("cpus", defaultCPUs, "virtual CPUs of the guest")
 	memory := fs.Int("memory", defaultMemoryMiB, "memory of the guest in MiB")
 	noNetwork := fs.Bool("no-network", false, "give the sandbox no network at all, not even through the proxy")
+	var allowHosts []string
+	fs.Func("allow-host", "let the sandbox reach this host as well; may be repeated", func(h string) error {
+		// The proxy policy is the one that decides what a host name is.
+		if _, err := proxy.NewPolicy(proxy.Input{Kind: protocol.KindScan, Source: protocol.SourceLocal, AllowHosts: []string{h}}); err != nil {
+			return err
+		}
+		allowHosts = append(allowHosts, h)
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -47,7 +57,16 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		return ExitUsage
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "galahad scan: want exactly one path, got %d arguments\n\n%s", fs.NArg(), usage)
+		fmt.Fprintf(stderr, "galahad scan: want exactly one path or link, got %d arguments\n\n%s", fs.NArg(), usage)
+		return ExitUsage
+	}
+	tgt, err := classifyTarget(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(stderr, "galahad scan: %v\n\n%s", err, usage)
+		return ExitUsage
+	}
+	if tgt.source != protocol.SourceLocal && *noNetwork {
+		fmt.Fprintf(stderr, "galahad scan: a link needs the network; drop --no-network, or download the file and scan it\n\n%s", usage)
 		return ExitUsage
 	}
 	switch {
@@ -86,11 +105,13 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		CPUs:      *cpus,
 		MemoryMiB: *memory,
 		// The sandbox reaches the network only through the host proxy; --no-network serves no proxy port.
-		NoNetwork: *noNetwork,
+		NoNetwork:  *noNetwork,
+		Source:     tgt.source,
+		AllowHosts: allowHosts,
 		Progress: func(stage string) {
 			fmt.Fprintf(stderr, "galahad: %s\n", stage)
 		},
-	}, fs.Arg(0))
+	}, tgt.value)
 	if err != nil {
 		// The error can carry a file name from the target, which is untrusted text.
 		msg := protocol.CleanPath(err.Error())

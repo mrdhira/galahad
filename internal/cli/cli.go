@@ -34,8 +34,9 @@ var (
 const usage = `Usage: galahad <command> [flags]
 
 Commands:
-  scan      Scan a local file or folder in the sandbox: galahad scan [flags] <path>
+  scan      Scan a local file or folder, a link or a Google Drive file in the sandbox: galahad scan [flags] <path|url>
               --image core|re  --timeout <duration>  --cpus <n>  --memory <MiB>  --no-network
+              --allow-host <host>  (repeatable: let the sandbox reach one more host)
               --timeout 0, or no --timeout, means the default of the image: 10m for core, 20m for re
   setup     Download and verify the pinned Firecracker and guest images: galahad setup [--image core|re]
   doctor    Check that this host can run scans, and say how to fix what is wrong

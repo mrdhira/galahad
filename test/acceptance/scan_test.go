@@ -19,6 +19,7 @@ type scanJob struct {
 	Verdict  string `json:"verdict"`
 	Error    string `json:"error"`
 	Backend  string `json:"backend"`
+	Blocked  bool   `json:"blocked"`
 	Target   struct {
 		Kind string `json:"kind"`
 	} `json:"target"`
