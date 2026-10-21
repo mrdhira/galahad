@@ -40,6 +40,11 @@ func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
 	fmt.Fprintf(w, "Verdict: %s\n", paint(ansiBold+verdictColor, strings.ToUpper(clean(string(res.Verdict)))))
 	fmt.Fprintf(w, "Score: %d/100  Confidence: %d%% (%s)\n", res.Score, res.Confidence, clean(res.ConfidenceLevel))
 
+	if warn := coverageWarning(res.Coverage); warn != "" {
+		fmt.Fprintf(w, "Warning: %s\n", warn)
+	}
+
+	hosts := iocHosts(res)
 	rs := rows(res, nil)
 	if len(rs) > 0 {
 		fmt.Fprintln(w)
@@ -60,7 +65,7 @@ func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
 		if r.Location != "" {
 			line += " " + clean(r.Location)
 		}
-		fmt.Fprintf(w, "%s %s\n", paint(sevColor, line), clean(r.Title))
+		fmt.Fprintf(w, "%s %s\n", paint(sevColor, line), text(hosts, r.Title))
 	}
 
 	fmt.Fprintf(w, "\nReports:\n  %s\n  %s\n  %s\n", clean(p.HTML), clean(p.Markdown), clean(p.JSON))

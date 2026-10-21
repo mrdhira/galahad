@@ -154,7 +154,8 @@ type Coverage struct {
 	Truncated     bool     `json:"truncated"`
 }
 
-// Target describes what was scanned. SHA256 is set for file targets only.
+// Target describes what was scanned. SHA256 is set for file targets only. Size is the file size,
+// or for a directory the total bytes of the top-level files read.
 type Target struct {
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`

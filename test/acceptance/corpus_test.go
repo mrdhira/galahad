@@ -183,14 +183,14 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "p4-pdf-launch: OpenAction to JavaScript and Launch, URI defanged in the summary",
 			target: corpusDir("p4-pdf-launch"), wantCode: 20,
-			wantRules:   []string{"GAL-PDF-001 invoice.pdf:11", "GAL-PDF-002 invoice.pdf:2", "GAL-PDF-003 invoice.pdf:14"},
+			wantRules:   []string{"GAL-PDF-001 invoice.pdf:12", "GAL-PDF-002 invoice.pdf:3", "GAL-PDF-003 invoice.pdf:15"},
 			wantIOCs:    []string{"http://invoice.sinkhole.test/pay"},
 			wantSummary: []string{"hxxp://invoice[.]sinkhole[.]test/pay"},
 		},
 		{
 			name:   "p4-pdf-openaction-uri: OpenAction to a URI action",
 			target: corpusDir("p4-pdf-openaction-uri"), wantCode: 10,
-			wantRules: []string{"GAL-PDF-002 statement.pdf:2"},
+			wantRules: []string{"GAL-PDF-002 statement.pdf:3"},
 		},
 		{
 			name: "p5-lnk-in-zip: decoy pdf name hides a shortcut with a PowerShell launcher (built)",
@@ -522,6 +522,17 @@ func TestCorpus(t *testing.T) {
 			for _, want := range tt.wantSummary {
 				if !strings.Contains(summary, want) {
 					t.Errorf("summary.md lacks %q:\n%s", want, summary)
+				}
+			}
+			// And the target line matches its kind: a file shows its SHA-256, a folder its file count
+			switch rep.Target.Kind {
+			case "file":
+				if rep.Target.SHA256 == "" || !strings.Contains(summary, "- SHA-256: "+rep.Target.SHA256) {
+					t.Errorf("file target sha256 %q is not in summary.md:\n%s", rep.Target.SHA256, summary)
+				}
+			default:
+				if !strings.Contains(summary, "- Kind: folder, ") || strings.Contains(summary, "SHA-256") {
+					t.Errorf("summary.md of a folder target is wrong:\n%s", summary)
 				}
 			}
 			for _, name := range []string{"summary.md", "report.html"} {

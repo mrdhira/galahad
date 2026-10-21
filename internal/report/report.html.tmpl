@@ -15,7 +15,9 @@ h1,h2{line-height:1.2}
 .banner.clean{border-color:var(--clean)}.banner.suspicious{border-color:var(--suspicious)}.banner.malicious{border-color:var(--malicious)}
 .verdict{font-size:28px;font-weight:700;text-transform:uppercase}
 .muted{color:var(--muted)}
-table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}
+table{border-collapse:collapse;width:100%}
+.scroll{overflow-x:auto}
+.warn{font-weight:700;color:var(--suspicious)}
 th,td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
 code{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;word-break:break-all}
 .sev{font-weight:700;text-transform:uppercase}
@@ -31,37 +33,58 @@ code{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;word
 </div>
 
 <h2>Target</h2>
+<div class="scroll" tabindex="0" role="region" aria-label="Target">
 <table>
-<tr><th>Name</th><td>{{.TargetName}}</td></tr>
-<tr><th>Kind</th><td>{{.Target.Kind}}</td></tr>
-<tr><th>SHA-256</th><td><code>{{.TargetSHA}}</code></td></tr>
-<tr><th>Size</th><td>{{.Target.Size}} bytes, {{.Target.FileCount}} files</td></tr>
+<tbody>
+<tr><th scope="row">Name</th><td>{{.TargetName}}</td></tr>
+<tr><th scope="row">Kind</th><td>{{.Target.Kind}}</td></tr>
+{{if .Target.SHA256}}<tr><th scope="row">SHA-256</th><td><code>{{.Target.SHA256}}</code></td></tr>
+{{end}}<tr><th scope="row">Size</th><td>{{.Target.Size}}</td></tr>
+</tbody>
 </table>
+</div>
 
 <h2>Findings ({{len .Findings}})</h2>
-{{if .Findings}}<table>
-<tr><th>Severity</th><th>Rule</th><th>Title</th><th>ATT&amp;CK</th><th>Location</th><th>Snippet</th></tr>
+{{if .Findings}}<div class="scroll" tabindex="0" role="region" aria-label="Findings">
+<table>
+<thead><tr><th scope="col">Severity</th><th scope="col">Rule</th><th scope="col">Title</th><th scope="col">ATT&amp;CK</th><th scope="col">Location</th><th scope="col">Snippet</th></tr></thead>
+<tbody>
 {{range .Findings}}<tr><td class="sev sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td><td>{{.Title}}</td><td>{{.Attack}}</td><td><code>{{.Location}}</code></td><td><code>{{.Snippet}}</code></td></tr>
-{{end}}</table>{{else}}<p class="muted">None.</p>{{end}}
+{{end}}</tbody>
+</table>
+</div>{{else}}<p class="muted">None.</p>{{end}}
 
 <h2>Auto-execution inventory ({{len .AutoExec}})</h2>
-{{if .AutoExec}}<table>
-<tr><th>Severity</th><th>Rule</th><th>Title</th><th>Location</th><th>Snippet</th></tr>
+{{if .AutoExec}}<div class="scroll" tabindex="0" role="region" aria-label="Auto-execution inventory">
+<table>
+<thead><tr><th scope="col">Severity</th><th scope="col">Rule</th><th scope="col">Title</th><th scope="col">Location</th><th scope="col">Snippet</th></tr></thead>
+<tbody>
 {{range .AutoExec}}<tr><td class="sev sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td><td>{{.Title}}</td><td><code>{{.Location}}</code></td><td><code>{{.Snippet}}</code></td></tr>
-{{end}}</table>{{else}}<p class="muted">None.</p>{{end}}
+{{end}}</tbody>
+</table>
+</div>{{else}}<p class="muted">None.</p>{{end}}
 
 <h2>IOCs ({{len .IOCs}})</h2>
 <p class="muted">Defanged: not clickable, safe to copy into a ticket.</p>
-{{if .IOCs}}<table>
-<tr><th>Type</th><th>Value</th><th>Location</th></tr>
+{{if .IOCs}}<div class="scroll" tabindex="0" role="region" aria-label="IOCs">
+<table>
+<thead><tr><th scope="col">Type</th><th scope="col">Value</th><th scope="col">Location</th></tr></thead>
+<tbody>
 {{range .IOCs}}<tr><td>{{.Type}}</td><td><code>{{.Value}}</code></td><td><code>{{.Location}}</code></td></tr>
-{{end}}</table>{{else}}<p class="muted">None.</p>{{end}}
+{{end}}</tbody>
+</table>
+</div>{{else}}<p class="muted">None.</p>{{end}}
 
 <h2>Coverage</h2>
-<p>Files analyzed: {{.Coverage.FilesAnalyzed}} of {{.Coverage.FilesSeen}} ({{.CoverageText}}).{{if .Coverage.Truncated}} The file or finding limit was reached.{{end}}</p>
-{{if .Skips}}<table>
-<tr><th>Skipped</th><th>Reason</th></tr>
+<p>{{.CoverageLine}}.{{if .Truncated}} The file or finding limit was reached.{{end}}</p>
+{{if .CoverageWarning}}<p class="warn">{{.CoverageWarning}}.</p>{{end}}
+{{if .Skips}}<div class="scroll" tabindex="0" role="region" aria-label="Skipped items">
+<table>
+<thead><tr><th scope="col">Skipped</th><th scope="col">Reason</th></tr></thead>
+<tbody>
 {{range .Skips}}<tr><td><code>{{.Path}}</code></td><td>{{.Reason}}</td></tr>
-{{end}}</table>{{else}}<p class="muted">Nothing skipped.</p>{{end}}
+{{end}}</tbody>
+</table>
+</div>{{else}}<p class="muted">Nothing skipped.</p>{{end}}
 </body>
 </html>
