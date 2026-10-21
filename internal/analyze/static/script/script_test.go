@@ -675,7 +675,6 @@ const hangGuard = 5 * time.Minute
 // is there and ends with the expected skip, or none. A run that hits the hang
 // guard ends with a timeout skip and fails here.
 func TestAnalyzeLimits(t *testing.T) {
-	minified := minifiedUnit
 	tests := []struct {
 		name string
 		// inputs
@@ -685,10 +684,10 @@ func TestAnalyzeLimits(t *testing.T) {
 		wantRules []string
 		wantSkip  string
 	}{
-		{name: "3 MB minified line", path: "big.min.js", data: strings.Repeat(minified, 3<<20/len(minified)) + "\n"},
+		{name: "3 MB minified line", path: "big.min.js", data: strings.Repeat(minifiedUnit, 3<<20/len(minifiedUnit)) + "\n"},
 		{name: "1 MB run of spaces before code", path: "pad.js", data: "a();" + pad(1<<20) + "b();\n", wantRules: []string{"OBF-001:1"}},
 		{name: "1 MB run of spaces only", path: "pad.js", data: pad(1 << 20)},
-		{name: "payload at the end of a 2 MB line", path: "big.js", data: strings.Repeat(minified, 2<<20/len(minified)) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
+		{name: "payload at the end of a 2 MB line", path: "big.js", data: strings.Repeat(minifiedUnit, 2<<20/len(minifiedUnit)) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
 		{name: "payload across a window cut", path: "cut.js", data: strings.Repeat(";", 256<<10-4) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
 		{name: "1 MB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 1<<20/5), wantSkip: protocol.SkipTooLarge},
 		{name: "2 MB blob on one line", path: "blob.js", data: "var x='" + unit(2<<20) + "';\n", wantRules: []string{"OBF-003:1"}},
@@ -768,16 +767,20 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 }
 
 // fastest returns the best of three Analyze runs to damp scheduling noise.
+// A run that skips was cut short by a budget, so its time says nothing about scaling.
 func fastest(t *testing.T, f analyze.File) time.Duration {
 	t.Helper()
 	best := time.Duration(math.MaxInt64)
 	for range 3 {
 		ctx, cancel := context.WithTimeout(context.Background(), hangGuard)
 		start := time.Now()
-		_, err := script.New().Analyze(ctx, f)
+		out, err := script.New().Analyze(ctx, f)
 		cancel()
 		if err != nil {
 			t.Fatal(err)
+		}
+		if len(out.Skips) > 0 {
+			t.Fatalf("%d bytes: skips = %v, want a full analysis", len(f.Data), out.Skips)
 		}
 		best = min(best, time.Since(start))
 	}
