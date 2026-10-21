@@ -17,8 +17,8 @@ const (
 
 // Skip reasons.
 const (
-	SkipTooLarge    = "too_large"
-	SkipBudget      = "budget"
+	SkipTooLarge    = "too_large" // a file over a size or work limit of its own
+	SkipBudget      = "budget"    // a container with more members or bytes than its budget allows
 	SkipDepth       = "depth"
 	SkipUnsupported = "unsupported"
 	SkipEncrypted   = "encrypted"
@@ -129,6 +129,20 @@ type FileInfo struct {
 type Skip struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+}
+
+// Unread reports a skip that leaves a file or member unread: too large, over a
+// budget, too deep or encrypted. Such a member counts as seen but not analyzed.
+func (s Skip) Unread() bool {
+	return s.Reason == SkipTooLarge || s.HidesContent()
+}
+
+// HidesContent reports a skip behind which a payload could be hidden on purpose:
+// a container that is too deep, encrypted or over its member budget. A file that
+// is only too large, such as a data file or a media file, is not one: benign
+// inputs have those, so they lower confidence but never decide the verdict.
+func (s Skip) HidesContent() bool {
+	return s.Reason == SkipBudget || s.Reason == SkipDepth || s.Reason == SkipEncrypted
 }
 
 // Coverage says how much of the target was analyzed.
