@@ -217,14 +217,14 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "p4-pdf-launch: OpenAction to JavaScript and Launch, URI defanged in the summary",
 			target: corpusDir("p4-pdf-launch"), wantCode: 20,
-			wantRules:   []string{"GAL-PDF-001 invoice.pdf:11", "GAL-PDF-002 invoice.pdf:2", "GAL-PDF-003 invoice.pdf:14"},
+			wantRules:   []string{"GAL-PDF-001 invoice.pdf:12", "GAL-PDF-002 invoice.pdf:3", "GAL-PDF-003 invoice.pdf:15"},
 			wantIOCs:    []string{"http://invoice.sinkhole.test/pay"},
 			wantSummary: []string{"hxxp://invoice[.]sinkhole[.]test/pay"},
 		},
 		{
 			name:   "p4-pdf-openaction-uri: OpenAction to a URI action",
 			target: corpusDir("p4-pdf-openaction-uri"), wantCode: 10,
-			wantRules: []string{"GAL-PDF-002 statement.pdf:2"},
+			wantRules: []string{"GAL-PDF-002 statement.pdf:3"},
 		},
 		{
 			name: "p5-lnk-in-zip: decoy pdf name hides a shortcut with a PowerShell launcher (built)",
