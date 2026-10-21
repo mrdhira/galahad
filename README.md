@@ -15,18 +15,44 @@ v0.1 ships `galahad-agent`, a static analyzer. It reads a folder, a repo checkou
 The analyzer parses untrusted bytes, so run it inside a VM, not on your real machine:
 
 - macOS: a UTM or Parallels VM.
-- Windows: a Hyper-V VM or a WSL2 distribution.
+- Windows: a Hyper-V VM.
 - Any OS: a cloud VM or a throwaway Linux VM.
 
-1. Download the archive for the VM's OS and CPU from [GitHub Releases](https://github.com/mrdhira/galahad/releases) and verify it (see Install below).
-2. Copy the suspicious item into the VM. Do not open it on your real machine.
-3. In the VM, run:
+WSL2 is not recommended. By default it mounts your Windows drives read-write under `/mnt/c` and can start Windows programs, so a bug in the analyzer would reach your Windows files. Galahad refuses to run in WSL until both are turned off. To do that, add this to `/etc/wsl.conf` inside the distribution, then run `wsl --shutdown` from Windows and start the distribution again:
+
+```ini
+[automount]
+enabled = false
+
+[interop]
+enabled = false
+appendWindowsPath = false
+```
+
+A VM only isolates the item if you keep it that way:
+
+- Turn off shared folders, drive redirection and clipboard sharing. Parallels Tools can share your Mac home folder, a Hyper-V enhanced session redirects your drives, and UTM can share folders (VirtFS) and the clipboard (SPICE).
+- Keep no credentials or SSH keys in the VM.
+- Use a snapshot or a throwaway VM, and revert or delete it after each check.
+
+Steps:
+
+1. In the VM, download the archive for the VM's OS and CPU from [GitHub Releases](https://github.com/mrdhira/galahad/releases) and verify it (see Install below).
+2. Unpack it. On Linux or macOS: `tar -xzf galahad_<version>_<os>_<arch>.tar.gz`. On Windows (PowerShell): `Expand-Archive galahad_<version>_windows_<arch>.zip .`
+3. Get the suspicious item inside the VM: download it there, or `git clone` it there. Do not pass it in through a shared folder.
+4. Run the binary by its path. On Linux or macOS:
 
    ```sh
-   galahad-agent analyze -o out <path>
+   ./galahad_<version>_<os>_<arch>/galahad-agent analyze -o out <path>
    ```
 
-4. Open `out/report.html` or read `out/summary.md`. `out/report.json` holds the same result for tools. Links in the HTML and Markdown reports are defanged.
+   On Windows:
+
+   ```powershell
+   .\galahad_<version>_windows_<arch>\galahad-agent.exe analyze -o out <path>
+   ```
+
+5. Open `out/report.html` or read `out/summary.md`. `out/report.json` holds the same result for tools. Links in the HTML and Markdown reports are defanged.
 
 The exit code is the verdict:
 
@@ -38,9 +64,9 @@ The exit code is the verdict:
 | 1 | error |
 | 2 | usage error, including a refusal to run outside a VM |
 
-On macOS, Gatekeeper blocks a downloaded binary that is not signed. Remove the quarantine flag once you have verified the download: `xattr -d com.apple.quarantine galahad-agent`.
+On macOS, Gatekeeper blocks a downloaded binary that is not signed. Remove the quarantine flag once you have verified the download: `xattr -d com.apple.quarantine <path-to>/galahad-agent`.
 
-`galahad-agent` refuses to run when it does not detect a VM. `--unsafe-host` overrides the check. It is risky: the analyzer then parses untrusted bytes on your real machine, so a bug in a parser could be exploited by the file you are checking. Use it only for the harmless fixtures in `testdata/corpus/`.
+`galahad-agent` refuses to run when it does not detect a VM, and in WSL unless it is locked down as above. `--unsafe-host` overrides the check. It is risky: the analyzer then parses untrusted bytes on your real machine, so a bug in a parser could be exploited by the file you are checking. Use it only for the harmless fixtures in `testdata/corpus/`.
 
 ### What it detects
 
