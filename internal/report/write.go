@@ -300,7 +300,8 @@ func text(hosts map[string]bool, s string) string {
 	return defang.DefangHosts(clean(s), hosts)
 }
 
-// iocHosts returns the lowercase domains and IP addresses of the IOC list. Renderers build it once.
+// iocHosts returns the lowercase domains and IP addresses of the IOC list and the hosts the guest
+// asked the proxy for, so a bare host in a finding or a reason is defanged too. Renderers build it once.
 func iocHosts(res *protocol.Result) map[string]bool {
 	hosts := map[string]bool{}
 	for _, i := range res.IOCs {
@@ -308,7 +309,55 @@ func iocHosts(res *protocol.Result) map[string]bool {
 			hosts[strings.ToLower(stripControl(i.Value))] = true
 		}
 	}
+	if res.Network != nil {
+		for _, e := range res.Network.Events {
+			hosts[strings.ToLower(stripControl(e.Host))] = true
+		}
+	}
 	return hosts
+}
+
+// netRow is one line of the Network section. Host and Reason are defanged and cleaned; Label
+// says what happened: BLOCKED for a refused non-public address, else denied or allowed.
+type netRow struct {
+	Label, Host, Reason string
+	Port, Count         int
+}
+
+// netRows returns the rows of the Network section, blocked ones first, then the other denials,
+// then the allowed ones. Each group keeps the order of the proxy.
+func netRows(res *protocol.Result) []netRow {
+	if res.Network == nil {
+		return nil
+	}
+	var out []netRow
+	for _, e := range res.Network.Events {
+		r := netRow{Label: clean(e.Decision), Host: cleanValue(e.Host), Reason: clean(e.Reason), Port: e.Port, Count: e.Count}
+		if e.Blocked {
+			r.Label = "BLOCKED"
+		}
+		out = append(out, r)
+	}
+	rank := func(r netRow) int {
+		switch r.Label {
+		case "BLOCKED":
+			return 0
+		case protocol.DecisionDenied:
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
+	return out
+}
+
+// text is how a row reads on one line: "BLOCKED 169[.]254[.]169[.]254:443 (2 requests): metadata".
+func (r netRow) text() string {
+	line := fmt.Sprintf("%s %s:%d (%s)", r.Label, r.Host, r.Port, plural(r.Count, "request"))
+	if r.Reason != "" {
+		line += ": " + r.Reason
+	}
+	return line
 }
 
 // percent rounds like scoring does. It never shows 100% when a file was not analyzed.

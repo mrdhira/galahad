@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,7 +56,12 @@ func (b cleanBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine,
 	if err != nil {
 		return nil, err
 	}
-	m := &cleanMachine{l: l, done: make(chan struct{})}
+	pl, err := net.Listen("tcp", "127.0.0.1:0") // the proxy port: nobody connects
+	if err != nil {
+		_ = l.Close() // the listen error is the one to report
+		return nil, err
+	}
+	m := &cleanMachine{l: l, pl: pl, done: make(chan struct{})}
 	go func() {
 		defer close(m.done)
 		conn, err := net.Dial("tcp", l.Addr().String())
@@ -102,13 +108,18 @@ func (b cleanBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine,
 }
 
 type cleanMachine struct {
-	l    net.Listener
-	done chan struct{}
+	l, pl net.Listener // control and proxy
+	done  chan struct{}
 }
 
-func (m *cleanMachine) Listener(uint32) net.Listener { return m.l }
-func (m *cleanMachine) Wait() error                  { <-m.done; return nil }
-func (m *cleanMachine) Kill() error                  { return m.l.Close() }
+func (m *cleanMachine) Listener(port uint32) net.Listener {
+	if port == 1025 {
+		return m.pl
+	}
+	return m.l
+}
+func (m *cleanMachine) Wait() error { <-m.done; return nil }
+func (m *cleanMachine) Kill() error { return errors.Join(m.l.Close(), m.pl.Close()) }
 
 func TestRunScan(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "a.txt")
@@ -137,12 +148,16 @@ func TestRunScan(t *testing.T) {
 	}{
 		{
 			name: "a clean file", args: []string{file}, backend: clean, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantStderr: "galahad: analyze", wantJob: true,
-			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072}, wantTimeout: 300,
+			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024, 1025}}, wantTimeout: 300,
 		},
 		{
 			name: "flags reach the machine and the job", args: []string{"--image", "re", "--timeout", "3m", "--cpus", "4", "--memory", "2048", file}, backend: clean,
 			wantCode: cli.ExitClean, wantStdout: "CLEAN", wantJob: true,
-			wantSpec: sandbox.Spec{Image: "re", CPUs: 4, MemoryMiB: 2048}, wantTimeout: 180,
+			wantSpec: sandbox.Spec{Image: "re", CPUs: 4, MemoryMiB: 2048, Ports: []uint32{1024, 1025}}, wantTimeout: 180,
+		},
+		{
+			name: "no network serves no proxy port", args: []string{"--no-network", file}, backend: clean, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantJob: true,
+			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024}}, wantTimeout: 300,
 		},
 		{name: "-h prints usage", args: []string{"-h"}, wantCode: cli.ExitClean, wantStdout: "Usage: galahad"},
 		{name: "no path", wantCode: cli.ExitUsage, wantStderr: "want exactly one path, got 0"},
@@ -190,8 +205,8 @@ func TestRunScan(t *testing.T) {
 			if tt.wantTimeout > 0 {
 				seen.mu.Lock()
 				defer seen.mu.Unlock()
-				if got := seen.spec; got.Image != tt.wantSpec.Image || got.CPUs != tt.wantSpec.CPUs || got.MemoryMiB != tt.wantSpec.MemoryMiB {
-					t.Errorf("machine spec = %+v, want image %q, %d CPUs, %d MiB", got, tt.wantSpec.Image, tt.wantSpec.CPUs, tt.wantSpec.MemoryMiB)
+				if got := seen.spec; got.Image != tt.wantSpec.Image || got.CPUs != tt.wantSpec.CPUs || got.MemoryMiB != tt.wantSpec.MemoryMiB || !slices.Equal(got.Ports, tt.wantSpec.Ports) {
+					t.Errorf("machine spec = %+v, want image %q, %d CPUs, %d MiB, ports %v", got, tt.wantSpec.Image, tt.wantSpec.CPUs, tt.wantSpec.MemoryMiB, tt.wantSpec.Ports)
 				}
 				// The guest sees what is left of the timeout, a moment after the start.
 				if seen.jobTimeout > tt.wantTimeout || seen.jobTimeout < tt.wantTimeout-5 {

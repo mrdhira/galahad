@@ -50,6 +50,8 @@ Commands:
   guest --control <addr> [--proxy <addr>] [--memory-limit size] [--unsafe-host]
             Run one job for the host: dial the host, take a job and its tar stream, analyze it and
             send back the result. The address is vsock:<cid>:<port>; tcp:<host:port> needs --unsafe-host.
+            With --proxy it listens on 127.0.0.1 (port 3128, or any port with --unsafe-host) and sets
+            http_proxy and https_proxy for the tools it runs; each request becomes a tunnel to that address.
             Refuses to run outside a VM unless --unsafe-host is given.
   version   Print version information
   help      Show this help
@@ -61,6 +63,8 @@ type Env struct {
 	DetectVM func() (inVM bool, reason string)
 	// SetMemoryLimit sets the soft memory limit of the process. Nil means debug.SetMemoryLimit.
 	SetMemoryLimit func(bytes int64)
+	// Setenv sets an environment variable of the process, which the guest tools inherit. Nil means os.Setenv.
+	Setenv func(key, value string)
 }
 
 // Run executes the command in args (without the program name) and returns the exit code.
@@ -75,6 +79,9 @@ func RunWithEnv(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	if env.SetMemoryLimit == nil {
 		env.SetMemoryLimit = func(n int64) { debug.SetMemoryLimit(n) }
+	}
+	if env.Setenv == nil {
+		env.Setenv = func(k, v string) { _ = os.Setenv(k, v) }
 	}
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)

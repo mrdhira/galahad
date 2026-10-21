@@ -127,6 +127,12 @@ func TestValidate(t *testing.T) {
 			r.Coverage.Analyzers = slices.Repeat(r.Coverage.Analyzers, protocol.MaxAnalyzers)
 			r.Reasons = slices.Repeat(r.Reasons, protocol.MaxReasonCount)
 		}},
+		{name: "network set by the host", mutate: func(r *protocol.Result) {
+			r.Network = &protocol.Network{Events: []protocol.NetEvent{{Host: "api.osv.dev", Port: 443, Decision: protocol.DecisionAllowed, Count: 1}}}
+		}},
+		{name: "network invalid", mutate: func(r *protocol.Result) {
+			r.Network = &protocol.Network{Events: []protocol.NetEvent{{Host: "api.osv.dev", Port: 0, Decision: protocol.DecisionAllowed, Count: 1}}}
+		}, wantErr: "network: events[0]: port 0"},
 		{name: "file path empty", mutate: func(r *protocol.Result) { r.Files[0].Path = "" }, wantErr: "files[0]: path is empty"},
 		{name: "file kind has control character", mutate: func(r *protocol.Result) { r.Files[0].Kind = "a\x1b" }, wantErr: "files[0]: kind"},
 		{name: "file kind too long", mutate: func(r *protocol.Result) { r.Files[0].Kind = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "files[0]: kind is 65 bytes"},

@@ -97,6 +97,7 @@ type guestFrames struct {
 	stages []string
 	result *protocol.Result
 	errMsg *protocol.Error
+	probe  []byte // the data of the probe artifact
 }
 
 // readGuest reads the frames of the guest as the host would: in order, then EOF.
@@ -127,6 +128,14 @@ func readGuest(t *testing.T, c net.Conn) guestFrames {
 				t.Fatalf("progress %s: %v, %v", payload, err, p.Validate())
 			}
 			got.stages = append(got.stages, p.Stage)
+		case protocol.FrameArtifact:
+			a, err := protocol.ParseArtifact(payload)
+			if err != nil {
+				t.Fatalf("artifact: %v", err)
+			}
+			if a.ID == protocol.ArtifactProbeJSON {
+				got.probe = a.Data
+			}
 		case protocol.FrameResult:
 			var r protocol.Result
 			if err := protocol.DecodeStrict(payload, &r); err != nil {
@@ -160,6 +169,12 @@ type guestExit struct {
 // connection it made, and a channel with its exit.
 func startGuest(t *testing.T, extraArgs ...string) (net.Conn, <-chan guestExit) {
 	t.Helper()
+	return startGuestWith(t, agent.Env{}, extraArgs...)
+}
+
+// startGuestWith is startGuest with parts of the environment replaced. The guest never runs in a VM here.
+func startGuestWith(t *testing.T, env agent.Env, extraArgs ...string) (net.Conn, <-chan guestExit) {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +183,7 @@ func startGuest(t *testing.T, extraArgs ...string) (net.Conn, <-chan guestExit) 
 	exit := make(chan guestExit, 1)
 	go func() {
 		var stderr bytes.Buffer
-		env := agent.Env{DetectVM: func() (bool, string) { return false, "test" }}
+		env.DetectVM = func() (bool, string) { return false, "test" }
 		args := append([]string{"guest", "--unsafe-host", "--control", "tcp:" + l.Addr().String()}, extraArgs...)
 		code := agent.RunWithEnv(args, io.Discard, &stderr, env)
 		exit <- guestExit{code, stderr.String()}

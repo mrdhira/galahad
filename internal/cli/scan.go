@@ -37,6 +37,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	timeout := fs.Duration("timeout", job.DefaultTimeout, "time limit of the whole scan")
 	cpus := fs.Int("cpus", defaultCPUs, "virtual CPUs of the guest")
 	memory := fs.Int("memory", defaultMemoryMiB, "memory of the guest in MiB")
+	noNetwork := fs.Bool("no-network", false, "give the sandbox no network at all, not even through the proxy")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -77,6 +78,8 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		Image:     *image,
 		CPUs:      *cpus,
 		MemoryMiB: *memory,
+		// The sandbox reaches the network only through the host proxy; --no-network serves no proxy port.
+		NoNetwork: *noNetwork,
 		Progress: func(stage string) {
 			fmt.Fprintf(stderr, "galahad: %s\n", stage)
 		},

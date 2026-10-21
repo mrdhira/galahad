@@ -20,7 +20,7 @@ const (
 )
 
 // Terminal prints the verdict, what to do about it, score, confidence, why, what runs
-// automatically, up to 10 findings and the report paths.
+// automatically, up to 10 findings, up to 10 network destinations and the report paths.
 // color adds ANSI colors; the caller decides (stdout is a TTY and NO_COLOR is unset).
 // Untrusted text is defanged and stripped of control characters either way.
 func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
@@ -95,6 +95,22 @@ func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
 			line += " " + clean(g.Location)
 		}
 		fmt.Fprintf(w, "  %s %s\n", sevPaint(g.severity(), line), text(hosts, g.titles()))
+	}
+
+	if res.Network != nil {
+		rows := netRows(res)
+		fmt.Fprintf(w, "\nNetwork (%s):\n", plural(len(rows), "destination"))
+		for i, r := range rows {
+			if i == termMaxFindings {
+				fmt.Fprintln(w, "  "+paint(ansiDim, fmt.Sprintf("... %d more in %s", len(rows)-termMaxFindings, JSONName)))
+				break
+			}
+			line := r.text()
+			if r.Label == "BLOCKED" {
+				line = paint(ansiRed, line)
+			}
+			fmt.Fprintf(w, "  %s\n", line)
+		}
 	}
 
 	fmt.Fprintf(w, "\nReports:\n  %s\n  %s\n  %s\n", clean(p.HTML), clean(p.Markdown), clean(p.JSON))

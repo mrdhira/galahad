@@ -561,6 +561,61 @@ func TestWriteContent(t *testing.T) {
 			mutate:   func(r *protocol.Result) { r.Reasons = nil },
 			wantBoth: []string{"No scoring reasons."},
 		},
+		{
+			name: "network section lists the blocked destination first, defanged",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{Events: []protocol.NetEvent{
+					{Host: "api.osv.dev", Port: 443, Decision: protocol.DecisionAllowed, Count: 3},
+					{Host: "evil.test", Port: 443, Decision: protocol.DecisionDenied, Reason: "host not allowed", Count: 1},
+					{Host: "169.254.169.254", Port: 443, Decision: protocol.DecisionDenied, Reason: "metadata", Blocked: true, Count: 2},
+				}}
+				r.Findings[0].Evidence[0] = protocol.Evidence{Path: "(network)", Snippet: "CONNECT 169.254.169.254:443 denied: metadata"}
+			},
+			wantBoth: []string{"BLOCKED", "169[.]254[.]169[.]254", "evil[.]test", "api[.]osv[.]dev", "host not allowed"},
+			wantMD: []string{
+				"## Network (3 destinations)\n\n| Decision | Host | Port | Requests | Reason |\n|---|---|---|---|---|\n| BLOCKED | 169[.]254[.]169[.]254 | 443 | 2 | metadata |\n| denied | evil[.]test | 443 | 1 | host not allowed |\n| allowed | api[.]osv[.]dev | 443 | 3 |  |\n",
+				"CONNECT 169[.]254[.]169[.]254:443 denied: metadata", `\(network\)`,
+			},
+			wantHTML:       []string{`<h2 id="network">Network (3)</h2>`, "<td>BLOCKED</td><td><code>169[.]254[.]169[.]254</code></td><td>443</td><td>2</td><td>metadata</td>"},
+			wantNeitherHas: []string{"169.254.169.254", "evil.test", "api.osv.dev"},
+		},
+		{
+			name: "network section with no requests",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{Events: []protocol.NetEvent{}}
+			},
+			wantMD:   []string{"## Network (0 destinations)\n\nNone.\n"},
+			wantHTML: []string{`<h2 id="network">Network (0)</h2>`},
+		},
+		{
+			name: "network text cannot break out of the markup",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{Events: []protocol.NetEvent{
+					{Host: "a<img>.test", Port: 443, Decision: protocol.DecisionDenied, Reason: "x|y <b>\x1b[2J", Count: 1},
+				}}
+			},
+			wantMD:         []string{`a&lt;img&gt;\[.\]test`, `x\|y &lt;b&gt; \[2J`},
+			wantHTML:       []string{"a&lt;img&gt;[.]test", "x|y &lt;b&gt; [2J"},
+			wantNeitherHas: []string{"<img", "<b>", "\x1b"},
+		},
+		{
+			name: "network table in markdown is cut at twenty rows",
+			mutate: func(r *protocol.Result) {
+				evs := []protocol.NetEvent{}
+				for i := range 25 {
+					evs = append(evs, protocol.NetEvent{Host: fmt.Sprintf("h%d.test", i), Port: 443, Decision: protocol.DecisionDenied, Reason: "host not allowed", Count: 1})
+				}
+				r.Network = &protocol.Network{Events: evs}
+			},
+			wantMD:       []string{"Showing 20 of 25. See report.json for the rest."},
+			wantMDAbsent: []string{"h20[.]test"},
+			wantHTML:     []string{"h24[.]test"},
+		},
+		{
+			name:           "no network section without network data",
+			mutate:         func(r *protocol.Result) {},
+			wantNeitherHas: []string{"Network ("},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -783,6 +838,43 @@ func TestTerminal(t *testing.T) {
 				}
 			},
 			wantContain: []string{"... 5 more in report.json"},
+		},
+		{
+			name: "network destinations are listed, blocked first",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{Events: []protocol.NetEvent{
+					{Host: "api.osv.dev", Port: 443, Decision: protocol.DecisionAllowed, Count: 1},
+					{Host: "169.254.169.254", Port: 443, Decision: protocol.DecisionDenied, Reason: "metadata", Blocked: true, Count: 2},
+				}}
+			},
+			color: true,
+			wantContain: []string{
+				"\nNetwork (2 destinations):\n  \x1b[31mBLOCKED 169[.]254[.]169[.]254:443 (2 requests): metadata\x1b[0m\n  allowed api[.]osv[.]dev:443 (1 request)\n\nReports:",
+			},
+			wantAbsent: []string{"169.254.169.254", "api.osv.dev"},
+		},
+		{
+			name: "no network requests",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{Events: []protocol.NetEvent{}}
+			},
+			wantContain: []string{"\nNetwork (0 destinations):\n\nReports:"},
+		},
+		{
+			name: "network destinations are cut at ten",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{}
+				for i := range 12 {
+					r.Network.Events = append(r.Network.Events, protocol.NetEvent{Host: fmt.Sprintf("h%d.test", i), Port: 443, Decision: protocol.DecisionDenied, Count: 1})
+				}
+			},
+			wantContain: []string{"Network (12 destinations):", "  ... 2 more in report.json"},
+			wantAbsent:  []string{"h10[.]test"},
+		},
+		{
+			name:       "no network line without network data",
+			mutate:     func(r *protocol.Result) {},
+			wantAbsent: []string{"Network ("},
 		},
 		{
 			name: "IOC domains are defanged in titles",

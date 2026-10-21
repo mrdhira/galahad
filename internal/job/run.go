@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/proxy"
 	"github.com/mrdhira/galahad/internal/report"
 	"github.com/mrdhira/galahad/internal/sandbox"
 	"github.com/mrdhira/galahad/internal/scoring"
@@ -53,6 +54,8 @@ type Spec struct {
 	// CPUs and MemoryMiB size the machine. Zero leaves the choice to the backend.
 	CPUs      int
 	MemoryMiB int
+	// NoNetwork gives the guest no proxy port, so it has no network at all.
+	NoNetwork bool
 	// Progress is called with each stage the guest reports. It may be nil.
 	Progress func(stage string)
 }
@@ -124,6 +127,7 @@ type runner struct {
 	jobDir  string
 	job     *Job
 	start   time.Time
+	px      *netProxy // nil without network
 }
 
 func (r *runner) setState(s State) error {
@@ -142,7 +146,20 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	if err := r.setState(StateBooting); err != nil {
 		return err
 	}
-	m, err := r.backend.Start(ctx, sandbox.Spec{JobDir: r.jobDir, Image: r.spec.Image, CPUs: r.spec.CPUs, MemoryMiB: r.spec.MemoryMiB, Ports: []uint32{controlPort}})
+	ports := []uint32{controlPort}
+	probe := netProbeURL()
+	in := proxy.Input{Kind: protocol.KindScan, Source: protocol.SourceLocal}
+	if probe != "" {
+		in.Source, in.Target = protocol.SourceURL, probe
+	}
+	pol, err := proxy.NewPolicy(in)
+	if err != nil {
+		return err
+	}
+	if !r.spec.NoNetwork {
+		ports = append(ports, proxyPort)
+	}
+	m, err := r.backend.Start(ctx, sandbox.Spec{JobDir: r.jobDir, Image: r.spec.Image, CPUs: r.spec.CPUs, MemoryMiB: r.spec.MemoryMiB, Ports: ports})
 	if err != nil {
 		return fmt.Errorf("start the sandbox: %w", err)
 	}
@@ -150,6 +167,16 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	l := m.Listener(controlPort)
 	if l == nil {
 		return errors.New("the sandbox has no control listener")
+	}
+	if !r.spec.NoNetwork {
+		pl := m.Listener(proxyPort)
+		if pl == nil {
+			return errors.New("the sandbox has no proxy listener")
+		}
+		if r.px, err = startProxy(ctx, pl, r.jobDir, pol); err != nil {
+			return err
+		}
+		defer func() { _, _ = r.px.stop() }()
 	}
 	exited := make(chan struct{})
 	go func() {
@@ -196,9 +223,12 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	}
 
 	job := protocol.Job{
-		ID: r.job.ID, Kind: protocol.KindScan, Source: protocol.SourceLocal, Name: r.in.name,
+		ID: r.job.ID, Kind: protocol.KindScan, Source: protocol.SourceLocal, Name: r.in.name, URL: probe,
 		Timeouts: protocol.Timeouts{Job: min(max(int(time.Until(deadline).Seconds()), 1), protocol.MaxTimeoutSec)},
 		Now:      r.start.UTC(),
+	}
+	if probe != "" { // a net-probe job takes the input like a local scan and also asks for the URL
+		job.Kind, job.Source = protocol.KindNetProbe, ""
 	}
 	var endSent atomic.Bool
 	sentCh := make(chan sent, 1)
@@ -345,6 +375,17 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 	if !r.in.isDir && res.Target.SHA256 != fileSHA {
 		return fmt.Errorf("the result has sha256 %s for the target, the host sent %s", res.Target.SHA256, fileSHA)
 	}
+	if res.Network != nil {
+		return errors.New("the result has network data; only the host writes it")
+	}
+	// The proxy is stopped first, so the decisions are final. They are the host's own: nothing
+	// the guest says about the network is used.
+	events, err := r.px.stop()
+	if err != nil {
+		return fmt.Errorf("the proxy: %w", err)
+	}
+	res.Network = networkOf(events)
+	addNetworkFinding(&res)
 	scoring.Apply(&res)
 	paths, err := report.Write(r.jobDir, &res)
 	if err != nil {

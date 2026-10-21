@@ -11,6 +11,7 @@ const (
 	mdMaxFindings = 10
 	mdMaxIOCs     = 20
 	mdMaxSkips    = 20
+	mdMaxNetwork  = 20
 )
 
 // mdSpecial are the characters that can start Markdown constructs inside a line. <, > and & become
@@ -104,6 +105,23 @@ func renderMarkdown(res *protocol.Result) string {
 				break
 			}
 			w("| %s | %s | %s |\n", mdEscape(ioc.Type), mdValue(ioc.Value), mdEscape(location(ioc.Path, ioc.Line)))
+		}
+	}
+
+	if res.Network != nil {
+		rows := netRows(res)
+		w("\n## Network (%s)\n\n", plural(len(rows), "destination"))
+		if len(rows) == 0 {
+			w("None.\n")
+		} else {
+			w("| Decision | Host | Port | Requests | Reason |\n|---|---|---|---|---|\n")
+		}
+		for i, r := range rows {
+			if i == mdMaxNetwork {
+				w("\nShowing %d of %d. See report.json for the rest.\n", mdMaxNetwork, len(rows))
+				break
+			}
+			w("| %s | %s | %d | %d | %s |\n", mdEscape(r.Label), mdEscapeClean(r.Host), r.Port, r.Count, mdEscapeClean(r.Reason))
 		}
 	}
 

@@ -33,7 +33,7 @@ const usage = `Usage: galahad <command> [flags]
 
 Commands:
   scan      Scan a local file or folder in the sandbox: galahad scan [flags] <path>
-              --image core|re  --timeout <duration>  --cpus <n>  --memory <MiB>
+              --image core|re  --timeout <duration>  --cpus <n>  --memory <MiB>  --no-network
   report    Show the report of a past scan: galahad report <id> [--json]
   jobs      List past scans, or remove them: galahad jobs [rm <id>...]
   version   Print version information

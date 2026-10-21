@@ -95,7 +95,19 @@ footer{margin-top:32px;border-top:1px solid var(--line)}
 {{end}}</pre>
 </details>{{else}}<p class="muted">None.</p>{{end}}
 </section>
-<section aria-labelledby="coverage">
+{{if .HasNetwork}}<section aria-labelledby="network">
+<h2 id="network">Network ({{len .Network}})</h2>
+{{if .Network}}<p class="muted">What the scanned input asked the sandbox's proxy for. Hosts are defanged.</p>
+<div class="scroll" tabindex="0" role="region" aria-label="Network">
+<table>
+<thead><tr><th scope="col">Decision</th><th scope="col">Host</th><th scope="col">Port</th><th scope="col">Requests</th><th scope="col">Reason</th></tr></thead>
+<tbody>
+{{range .Network}}<tr><td>{{.Label}}</td><td><code>{{.Host}}</code></td><td>{{.Port}}</td><td>{{.Count}}</td><td>{{.Reason}}</td></tr>
+{{end}}</tbody>
+</table>
+</div>{{else}}<p class="muted">None.</p>{{end}}
+</section>
+{{end}}<section aria-labelledby="coverage">
 <h2 id="coverage">Coverage</h2>
 <p>{{.CoverageLine}}.{{if .Truncated}} The file or finding limit was reached.{{end}}</p>
 {{if .CoverageWarning}}<p class="warn">{{.CoverageWarning}}.</p>{{end}}
