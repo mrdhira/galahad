@@ -21,64 +21,71 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 2
       - id: filter
         name: Detect code changes
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           code=true
           if [ "$EVENT" = pull_request ]; then
-            changed=$(git diff --name-only "$BASE" HEAD)
+            # The pull_request checkout is the merge commit; its first parent is the base.
+            # --no-renames lists both sides of a rename, so moving code into docs/ is seen.
+            changed=$(git diff --no-renames --name-only HEAD^1 HEAD)
             printf 'Changed files:\n%s\n' "$changed"
-            # Docs-only: every changed path is under docs/ or .claude/, a top-level Markdown file,
-            # LICENSE, .gitignore or the Dependabot config. Markdown under testdata/ counts as code.
-            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '^(docs/|\.claude/|[^/]+\.md$|LICENSE$|\.gitignore$|\.github/dependabot\.yml$)' >/dev/null; then
-              code=false
+            # Docs-only: every changed path is Markdown under docs/ or .claude/, a skill LICENSE,
+            # a top-level Markdown file, LICENSE, .gitignore or the Dependabot config.
+            # grep exit 1 means no other path; exit 2 (an error) keeps code=true.
+            if [ -n "$changed" ]; then
+              rc=0
+              printf '%s\n' "$changed" | grep -Ev '^((docs|\.claude)/.+\.md|\.claude/skills/[^/]+/LICENSE|[^/]+\.md|LICENSE|\.gitignore|\.github/dependabot\.yml)$' >/dev/null || rc=$?
+              if [ "$rc" -eq 1 ]; then code=false; fi
             fi
           fi
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
 
-  # The jobs always run so the required checks report; on docs-only changes their steps are skipped.
+  # The jobs always run so the required checks report; only an exact code=false skips their steps.
+  # If the changes job fails, the output is empty and everything runs in full.
   gate:
     needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - if: needs.changes.outputs.code != 'true'
+      - if: needs.changes.outputs.code == 'false'
         run: echo "Docs-only change, gate skipped."
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.3'
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         run: make tools
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         run: make gate
 
   # Build and test only. The full gate runs on Linux.
   test:
     needs: changes
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - if: needs.changes.outputs.code != 'true'
+      - if: needs.changes.outputs.code == 'false'
         run: echo "Docs-only change, tests skipped."
         shell: bash
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.3'
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         run: go vet ./...
         shell: bash
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.code != 'false'
         run: go test -race -count=1 ./...
         shell: bash
