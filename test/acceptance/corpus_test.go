@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/zlib"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,68 @@ func corpusWithBig(name, bigName string, size int64) func(t *testing.T) string {
 		}
 		writeBytes(t, filepath.Join(dir, bigName), make([]byte, size))
 		return dir
+	}
+}
+
+// paddedPDF returns a builder for a PDF with n empty objects followed by an OpenAction
+// that launches a program, like padding that pushes the action past the object limit.
+func paddedPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var b strings.Builder
+		b.WriteString("%PDF-1.7\n")
+		for i := range n {
+			fmt.Fprintf(&b, "%d 0 obj\nendobj\n", i+10)
+		}
+		b.WriteString("1 0 obj\n<< /Type /Catalog /OpenAction 2 0 R >>\nendobj\n")
+		b.WriteString("2 0 obj\n<< /S /Launch /F (cmd.exe) >>\nendobj\n")
+		b.WriteString("trailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, []byte(b.String()))
+	}
+}
+
+// pagedPDF returns a builder for a benign PDF with n pages, each with a link.
+func pagedPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var b, kids strings.Builder
+		b.WriteString("%PDF-1.7\n")
+		b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction [10 0 R /Fit] >>\nendobj\n")
+		for i := range n {
+			page := 10 + 3*i
+			fmt.Fprintf(&kids, "%d 0 R ", page)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R /Annots [%d 0 R] >>\nendobj\n", page, page+1, page+2)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Length 25 >>\nstream\nBT /F1 12 Tf (page %d) Tj ET\nendstream\nendobj\n", page+1, i)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Type /Annot /Subtype /Link /A << /S /URI /URI (https://docs.example.test/p%d) >> >>\nendobj\n", page+2, i)
+		}
+		fmt.Fprintf(&b, "2 0 obj\n<< /Type /Pages /Kids [%s] /Count %d >>\nendobj\n", kids.String(), n)
+		b.WriteString("trailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, []byte(b.String()))
+	}
+}
+
+// vectorPDF returns a builder for a one-page PDF whose Flate content stream draws n line
+// segments, more tokens than the analyzer reads from one region.
+func vectorPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var raw bytes.Buffer
+		for i := range n {
+			fmt.Fprintf(&raw, "%d %d m %d %d l S\n", i%600, i%700, i%500, i%400)
+		}
+		var z bytes.Buffer
+		w := zlib.NewWriter(&z)
+		if _, err := w.Write(raw.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		var b bytes.Buffer
+		b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+		b.WriteString("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+		b.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n")
+		fmt.Fprintf(&b, "4 0 obj\n<< /Filter /FlateDecode /Length %d >>\nstream\n", z.Len())
+		b.Write(z.Bytes())
+		b.WriteString("\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, b.Bytes())
 	}
 }
 
@@ -191,6 +254,11 @@ func TestCorpus(t *testing.T) {
 			name:   "p4-pdf-openaction-uri: OpenAction to a URI action",
 			target: corpusDir("p4-pdf-openaction-uri"), wantCode: 10,
 			wantRules: []string{"GAL-PDF-002 statement.pdf:3"},
+		},
+		{
+			name:     "p4-pdf-padding: a Launch action behind more objects than the analyzer reads is not clean (built)",
+			target:   builtFile("padded.pdf", paddedPDF(100001)),
+			wantCode: 10, wantSkips: 1,
 		},
 		{
 			name: "p5-lnk-in-zip: decoy pdf name hides a shortcut with a PowerShell launcher (built)",
@@ -408,6 +476,18 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "benign-pdf: destination OpenAction and one link",
 			target: corpusDir("benign-pdf"), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:   "benign-pdf with 300 pages and a link on each (built)",
+			target: builtFile("pages.pdf", pagedPDF(300)), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:   "benign-pdf with 5000 pages, a content stream and a link on each (built)",
+			target: builtFile("manual.pdf", pagedPDF(5000)), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:   "benign-pdf: one page of vector drawing with 300000 segments in a Flate content stream (built)",
+			target: builtFile("drawing.pdf", vectorPDF(300000)), wantCode: 0, wantQuiet: true, wantSkips: 1,
 		},
 		{
 			name:   "benign-docx: internal and external hyperlinks (built)",
