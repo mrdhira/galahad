@@ -166,30 +166,6 @@ func TestRun(t *testing.T) {
 			wantAnalyzerList: []string{"alpha", "zeta"},
 		},
 		{
-			name: "target that is a node_modules directory keeps the node_modules prefix in paths",
-			setup: func(t *testing.T, dir string) string {
-				write(t, dir, "node_modules/pkg/package.json", []byte("{}"))
-				return filepath.Join(dir, "node_modules")
-			},
-			analyzers:      []analyze.Analyzer{nothing},
-			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  1,
-			wantFiles:      []string{"node_modules/pkg/package.json"},
-			wantSeen:       1, wantAnalyzed: 1,
-		},
-		{
-			name: "target inside a node_modules directory keeps the node_modules prefix in paths",
-			setup: func(t *testing.T, dir string) string {
-				write(t, dir, "node_modules/pkg/lib/index.js", []byte("x"))
-				return filepath.Join(dir, "node_modules", "pkg")
-			},
-			analyzers:      []analyze.Analyzer{nothing},
-			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  1,
-			wantFiles:      []string{"node_modules/lib/index.js"},
-			wantSeen:       1, wantAnalyzed: 1,
-		},
-		{
 			name:      "nonexistent target",
 			setup:     func(_ *testing.T, dir string) string { return filepath.Join(dir, "missing") },
 			analyzers: []analyze.Analyzer{nothing},

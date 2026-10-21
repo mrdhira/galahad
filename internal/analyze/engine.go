@@ -69,7 +69,7 @@ func Run(ctx context.Context, path string, analyzers []Analyzer) (protocol.Resul
 	switch {
 	case info.IsDir():
 		j.res.Target.Kind = protocol.TargetDir
-		err = j.walkDir(ctx, path, dependencyPrefix(abs))
+		err = j.walkDir(ctx, path)
 	case info.Mode().IsRegular():
 		j.res.Target.Kind = protocol.TargetFile
 		j.res.Target.Size = info.Size()
@@ -116,22 +116,7 @@ func newJob(analyzers []Analyzer) *job {
 	}
 }
 
-// dependencyPrefix returns the directory prefix that keeps a walk of dir from
-// losing the node_modules component the analyzers look for: "node_modules/" when
-// dir is or sits inside a node_modules directory, else "". Without it, the files
-// of a node_modules target look like the repository's own.
-func dependencyPrefix(dir string) string {
-	for _, seg := range strings.Split(filepath.ToSlash(dir), "/") {
-		if strings.EqualFold(seg, "node_modules") {
-			return "node_modules/"
-		}
-	}
-	return ""
-}
-
-// walkDir analyzes the files under path. Evidence paths are relative to path and
-// start with prefix.
-func (j *job) walkDir(ctx context.Context, path, prefix string) error {
+func (j *job) walkDir(ctx context.Context, path string) error {
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return err
@@ -142,7 +127,7 @@ func (j *job) walkDir(ctx context.Context, path, prefix string) error {
 		if p == "." {
 			return err
 		}
-		cp := protocol.CleanPath(prefix + p)
+		cp := protocol.CleanPath(p)
 		switch {
 		case err != nil:
 			j.skip(cp, protocol.SkipParseError)

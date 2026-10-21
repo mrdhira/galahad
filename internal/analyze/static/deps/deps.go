@@ -44,10 +44,7 @@ var (
 	topPypi = load(pypiSnapshot)
 )
 
-const (
-	maxJSONDepth = 32
-	minSquatLen  = 5 // shortest popular name a one-edit match is made against
-)
+const maxJSONDepth = 32
 
 var (
 	npmHosts  = map[string]bool{"registry.npmjs.org": true}
@@ -396,7 +393,7 @@ func npmSquat(name string) bool {
 	if slices.Contains(npmScopes, scope) {
 		return false
 	}
-	return slices.ContainsFunc(npmScopes, func(s string) bool { return len(s) > minSquatLen && oneEdit(scope, s) })
+	return slices.ContainsFunc(npmScopes, func(s string) bool { return oneEdit(scope, s) })
 }
 
 // pypiName applies the PEP 503 normalization.
@@ -408,7 +405,7 @@ func pypiName(name string) string {
 type popular struct {
 	names    map[string]bool
 	stripped map[string]bool  // names without - _ .
-	long     map[int][]string // names of at least minSquatLen characters, by length
+	long     map[int][]string // names of at least 5 characters, by length
 }
 
 func load(snapshot string) popular {
@@ -420,7 +417,7 @@ func load(snapshot string) popular {
 		}
 		p.names[line] = true
 		p.stripped[strip(line)] = true
-		if len(line) >= minSquatLen {
+		if len(line) >= 5 {
 			p.long[len(line)] = append(p.long[len(line)], line)
 		}
 	}
@@ -428,18 +425,14 @@ func load(snapshot string) popular {
 }
 
 // squat reports whether name is not popular itself but looks like a popular
-// name: one edit away from a name of minSquatLen or more characters, or the same
-// once separators are dropped. A name shorter than minSquatLen+1 is only compared
-// for separators, because short real names collide by chance (socks and sockjs).
+// name: one edit away from a name of 5 or more characters, or the same once
+// separators are dropped.
 func (p popular) squat(name string) bool {
 	if p.names[name] {
 		return false
 	}
 	if p.stripped[strip(name)] {
 		return true
-	}
-	if len(name) <= minSquatLen {
-		return false
 	}
 	// one edit changes the length by at most one
 	for l := len(name) - 1; l <= len(name)+1; l++ {

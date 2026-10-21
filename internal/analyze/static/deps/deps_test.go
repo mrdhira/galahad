@@ -205,7 +205,12 @@ func TestAnalyze(t *testing.T) {
 			file: "package.json",
 			data: "{\n\"devDependencies\": {\"socks\": \"1\", \"eclint\": \"1\", \"jsdoc\": \"1\", \"json-schema\": \"1\", \"npm-run-all2\": \"1\"}\n}",
 		},
-		{name: "a five-character name one edit from a popular name is not a typosquat", file: "package.json", data: "{\n\"dependencies\": {\"reacx\": \"1\"}\n}"},
+		{
+			name:         "five-character typos of popular names are caught",
+			file:         "package.json",
+			data:         "{\n\"dependencies\": {\n\"raect\": \"1\",\n\"axois\": \"1\",\n\"lodsh\": \"1\",\n\"reacx\": \"1\"\n}\n}",
+			wantFindings: []string{"GAL-DEPS-001@3", "GAL-DEPS-001@4", "GAL-DEPS-001@5", "GAL-DEPS-001@6"},
+		},
 		{
 			name: "packages in a popular scope are never typosquats",
 			file: "package.json",
@@ -214,8 +219,8 @@ func TestAnalyze(t *testing.T) {
 		{
 			name:         "a scoped name is compared by its scope, not its bare name",
 			file:         "package.json",
-			data:         "{\n\"dependencies\": {\n\"@typscript-eslint/parser\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"@jest/core\": \"1\",\n\"@babell/core\": \"1\"\n}\n}",
-			wantFindings: []string{"GAL-DEPS-001@3", "GAL-DEPS-001@6"},
+			data:         "{\n\"dependencies\": {\n\"@typscript-eslint/parser\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"@jest/core\": \"1\",\n\"@babell/core\": \"1\",\n\"@jset/core\": \"1\",\n\"@vuee/x\": \"1\",\n\"@mu/x\": \"1\",\n\"@swd/x\": \"1\"\n}\n}",
+			wantFindings: []string{"GAL-DEPS-001@10", "GAL-DEPS-001@3", "GAL-DEPS-001@6", "GAL-DEPS-001@7", "GAL-DEPS-001@8", "GAL-DEPS-001@9"},
 		},
 		{
 			name:         "package.json reports only the findings per rule the engine keeps",
