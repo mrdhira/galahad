@@ -45,6 +45,47 @@ func dirEntries(t *testing.T, src, prefix string) []zipEntry {
 	return entries
 }
 
+// zipBytes returns the zip of entries.
+func zipBytes(t *testing.T, entries []zipEntry) []byte {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "x.zip")
+	zipEntries(t, p, entries)
+	b, err := os.ReadFile(p) // #nosec G304 -- test fixture path under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// writeBytes writes b to dest.
+func writeBytes(t *testing.T, dest string, b []byte) {
+	t.Helper()
+	if err := os.WriteFile(dest, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sfxStub is the start of a PE file: a DOS header whose PE offset points at the PE signature.
+// It is not executable.
+func sfxStub() []byte {
+	stub := make([]byte, 0x80)
+	copy(stub, "MZ")
+	stub[0x3c] = 0x40
+	copy(stub[0x40:], "PE\x00\x00")
+	return stub
+}
+
+// nestedZips writes inner as a zip, then wraps it in a zip of its own levels-1 more times,
+// so the zip holding inner sits at container depth levels-1 when dest is analyzed.
+func nestedZips(t *testing.T, dest string, levels int, inner []zipEntry) {
+	t.Helper()
+	data := zipBytes(t, inner)
+	for range levels - 1 {
+		data = zipBytes(t, []zipEntry{{name: "next.zip", data: data}})
+	}
+	writeBytes(t, dest, data)
+}
+
 // zipDir zips the files below src into dest. Member names are slash-separated
 // paths relative to src.
 func zipDir(t *testing.T, src, dest string) {

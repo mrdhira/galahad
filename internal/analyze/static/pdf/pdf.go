@@ -7,7 +7,7 @@
 // cannot be read is reported twice: as GAL-PDF-007 (low) with the object line,
 // and as one coverage Skip per file, so the verdict cannot claim a full
 // analysis. The Skip reason is "encrypted" for a document with an /Encrypt
-// entry, "budget" when the object or token limit was hit, and "unsupported"
+// entry, "too_large" when the object or token limit was hit, and "unsupported"
 // when a non-image stream (always an object stream) could not be decoded.
 // Image streams are never decoded and never reported.
 package pdf
@@ -195,7 +195,7 @@ func (s *scanner) run() (analyze.Output, error) {
 	}
 	out.IOCs = s.iocs
 	if s.tooMany || s.truncated {
-		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipBudget})
+		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipTooLarge})
 	}
 	if s.encrypted {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipEncrypted})

@@ -396,11 +396,11 @@ func TestAnalyze(t *testing.T) {
 			wantRules: []string{"GAL-PDF-001"},
 		},
 		{
-			name:      "a region over the token limit is reported as budget",
+			name:      "a region over the token limit is reported as too_large",
 			kind:      ident.PDF,
 			data:      doc(obj(1, "<< /S /Launch /A ["+strings.Repeat("0 ", 1<<20+10)+"] >>")),
 			wantRules: []string{"GAL-PDF-003"},
-			wantSkips: []string{"budget"},
+			wantSkips: []string{"too_large"},
 		},
 		{
 			name:      "many references to one large object are examined once",
@@ -510,7 +510,7 @@ func TestAnalyze(t *testing.T) {
 			name:      "too many objects",
 			kind:      ident.PDF,
 			data:      doc(manyObjs),
-			wantSkips: []string{"budget"},
+			wantSkips: []string{"too_large"},
 		},
 		{
 			name:    "cancelled context",

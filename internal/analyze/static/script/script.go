@@ -8,7 +8,7 @@
 // .ssh or process.env.API_TOKEN. The context is checked between windows of at
 // most chunkSize bytes, so a file with one giant line costs the same as a
 // normal one. Work is budgeted per file (signalBudget, argBudget, maxHits); a
-// file that runs out gets a budget skip. Encoded blobs are decoded once (at
+// file that runs out gets a too_large skip. Encoded blobs are decoded once (at
 // most maxBlobs blobs and maxDecodedTotal bytes per file) and the decoded text
 // gets one more pass of all checks. It is never decoded again.
 package script
@@ -90,7 +90,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	s := &scan{ctx: ctx, f: f, out: &out, counts: map[string]int{}}
 	s.run(&doc{data: f.Data, lang: l})
 	if s.limited && !s.timedOut {
-		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipBudget})
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipTooLarge})
 	}
 	return out, nil
 }
