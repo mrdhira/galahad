@@ -202,14 +202,13 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	if err := host.sendJSON(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageAnalyze}); err != nil {
 		return fmt.Errorf("send progress: %w", err)
 	}
-	// The name comes from the host or from a download: it must be one local path element. A clone
-	// has no name, because the repository is the whole directory.
-	if !clone && (job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name) {
-		return fail(protocol.CodeIngest, "the input name %q is not a single local name", protocol.CleanPath(job.Name))
-	}
-	target := filepath.Join(dir, job.Name)
-	if clone {
-		target = dir // the repository is the whole directory
+	target := dir // a clone has no name: the repository is the whole directory
+	if !clone {
+		// The name comes from the host or from a download: it must be one local path element.
+		if job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name {
+			return fail(protocol.CodeIngest, "the input name %q is not a single local name", protocol.CleanPath(job.Name))
+		}
+		target = filepath.Join(dir, job.Name)
 	}
 	info, err := os.Lstat(target)
 	if err != nil {
