@@ -53,6 +53,7 @@ func (l *pipeListener) Addr() net.Addr { return &net.UnixAddr{Name: "pipe", Net:
 type fakeBackend struct {
 	script   func(g *guest)
 	startErr error
+	onStart  func() // runs when the machine starts, after the host has walked the target
 
 	mu      sync.Mutex
 	starts  int
@@ -75,6 +76,9 @@ func (b *fakeBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine,
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.starts++
+	if b.onStart != nil {
+		b.onStart()
+	}
 	if b.startErr != nil {
 		return nil, b.startErr
 	}
@@ -297,6 +301,23 @@ func criticalFinding() protocol.Finding {
 
 func TestRun(t *testing.T) {
 	bigArtifact := bytes.Repeat([]byte("a"), 600<<10)
+	probe := func(g *guest) {
+		g.dial()
+		g.hello(hostVersion)
+		g.readJob()
+		g.readInput()
+		g.sendRaw(protocol.FrameArtifact, protocol.Artifact{ID: protocol.ArtifactProbeJSON, Data: []byte("{}")}.Marshal())
+		g.send(protocol.FrameResult, g.result(hostVersion))
+	}
+	probeCase := struct {
+		state job.State
+		err   string
+		exit  int
+		files map[string]int
+	}{state: job.StateFailed, err: "artifact id 3 is not accepted here", exit: 1}
+	if probeAccepted {
+		probeCase.state, probeCase.err, probeCase.exit, probeCase.files = job.StateDone, "", 0, map[string]int{"probe.json": 2}
+	}
 	tests := []struct {
 		name string
 		// inputs
@@ -307,6 +328,7 @@ func TestRun(t *testing.T) {
 		ctxTimeout  time.Duration // deadline of the caller's context
 		cancelAfter time.Duration // the caller cancels
 		startErr    error
+		atStart     func(t *testing.T, target string) // changes the target while the machine starts
 		// expectations
 		wantState    job.State
 		wantErr      string // substring; empty means success
@@ -439,11 +461,18 @@ func TestRun(t *testing.T) {
 				for range 2 {
 					g.sendRaw(protocol.FrameArtifact, protocol.Artifact{ID: protocol.ArtifactIngestLog, Data: bigArtifact}.Marshal())
 				}
+				g.sendRaw(protocol.FrameArtifact, protocol.Artifact{ID: protocol.ArtifactIngestLog, Data: []byte("past the cap")}.Marshal())
 				g.sendRaw(protocol.FrameArtifact, protocol.Artifact{ID: protocol.ArtifactToolsLog, Data: []byte("tools\n")}.Marshal())
 				g.send(protocol.FrameResult, g.result(hostVersion))
 			},
 			wantState: job.StateDone, wantVerdict: "clean", wantStarts: 1, wantReport: true,
 			wantArtifact: map[string]int{"ingest.log": 1 << 20, "tools.log": 6},
+		},
+		{
+			name:      "the probe artifact is stored in test builds only",
+			script:    probe,
+			wantState: probeCase.state, wantErr: probeCase.err, wantExit: probeCase.exit, wantVerdict: map[bool]string{true: "clean"}[probeCase.err == ""],
+			wantStarts: 1, wantReport: probeCase.err == "", wantArtifact: probeCase.files,
 		},
 		{
 			name: "artifact with an unknown id",
@@ -534,6 +563,27 @@ func TestRun(t *testing.T) {
 			wantState:   job.StateCanceled, wantErr: "canceled", wantExit: 1, wantStarts: 1,
 		},
 		{
+			name: "a file swapped for a FIFO after the walk does not hang the job",
+			script: func(g *guest) {
+				g.dial()
+				g.hello(hostVersion)
+				g.readJob()
+				g.readInput()
+				<-g.killed
+			},
+			atStart: func(t *testing.T, target string) {
+				p := filepath.Join(target, "main.go")
+				if err := os.Remove(p); err != nil {
+					t.Fatal(err)
+				}
+				if err := mkfifo(p); err != nil {
+					t.Skipf("no FIFOs here: %v", err)
+				}
+			},
+			cancelAfter: 300 * time.Millisecond,
+			wantState:   job.StateCanceled, wantErr: "canceled", wantExit: 1, wantStarts: 1,
+		},
+		{
 			name:       "the guest stops taking input",
 			script:     func(g *guest) { g.dial(); g.hello(hostVersion); g.readJob(); <-g.killed },
 			ctxTimeout: 300 * time.Millisecond,
@@ -549,6 +599,10 @@ func TestRun(t *testing.T) {
 				target = tt.target
 			}
 			b := &fakeBackend{script: tt.script, startErr: tt.startErr}
+			targetPath := target(t)
+			if tt.atStart != nil {
+				b.onStart = func() { tt.atStart(t, targetPath) }
+			}
 			var stages []string
 			spec := job.Spec{
 				JobsDir: jobs,
@@ -573,7 +627,11 @@ func TestRun(t *testing.T) {
 			}
 
 			// When it runs
-			out, err := job.Run(ctx, b, spec, target(t))
+			began := time.Now()
+			out, err := job.Run(ctx, b, spec, targetPath)
+			if took := time.Since(began); took > 3*time.Second {
+				t.Errorf("Run took %s, want it to end promptly", took)
+			}
 			if b.done != nil {
 				<-b.done // the script has seen the connection close
 			}

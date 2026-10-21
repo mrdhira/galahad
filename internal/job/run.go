@@ -33,11 +33,11 @@ const (
 	targetKind    = "path"
 )
 
-// artifactNames are the file names of the artifacts below the job directory.
+// artifactNames are the file names of the artifacts below the job directory. galahadtest builds
+// add the probe artifact.
 var artifactNames = map[protocol.ArtifactID]string{
 	protocol.ArtifactIngestLog: "ingest.log",
 	protocol.ArtifactToolsLog:  "tools.log",
-	protocol.ArtifactProbeJSON: "probe.json",
 }
 
 // Spec says how to run a job.
@@ -158,12 +158,13 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	if err != nil {
 		return err
 	}
-	var wg sync.WaitGroup
+	var reader sync.WaitGroup
 	done := make(chan struct{})
-	defer func() { // runs before Kill: unblock both goroutines and wait for them
+	defer func() { // free every blocked call, kill the machine, then wait for the reader
 		close(done)
 		_ = conn.Close() // the session is over
-		wg.Wait()
+		_ = m.Kill()     // before any wait: a stuck file read must not keep the machine alive
+		reader.Wait()
 	}()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() }) // unblocks every read and write
 	defer stop()
@@ -198,14 +199,13 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	}
 	var endSent atomic.Bool
 	sentCh := make(chan sent, 1)
-	wg.Add(2)
 	go func() { // the guest may stop reading early, so its frames are read while the input is written
-		defer wg.Done()
-		sentCh <- r.in.send(conn, job, &endSent)
+		sentCh <- r.in.send(conn, job, &endSent) // buffered: a writer stuck in a file read is left behind
 	}()
+	reader.Add(1)
 	events := make(chan event)
 	go func() {
-		defer wg.Done()
+		defer reader.Done()
 		for {
 			t, p, err := next(readLimit)
 			select {
@@ -357,13 +357,20 @@ func (r *runner) storeArtifact(payload []byte, kept map[protocol.ArtifactID]int)
 	if err != nil {
 		return fmt.Errorf("artifact frame: %w", err)
 	}
+	name, ok := artifactNames[a.ID]
+	if !ok {
+		return fmt.Errorf("artifact frame: artifact id %d is not accepted here", byte(a.ID))
+	}
 	data := a.Data[:min(len(a.Data), maxArtifact-kept[a.ID])]
+	if len(data) == 0 {
+		return nil // nothing is kept past the cap, so the file is left alone
+	}
 	kept[a.ID] += len(data)
 	dir := filepath.Join(r.jobDir, "artifacts")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("store artifact: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(dir, artifactNames[a.ID]), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) // #nosec G304 -- the name comes from a fixed list
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) // #nosec G304 -- the name comes from a fixed list
 	if err != nil {
 		return fmt.Errorf("store artifact: %w", err)
 	}

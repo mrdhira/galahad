@@ -189,12 +189,12 @@ func (p *plan) writeTar(w io.Writer) (string, error) {
 
 // copyFile copies the content of a regular file to w and h. The file must still be the one the walk saw.
 func copyFile(w io.Writer, h hash.Hash, e entry) error {
-	f, err := os.Open(e.path) // #nosec G304 -- the path comes from the walk of the target
+	f, err := openInput(e.path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }() // read-only file
-	if info, err := f.Stat(); err != nil || !os.SameFile(info, e.info) {
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() || !os.SameFile(info, e.info) {
 		return fmt.Errorf("%q changed while it was read", protocol.CleanPath(e.path))
 	}
 	n, err := io.Copy(io.MultiWriter(w, h), io.LimitReader(f, e.info.Size()))

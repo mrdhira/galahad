@@ -8,11 +8,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"golang.org/x/term"
 
 	"github.com/mrdhira/galahad/internal/config"
 	"github.com/mrdhira/galahad/internal/job"
+	"github.com/mrdhira/galahad/internal/protocol"
 	"github.com/mrdhira/galahad/internal/report"
 )
 
@@ -46,7 +48,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	out, err := job.Run(ctx, backend, job.Spec{
 		JobsDir: config.JobsDir(home),
@@ -59,10 +61,12 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		},
 	}, fs.Arg(0))
 	if err != nil {
+		// The error can carry a file name from the target, which is untrusted text.
+		msg := protocol.CleanPath(err.Error())
 		if out.Job.ID != "" {
-			fmt.Fprintf(stderr, "galahad scan: %v (job %s)\n", err, out.Job.ID)
+			fmt.Fprintf(stderr, "galahad scan: %s (job %s)\n", msg, out.Job.ID)
 		} else {
-			fmt.Fprintf(stderr, "galahad scan: %v\n", err)
+			fmt.Fprintf(stderr, "galahad scan: %s\n", msg)
 		}
 		return ExitError
 	}
