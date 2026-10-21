@@ -217,6 +217,16 @@ def get(url):
 			wantScoreAtMost: 0,
 		},
 		{
+			name: "benign ssh config helper reads the ssh config and opens a connection",
+			setup: filesRepo(map[string]string{"hosts.js": "const fs = require('fs');\nconst net = require('net');\nconst path = require('path');\nconst os = require('os');\n" +
+				"const cfg = fs.readFileSync(path.join(os.homedir(), '.ssh', 'config'), 'utf8');\n" +
+				"const known = fs.readFileSync(os.homedir() + '/.ssh/known_hosts', 'utf8');\n" +
+				"const host = /^Host (\\S+)/m.exec(cfg)[1];\nnet.connect(22, host).end(known.length + '\\n');\n"}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001"},
+			wantScoreAtMost: 5,
+		},
+		{
 			name: "benign aws config loader defines where its files live",
 			setup: filesRepo(map[string]string{"index.js": `'use strict';
 const { join } = require('path');

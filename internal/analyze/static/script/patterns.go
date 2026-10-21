@@ -111,10 +111,18 @@ var (
 	// segmentRE is a quoted directory name that holds credentials, a segment of
 	// a path built with join, joinpath, resolve or the / operator. These are
 	// the paths that signals.SecretRefs counts when they are written in one
-	// literal, so segmentNext names the file that must follow the directory
-	// in the others.
+	// literal, so segmentNext says which quoted segment after the directory
+	// makes it a credential file. ok is false when none follows.
 	segmentRE   = regexp.MustCompile("['\"`](\\.ssh|\\.aws|\\.gnupg|\\.docker|\\.kube|\\.env)['\"`]")
-	segmentNext = map[string]string{".aws": "credentials", ".kube": "config", ".docker": "config.json"}
+	segmentNext = map[string]func(seg string, ok bool) bool{
+		".aws":    file("credentials"),
+		".kube":   file("config"),
+		".docker": file("config.json"),
+		// A private key, or the directory itself. Not config, known_hosts or a public key.
+		".ssh": func(seg string, ok bool) bool {
+			return !ok || strings.HasPrefix(seg, "id_") && !strings.HasSuffix(seg, ".pub")
+		},
+	}
 
 	// Secret classification of a signals.SecretRefs match.
 	namedEnvRE = regexp.MustCompile(`^(?:\$|%|process\.env|os\.environ|os\.getenv|getenv|ENV\[)`)
@@ -128,6 +136,11 @@ var (
 	decoderWords = words("atob", "Buffer", "fromCharCode", "zlib", "decode", "bz2", "lzma", "gzip", "unhexlify", "fromhex", "a2b_", "marshal", "codecs")
 	networkWords = words("fetch", "http", "HTTP", "axios", "XMLHttp", "net", "navigator", "tls", "requests", "urllib", "urlopen", "socket", "smtplib")
 )
+
+// file accepts the segment name only.
+func file(name string) func(string, bool) bool {
+	return func(seg string, ok bool) bool { return ok && seg == name }
+}
 
 func words(w ...string) [][]byte {
 	out := make([][]byte, len(w))

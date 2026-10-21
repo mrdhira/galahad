@@ -417,8 +417,9 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 
 // builtPath reports whether the quoted directory name at off is a segment of a
 // path that the code builds, and the path is one that signals.SecretRefs
-// counts: .ssh and .gnupg, .aws followed by credentials, .kube by config,
-// .docker by config.json, and .env on a line that reads, and not for dotenv.
+// counts: .ssh alone or followed by a private key, .gnupg, .aws followed by
+// credentials, .kube by config, .docker by config.json, and .env on a line
+// that reads, and not for dotenv.
 // A path that is the return value of an arrow function or a function ("() =>
 // process.env.X || join(", "return path.join(") only defines where a file
 // lives and is not a read.
@@ -426,8 +427,10 @@ func (s *scan) builtPath(data []byte, off int, name string) bool {
 	if !s.spend(pathLook) {
 		return false
 	}
-	if next, ok := segmentNext[name]; ok && !followedBy(data, off+len(name)+2, next) {
-		return false
+	if counts, ok := segmentNext[name]; ok {
+		if seg, ok := nextSegment(data, off+len(name)+2); !counts(seg, ok) {
+			return false
+		}
 	}
 	if !pathlibOperand(data, off) {
 		call := enclosingPathCall(data, off)
@@ -518,9 +521,12 @@ func returned(data []byte, callee int) bool {
 	return end >= 0 && returnedRE.Match(before[end:])
 }
 
-// followedBy reports whether the quoted segment seg follows after a comma or
-// a / operator at data[i:], across lines.
-func followedBy(data []byte, i int, seg string) bool {
+// maxSegment is the longest path segment that nextSegment reads.
+const maxSegment = 64
+
+// nextSegment returns the quoted segment that follows after a comma or a /
+// operator at data[i:], across lines, or false if there is none.
+func nextSegment(data []byte, i int) (string, bool) {
 	skip := func(i int) int {
 		for n := 0; n < pathLook && i < len(data) && strings.IndexByte(" \t\r\n", data[i]) >= 0; n++ {
 			i++
@@ -529,11 +535,17 @@ func followedBy(data []byte, i int, seg string) bool {
 	}
 	i = skip(i)
 	if i >= len(data) || data[i] != ',' && data[i] != '/' {
-		return false
+		return "", false
 	}
 	i = skip(i + 1)
-	end := i + 1 + len(seg)
-	return end < len(data) && strings.IndexByte("'\"`", data[i]) >= 0 && string(data[i+1:end]) == seg && data[end] == data[i]
+	if i >= len(data) || strings.IndexByte("'\"`", data[i]) < 0 {
+		return "", false
+	}
+	end := bytes.IndexByte(data[i+1:min(len(data), i+1+maxSegment)], data[i])
+	if end < 0 {
+		return "", false
+	}
+	return string(data[i+1 : i+1+end]), true
 }
 
 // spend charges n bytes of text given to the signals patterns, which are slow

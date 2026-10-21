@@ -9,6 +9,7 @@ package signals
 import (
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // MaxMatches bounds how many matches one call returns.
@@ -32,8 +33,11 @@ var (
 		// a bulk dump of the environment
 		`(?:^|[\s;&|("'])(?:printenv|env)(?:\s+-0)?\s*(?:\||\n|;|\)|$)`,
 		`/proc/self/environ`,
-		`\.ssh[/\\]`,
-		`\bid_(?:rsa|dsa|ecdsa|ed25519)\b`,
+		// SSH private keys, and the directory itself (a listing or a glob).
+		// config, known_hosts and public keys are not secret material.
+		`\.ssh[/\\]id_[A-Za-z0-9_]*(?:\.pub)?`,
+		`\.ssh[/\\](?:$|[^A-Za-z0-9_.])`,
+		`\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b`,
 		`\.aws[/\\]credentials`,
 		`\.gnupg\b`,
 		`\.kube[/\\]config`,
@@ -77,9 +81,14 @@ func compile(patterns ...string) []*regexp.Regexp {
 }
 
 // SecretRefs finds references to secret material: secret-named environment
-// variables (*KEY*, *SECRET*, *TOKEN*, *PASSWORD*, AWS_*), .env files, SSH and
-// cloud credential files, and browser and wallet directories.
-func SecretRefs(text string) []Match { return find(secretPatterns, text) }
+// variables (*KEY*, *SECRET*, *TOKEN*, *PASSWORD*, AWS_*), .env files, SSH
+// private keys and the .ssh directory, cloud credential files, and browser and
+// wallet directories. SSH public keys, config and known_hosts are not included.
+func SecretRefs(text string) []Match {
+	return slices.DeleteFunc(find(secretPatterns, text), func(m Match) bool {
+		return strings.HasSuffix(text[m.Start:m.End], ".pub")
+	})
+}
 
 // NetworkTools finds shell network tools: curl, wget, nc, scp, PowerShell web
 // cmdlets, .NET web clients and /dev/tcp.
