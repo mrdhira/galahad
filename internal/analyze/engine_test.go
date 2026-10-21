@@ -118,6 +118,54 @@ var nothing = fake{name: "nothing", fn: func(context.Context, analyze.File) (ana
 	return analyze.Output{}, nil
 }}
 
+// small are the limits the engine tests run with. Their ratios follow the defaults,
+// but a few small files cross each of them, so no case creates thousands of files
+// or megabytes of data.
+var small = analyze.Limits{
+	MaxFileSize:   1 << 10,
+	MaxTotalBytes: 16 << 10,
+	MaxFiles:      50,
+	MaxFilesSeen:  200,
+	MaxExtraFiles: 10,
+	MaxExtraBytes: 2 << 10,
+}
+
+const (
+	// nestedFan is how many members, and how many members of each, the nested-members case
+	// makes. The members and their members must be counted before the file cap, so it is small.
+	nestedFan = 6
+	// fillCount is the number of members that fillBudget makes before the last one:
+	// MaxTotalBytes / MaxFileSize - 1.
+	fillCount = 15
+)
+
+func TestDefaultLimits(t *testing.T) {
+	tests := []struct {
+		name string
+		// expectations
+		want analyze.Limits
+	}{
+		{
+			name: "the defaults are the documented limits",
+			want: analyze.Limits{
+				MaxFileSize:   analyze.MaxFileSize,
+				MaxTotalBytes: analyze.MaxTotalBytes,
+				MaxFiles:      analyze.MaxFiles,
+				MaxFilesSeen:  analyze.MaxFiles * 10,
+				MaxExtraFiles: analyze.MaxExtraFiles,
+				MaxExtraBytes: analyze.MaxExtraBytes,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := analyze.DefaultLimits(); got != tt.want {
+				t.Errorf("DefaultLimits() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRun(t *testing.T) {
 	stamp := []analyze.Analyzer{
 		fake{name: "zeta", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
@@ -159,16 +207,16 @@ func TestRun(t *testing.T) {
 	}
 	// sharedMembers returns members that together exceed MaxTotalBytes, all backed by one slice.
 	sharedMembers := func() []analyze.File {
-		shared := make([]byte, analyze.MaxFileSize+1) // too large to analyze, so only hashed
+		shared := make([]byte, small.MaxFileSize+1) // too large to analyze, so only hashed
 		var kids []analyze.File
-		for i := range analyze.MaxTotalBytes / analyze.MaxFileSize {
+		for i := range small.MaxTotalBytes / small.MaxFileSize {
 			kids = append(kids, analyze.File{Name: fmt.Sprintf("m%d", i), Data: shared})
 		}
 		return kids
 	}
-	// 20 members of MaxFileSize each, then as many grandchildren as fit in what the budget has left.
-	nestedShared := make([]byte, analyze.MaxFileSize)
-	const nestedFit = (analyze.MaxTotalBytes - 1 - 20*analyze.MaxFileSize) / analyze.MaxFileSize
+	// nestedFan members of MaxFileSize each, then as many grandchildren as fit in what the budget has left.
+	nestedShared := make([]byte, small.MaxFileSize)
+	nestedFit := int((small.MaxTotalBytes - 1 - nestedFan*small.MaxFileSize) / small.MaxFileSize)
 	nest := fake{name: "nest", fn: func(context.Context, analyze.File) (analyze.Output, error) {
 		return analyze.Output{Children: []analyze.File{{Name: "c", Data: []byte("x")}}}, nil
 	}}
@@ -294,14 +342,14 @@ func TestRun(t *testing.T) {
 			name: "the walk stops at maxFilesSeen with a budget skip",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
-				pad(t, dir, "a", "", analyze.MaxFiles*10)
+				pad(t, dir, "a", "", small.MaxFilesSeen)
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{nothing},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxFiles,
-			wantSeen:       analyze.MaxFiles * 10, wantAnalyzed: analyze.MaxFiles,
-			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a/f%06d", analyze.MaxFiles*10-1), Reason: protocol.SkipBudget}},
+			wantFileCount:  small.MaxFiles,
+			wantSeen:       small.MaxFilesSeen, wantAnalyzed: small.MaxFiles,
+			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a/f%06d", small.MaxFilesSeen-1), Reason: protocol.SkipBudget}},
 			wantTruncated: true,
 		},
 		{
@@ -331,10 +379,7 @@ func TestRun(t *testing.T) {
 		{
 			name: "file over MaxFileSize is hashed and skipped as too_large",
 			setup: func(t *testing.T, dir string) string {
-				p := write(t, dir, "big.bin", nil)
-				if err := os.Truncate(p, analyze.MaxFileSize+1); err != nil {
-					t.Fatal(err)
-				}
+				write(t, dir, "big.bin", make([]byte, small.MaxFileSize+1))
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{failOn("big.bin", func() (analyze.Output, error) { panic("must not be called") })},
@@ -558,7 +603,7 @@ func TestRun(t *testing.T) {
 				write(t, dir, "a.zip", []byte("x"))
 				return dir
 			},
-			analyzers:      []analyze.Analyzer{children("a.zip", analyze.File{Name: "big", Data: make([]byte, analyze.MaxFileSize+1)})},
+			analyzers:      []analyze.Analyzer{children("a.zip", analyze.File{Name: "big", Data: make([]byte, small.MaxFileSize+1)})},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
 			wantFiles:      []string{"a.zip", "a.zip!/big"},
@@ -593,7 +638,7 @@ func TestRun(t *testing.T) {
 			analyzers:      []analyze.Analyzer{children("a.zip", sharedMembers()...)},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
-			wantSeen:       analyze.MaxTotalBytes/analyze.MaxFileSize + 1, wantAnalyzed: 1,
+			wantSeen:       int(small.MaxTotalBytes/small.MaxFileSize) + 1, wantAnalyzed: 1,
 			wantSkips:     budgetSkips(),
 			wantTruncated: true,
 		},
@@ -608,15 +653,15 @@ func TestRun(t *testing.T) {
 					return analyze.Output{}, nil
 				}
 				var kids []analyze.File
-				for i := range 20 {
+				for i := range nestedFan {
 					kids = append(kids, analyze.File{Name: fmt.Sprintf("k%d", i), Data: nestedShared})
 				}
 				return analyze.Output{Children: kids}, nil
 			}}},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
-			wantSeen:       1 + 20 + 400,
-			wantAnalyzed:   1 + 20 + nestedFit,
+			wantSeen:       1 + nestedFan + nestedFan*nestedFan,
+			wantAnalyzed:   1 + nestedFan + nestedFit,
 			wantSkips:      nestedBudgetSkips(nestedFit),
 			wantTruncated:  true,
 		},
@@ -676,13 +721,13 @@ func TestRun(t *testing.T) {
 			name: "files over MaxFiles are counted but not analyzed",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
-				pad(t, dir, "a", "", analyze.MaxFiles)
+				pad(t, dir, "a", "", small.MaxFiles)
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{nothing},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxFiles,
-			wantSeen:       analyze.MaxFiles + 1, wantAnalyzed: analyze.MaxFiles,
+			wantFileCount:  small.MaxFiles,
+			wantSeen:       small.MaxFiles + 1, wantAnalyzed: small.MaxFiles,
 			wantTruncated: true,
 		},
 		{
@@ -714,14 +759,14 @@ func TestRun(t *testing.T) {
 			name: "a file the analyzers ask for is analyzed past MaxFiles",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
-				pad(t, dir, "a", "", analyze.MaxFiles+4)
+				pad(t, dir, "a", "", small.MaxFiles+4)
 				write(t, dir, "z/last.cfg", []byte("x"))
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{prioritized{}},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxFiles + 1,
-			wantSeen:       analyze.MaxFiles + 6, wantAnalyzed: analyze.MaxFiles + 1,
+			wantFileCount:  small.MaxFiles + 1,
+			wantSeen:       small.MaxFiles + 6, wantAnalyzed: small.MaxFiles + 1,
 			wantRules:     []string{"GAL-T-006"},
 			wantTruncated: true,
 		},
@@ -736,7 +781,7 @@ func TestRun(t *testing.T) {
 			analyzers:      []analyze.Analyzer{children("a.zip", fillBudget()...), prioritized{}},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  3,
-			wantSeen:       3 + 32, wantAnalyzed: 3,
+			wantSeen:       3 + fillCount + 1, wantAnalyzed: 3,
 			wantSkips:     append(fillBudgetSkips(), protocol.Skip{Path: "y.txt", Reason: protocol.SkipTooLarge}),
 			wantRules:     []string{"GAL-T-006"},
 			wantTruncated: true,
@@ -745,14 +790,14 @@ func TestRun(t *testing.T) {
 			name: "files the analyzers ask for beyond the extra allowance after the byte budget is spent become one budget skip",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a.zip", []byte("x"))
-				pad(t, dir, "z", ".cfg", analyze.MaxExtraFiles+2)
+				pad(t, dir, "z", ".cfg", small.MaxExtraFiles+2)
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{children("a.zip", fillBudget()...), prioritized{}},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxExtraFiles + 3,
-			wantSeen:       analyze.MaxExtraFiles + 3 + 32, wantAnalyzed: 2 + analyze.MaxExtraFiles,
-			wantSkips:     append(fillBudgetSkips(), protocol.Skip{Path: fmt.Sprintf("z/f%06d.cfg", analyze.MaxExtraFiles), Reason: protocol.SkipBudget}),
+			wantFileCount:  small.MaxExtraFiles + 3,
+			wantSeen:       small.MaxExtraFiles + 3 + fillCount + 1, wantAnalyzed: 2 + small.MaxExtraFiles,
+			wantSkips:     append(fillBudgetSkips(), protocol.Skip{Path: fmt.Sprintf("z/f%06d.cfg", small.MaxExtraFiles), Reason: protocol.SkipBudget}),
 			wantRules:     []string{"GAL-T-006"},
 			wantTruncated: true,
 		},
@@ -760,15 +805,15 @@ func TestRun(t *testing.T) {
 			name: "files the analyzers ask for beyond the extra allowance become one budget skip",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
-				pad(t, dir, "a", "", analyze.MaxFiles-1)
-				pad(t, dir, "z", ".cfg", analyze.MaxExtraFiles+2)
+				pad(t, dir, "a", "", small.MaxFiles-1)
+				pad(t, dir, "z", ".cfg", small.MaxExtraFiles+2)
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{prioritized{}},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxFiles + analyze.MaxExtraFiles + 2,
-			wantSeen:       analyze.MaxFiles + analyze.MaxExtraFiles + 2, wantAnalyzed: analyze.MaxFiles + analyze.MaxExtraFiles,
-			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("z/f%06d.cfg", analyze.MaxExtraFiles), Reason: protocol.SkipBudget}},
+			wantFileCount:  small.MaxFiles + small.MaxExtraFiles + 2,
+			wantSeen:       small.MaxFiles + small.MaxExtraFiles + 2, wantAnalyzed: small.MaxFiles + small.MaxExtraFiles,
+			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("z/f%06d.cfg", small.MaxExtraFiles), Reason: protocol.SkipBudget}},
 			wantRules:     []string{"GAL-T-006"},
 			wantTruncated: true,
 		},
@@ -776,17 +821,14 @@ func TestRun(t *testing.T) {
 			name: "a file the analyzers ask for over MaxFileSize past MaxFiles is a budget skip",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
-				pad(t, dir, "a", "", analyze.MaxFiles-1)
-				p := write(t, dir, "z/big.cfg", nil)
-				if err := os.Truncate(p, analyze.MaxFileSize+1); err != nil {
-					t.Fatal(err)
-				}
+				pad(t, dir, "a", "", small.MaxFiles-1)
+				write(t, dir, "z/big.cfg", make([]byte, small.MaxFileSize+1))
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{prioritized{}},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxFiles + 1,
-			wantSeen:       analyze.MaxFiles + 1, wantAnalyzed: analyze.MaxFiles,
+			wantFileCount:  small.MaxFiles + 1,
+			wantSeen:       small.MaxFiles + 1, wantAnalyzed: small.MaxFiles,
 			wantSkips:     []protocol.Skip{{Path: "z/big.cfg", Reason: protocol.SkipBudget}},
 			wantTruncated: true,
 		},
@@ -794,19 +836,16 @@ func TestRun(t *testing.T) {
 			name: "a file the analyzers ask for over what is left of the extra allowance is a budget skip",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
-				pad(t, dir, "a", "", analyze.MaxFiles-1)
+				pad(t, dir, "a", "", small.MaxFiles-1)
 				for i := range 4 {
-					p := write(t, dir, fmt.Sprintf("z/f%d.cfg", i), nil)
-					if err := os.Truncate(p, 20<<20); err != nil {
-						t.Fatal(err)
-					}
+					write(t, dir, fmt.Sprintf("z/f%d.cfg", i), make([]byte, small.MaxFileSize*5/8)) // as 20 MiB is 5/8 of 32 MiB
 				}
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{prioritized{}},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxFiles + 4,
-			wantSeen:       analyze.MaxFiles + 4, wantAnalyzed: analyze.MaxFiles + 3,
+			wantFileCount:  small.MaxFiles + 4,
+			wantSeen:       small.MaxFiles + 4, wantAnalyzed: small.MaxFiles + 3,
 			wantSkips:     []protocol.Skip{{Path: "z/f3.cfg", Reason: protocol.SkipBudget}},
 			wantRules:     []string{"GAL-T-006"},
 			wantTruncated: true,
@@ -814,10 +853,7 @@ func TestRun(t *testing.T) {
 		{
 			name: "a file the analyzers ask for over MaxFileSize is a budget skip even within the caps",
 			setup: func(t *testing.T, dir string) string {
-				p := write(t, dir, "big.cfg", nil)
-				if err := os.Truncate(p, analyze.MaxFileSize+1); err != nil {
-					t.Fatal(err)
-				}
+				write(t, dir, "big.cfg", make([]byte, small.MaxFileSize+1))
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{prioritized{}},
@@ -833,10 +869,10 @@ func TestRun(t *testing.T) {
 				write(t, dir, "a.zip", []byte("x"))
 				return dir
 			},
-			analyzers:      []analyze.Analyzer{members(analyze.MaxFiles + 5)},
+			analyzers:      []analyze.Analyzer{members(small.MaxFiles + 5)},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
-			wantSeen:       analyze.MaxFiles + 6, wantAnalyzed: analyze.MaxFiles,
+			wantSeen:       small.MaxFiles + 6, wantAnalyzed: small.MaxFiles,
 			wantTruncated: true,
 		},
 		{
@@ -845,10 +881,10 @@ func TestRun(t *testing.T) {
 				write(t, dir, "a.zip", []byte("x"))
 				return dir
 			},
-			analyzers:      []analyze.Analyzer{members(analyze.MaxFiles+5, analyze.File{Name: "py!/last.cfg", Data: []byte("x")}), exactPriority{path: "py!/last.cfg"}},
+			analyzers:      []analyze.Analyzer{members(small.MaxFiles+5, analyze.File{Name: "py!/last.cfg", Data: []byte("x")}), exactPriority{path: "py!/last.cfg"}},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
-			wantSeen:       analyze.MaxFiles + 7, wantAnalyzed: analyze.MaxFiles + 1,
+			wantSeen:       small.MaxFiles + 7, wantAnalyzed: small.MaxFiles + 1,
 			wantRules:     []string{"GAL-T-006"},
 			wantTruncated: true,
 		},
@@ -862,10 +898,10 @@ func TestRun(t *testing.T) {
 				fake{name: "kids", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
 					var out analyze.Output
 					if f.Name == "a.zip" {
-						for i := range analyze.MaxFiles {
+						for i := range small.MaxFiles {
 							out.Children = append(out.Children, analyze.File{Name: fmt.Sprintf("m%05d", i), Data: []byte("x")})
 						}
-						for i := range analyze.MaxExtraFiles {
+						for i := range small.MaxExtraFiles {
 							out.Children = append(out.Children, analyze.File{Name: fmt.Sprintf("d%05d.cfg", i), Data: []byte("x")})
 						}
 						out.Children = append(out.Children, analyze.File{Name: "payload.cfg", Data: []byte("x")})
@@ -876,7 +912,7 @@ func TestRun(t *testing.T) {
 			},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
-			wantSeen:       analyze.MaxFiles + analyze.MaxExtraFiles + 2, wantAnalyzed: analyze.MaxFiles + analyze.MaxExtraFiles,
+			wantSeen:       small.MaxFiles + small.MaxExtraFiles + 2, wantAnalyzed: small.MaxFiles + small.MaxExtraFiles,
 			wantSkips:     []protocol.Skip{{Path: "a.zip!/payload.cfg", Reason: protocol.SkipBudget}},
 			wantRules:     []string{"GAL-T-006"},
 			wantTruncated: true,
@@ -896,7 +932,7 @@ func TestRun(t *testing.T) {
 					case "y.zip":
 						out.Children = []analyze.File{{Name: "z.zip", Data: []byte("x")}}
 					case "z.zip":
-						for i := range analyze.MaxFiles + 5 {
+						for i := range small.MaxFiles + 5 {
 							out.Children = append(out.Children, analyze.File{Name: fmt.Sprintf("m%05d", i), Data: []byte("x")})
 						}
 						out.Children = append(out.Children, analyze.File{Name: "repo/.vscode/tasks.json", Data: []byte("x")})
@@ -907,7 +943,7 @@ func TestRun(t *testing.T) {
 			},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
-			wantSeen:       analyze.MaxFiles + 9, wantAnalyzed: analyze.MaxFiles + 1,
+			wantSeen:       small.MaxFiles + 9, wantAnalyzed: small.MaxFiles + 1,
 			wantFindings:  []string{"GAL-T-006@a.tar!/x/y.zip!/z.zip!/repo/.vscode/tasks.json:1 exact exact"},
 			wantTruncated: true,
 		},
@@ -917,20 +953,19 @@ func TestRun(t *testing.T) {
 				write(t, dir, "a.zip", []byte("x"))
 				return dir
 			},
-			analyzers:      []analyze.Analyzer{members(analyze.MaxFiles*10 + 5)},
+			analyzers:      []analyze.Analyzer{members(small.MaxFilesSeen + 5)},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
-			wantSeen:       analyze.MaxFiles * 10, wantAnalyzed: analyze.MaxFiles,
-			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a.zip!/m%05d", analyze.MaxFiles*10-1), Reason: protocol.SkipBudget}},
+			wantSeen:       small.MaxFilesSeen, wantAnalyzed: small.MaxFiles,
+			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a.zip!/m%05d", small.MaxFilesSeen-1), Reason: protocol.SkipBudget}},
 			wantTruncated: true,
 		},
 		{
 			name: "a file over MaxFileSize that the analyzers ask for is a budget skip even when it starts like an executable",
 			setup: func(t *testing.T, dir string) string {
-				p := write(t, dir, "big.cfg", []byte("\x7fELF\x02\x01\x01"))
-				if err := os.Truncate(p, analyze.MaxFileSize+1); err != nil {
-					t.Fatal(err)
-				}
+				big := make([]byte, small.MaxFileSize+1)
+				copy(big, "\x7fELF\x02\x01\x01")
+				write(t, dir, "big.cfg", big)
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{prioritized{}},
@@ -956,7 +991,7 @@ func TestRun(t *testing.T) {
 				cancel()
 			}
 
-			res, err := analyze.Run(ctx, target, tt.analyzers)
+			res, err := analyze.Run(ctx, target, tt.analyzers, analyze.WithLimits(small))
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
@@ -1026,7 +1061,7 @@ func TestRun(t *testing.T) {
 // not fit in the budget is dropped when it is queued, and every member that
 // fits is too large to analyze.
 func budgetSkips() []protocol.Skip {
-	const fit = analyze.MaxTotalBytes / (analyze.MaxFileSize + 1)
+	fit := int(small.MaxTotalBytes / (small.MaxFileSize + 1))
 	skips := []protocol.Skip{{Path: fmt.Sprintf("a.zip!/m%d", fit), Reason: protocol.SkipBudget}}
 	for i := range fit {
 		skips = append(skips, protocol.Skip{Path: fmt.Sprintf("a.zip!/m%d", i), Reason: protocol.SkipTooLarge})
@@ -1035,12 +1070,12 @@ func budgetSkips() []protocol.Skip {
 }
 
 // nestedBudgetSkips lists the grandchildren the nested-members case drops: each of
-// the 20 members offers 20 grandchildren, and only the first fitFirst fit in the budget.
+// the nestedFan members offers nestedFan grandchildren, and only the first fitFirst fit in the budget.
 func nestedBudgetSkips(fitFirst int) []protocol.Skip {
 	var skips []protocol.Skip
 	left := fitFirst
-	for i := range 20 {
-		for j := range 20 {
+	for i := range nestedFan {
+		for j := range nestedFan {
 			if left > 0 {
 				left--
 				continue
@@ -1052,21 +1087,21 @@ func nestedBudgetSkips(fitFirst int) []protocol.Skip {
 }
 
 // fillBudget returns members that, with a one-byte parent, use the whole job
-// budget: 31 that are too large to analyze and one that takes the rest.
+// budget: fillCount that are too large to analyze and one that takes the rest.
 func fillBudget() []analyze.File {
-	shared := make([]byte, analyze.MaxFileSize+1)
+	shared := make([]byte, small.MaxFileSize+1)
 	var kids []analyze.File
-	for i := range 31 {
+	for i := range fillCount {
 		kids = append(kids, analyze.File{Name: fmt.Sprintf("m%d", i), Data: shared})
 	}
-	rest := analyze.MaxTotalBytes - 1 - 31*(analyze.MaxFileSize+1)
+	rest := small.MaxTotalBytes - 1 - fillCount*(small.MaxFileSize+1)
 	return append(kids, analyze.File{Name: "rest", Data: make([]byte, rest)})
 }
 
 // fillBudgetSkips lists the members of fillBudget that are skipped as too large.
 func fillBudgetSkips() []protocol.Skip {
 	var skips []protocol.Skip
-	for i := range 31 {
+	for i := range fillCount {
 		skips = append(skips, protocol.Skip{Path: fmt.Sprintf("a.zip!/m%d", i), Reason: protocol.SkipTooLarge})
 	}
 	return skips

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -50,11 +51,11 @@ func p1Tasks(t *testing.T) []byte {
 	return b
 }
 
-// zipOfZips returns a builder for a zip of n members that are each a zip of a 1 MiB run of zeros.
-// Together they unpack to more than the job budget of 1 GiB.
-func zipOfZips(n int) func(t *testing.T, dest string) {
+// zipOfZips returns a builder for a zip of n members that are each a zip of a run of size zeros.
+// Together they unpack to more than the job budget.
+func zipOfZips(n, size int) func(t *testing.T, dest string) {
 	return func(t *testing.T, dest string) {
-		inner := zipBytes(t, []zipEntry{{name: "zeros.bin", data: make([]byte, 1<<20)}})
+		inner := zipBytes(t, []zipEntry{{name: "zeros.bin", data: make([]byte, size)}})
 		entries := make([]zipEntry, n)
 		for i := range entries {
 			entries[i] = zipEntry{name: fmt.Sprintf("m%04d.zip", i), data: inner}
@@ -63,14 +64,14 @@ func zipOfZips(n int) func(t *testing.T, dest string) {
 	}
 }
 
-// zipOfInnerZips returns a builder for a zip of three zips that hold 9000 members each, the
+// zipOfInnerZips returns a builder for a zip of three zips that hold n members each, the
 // folder-open task of p1-folderopen-curl last. Together they have more members than the file cap.
-func zipOfInnerZips(t *testing.T) func(t *testing.T, dest string) {
+func zipOfInnerZips(t *testing.T, n int) func(t *testing.T, dest string) {
 	return func(t *testing.T, dest string) {
 		var outer []zipEntry
 		for k := range 3 {
 			var inner []zipEntry
-			for i := range 9000 {
+			for i := range n {
 				inner = append(inner, zipEntry{name: fmt.Sprintf("f%05d.txt", i), data: []byte("x")})
 			}
 			if k == 2 {
@@ -91,13 +92,19 @@ func smallJar(t *testing.T) []byte {
 	return zipBytes(t, entries)
 }
 
+// limitDivisor is the --limit-divisor of the cases that cross a limit by a small margin: the file
+// cap is 200, the job budget about 10 MiB and the size of a file about 330 KiB. Only the first case
+// of TestLimits pads to the real file cap of 20000, as the realistic proof.
+const limitDivisor = 100
+
 // TestLimits answers the padding attacks on P1: a repository padded past the file cap or the job
 // budget must not hide its auto-run files, and a benign large repository must stay clean.
 func TestLimits(t *testing.T) {
 	tests := []struct {
 		name string
 		// setup returns the target to analyze
-		setup func(t *testing.T) string
+		setup   func(t *testing.T) string
+		divisor int // --limit-divisor; 0 means the real limits
 		// expectations
 		wantCode  int
 		wantAt    map[string]string // rule to "path:line" that must be present
@@ -117,24 +124,27 @@ func TestLimits(t *testing.T) {
 		},
 		{
 			name:      "benign repository past the file cap stays clean with lower confidence",
-			setup:     paddedRepo(20050, nil),
+			setup:     paddedRepo(201, nil),
+			divisor:   limitDivisor,
 			wantCode:  0,
 			wantLevel: "medium",
 		},
 		{
-			name: "folder-open task in the last member of three zips with 9000 members each is read",
+			name: "folder-open task in the last member of three zips with 90 members each is read",
 			setup: func(t *testing.T) string {
-				return builtFile("big.zip", zipOfInnerZips(t))(t)
+				return builtFile("big.zip", zipOfInnerZips(t, 90))(t)
 			},
+			divisor:  limitDivisor,
 			wantCode: 20,
 			wantAt:   map[string]string{"GAL-AUTOEXEC-001": "big.zip!/in2.zip!/.vscode/tasks.json:7"},
 		},
 		{
 			name: "benign jars before and across the file cap stay clean",
 			setup: func(t *testing.T) string {
-				// 0.jar comes first. b.jar follows 19850 files, so its members cross the cap.
-				return paddedRepo(19850, map[string][]byte{"0.jar": smallJar(t), "b.jar": smallJar(t)})(t)
+				// 0.jar comes first. b.jar follows 50 files, so its members cross the cap of 200.
+				return paddedRepo(50, map[string][]byte{"0.jar": smallJar(t), "b.jar": smallJar(t)})(t)
 			},
+			divisor:  limitDivisor,
 			wantCode: 0,
 		},
 		{
@@ -145,8 +155,9 @@ func TestLimits(t *testing.T) {
 			wantCode: 20,
 		},
 		{
-			name:  "zip of many zips stays under the job budget and is not clean",
-			setup: builtFile("bomb.zip", zipOfZips(1030)),
+			name:    "zip of many zips stays under the job budget and is not clean",
+			setup:   builtFile("bomb.zip", zipOfZips(110, 100<<10)),
+			divisor: limitDivisor,
 			// The members that no longer fit are skipped, which could hide content.
 			wantCode: 10,
 			wantSkip: "budget",
@@ -157,7 +168,11 @@ func TestLimits(t *testing.T) {
 			// Given a target that goes past a limit
 			target := tt.setup(t)
 			// When the agent analyzes it
-			rep := analyze(t, target, tt.wantCode)
+			var flags []string
+			if tt.divisor > 0 {
+				flags = []string{"--limit-divisor", strconv.Itoa(tt.divisor)}
+			}
+			rep := analyze(t, target, tt.wantCode, flags...)
 			// Then the findings, the skips and the confidence match
 			for rule, at := range tt.wantAt {
 				if !hasFinding(rep, rule, at) {
