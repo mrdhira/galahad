@@ -17,6 +17,14 @@
       "size": 96743431,
       "raw_sha256": "e0c3911aed01c10b458f3ac205ebd074021ce4fd882975d8cd7b6b11562a5caf",
       "raw_size": 402653184
+    },
+    {
+      "name": "re.ext4.gz",
+      "file": "re.ext4",
+      "sha256": "a74d0673c7bdbd4ea1212df7e9b42319eb76e014c8616d7f233af21ed1d5920f",
+      "size": 696502269,
+      "raw_sha256": "6c7b7943d516658f0982a73217209f389bf5767422ac7a67bbd0b7d41796f784",
+      "raw_size": 1610612736
     }
   ],
   "firecracker": {

@@ -10,7 +10,7 @@ trap 'rm -f "$tmp"' EXIT
 
 # Hash the compressed asset and what it unpacks to, the way a user's download is checked.
 assets='[]'
-for name in vmlinux.gz core.ext4.gz; do
+for name in vmlinux.gz core.ext4.gz re.ext4.gz; do
 	gzip -dc "$out/$name" >"$tmp"
 	assets=$(jq -c \
 		--arg name "$name" --arg file "${name%.gz}" \
