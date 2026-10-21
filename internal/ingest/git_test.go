@@ -145,7 +145,7 @@ func TestGitClone(t *testing.T) {
 			wantErr: "git clone", wantIs: ingest.ErrNotAllowed,
 		},
 		{
-			name: "a git that does not start", wantErr: "git clone: fork/exec", wantLog: []string{"git clone: fork/exec"},
+			name: "a git that does not start", wantErr: "no-git", wantLog: []string{"git clone: ", "no-git"},
 		},
 		{
 			name: "a submodule that fails is only logged", submodules: true,
