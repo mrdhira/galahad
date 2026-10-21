@@ -21,7 +21,7 @@ package pdf
 
 import (
 	"bytes"
-	"compress/zlib"
+	"compress/flate"
 	"context"
 	"encoding/ascii85"
 	"io"
@@ -544,10 +544,12 @@ func (s *scanner) decode(filter string, in []byte) ([]byte, string) {
 	var r io.Reader
 	switch filter {
 	case "FlateDecode", "Fl":
-		zr, err := zlib.NewReader(bytes.NewReader(in))
-		if err != nil {
+		// The zlib header is checked here and the Adler-32 trailer is ignored,
+		// like PDF viewers do. A stream that ends early is still an error.
+		if len(in) < 2 || in[0]&0x0f != 8 || in[0]>>4 > 7 || (int(in[0])<<8|int(in[1]))%31 != 0 || in[1]&0x20 != 0 {
 			return nil, "undecodable Flate stream"
 		}
+		zr := flate.NewReader(bytes.NewReader(in[2:]))
 		defer func() { _ = zr.Close() }()
 		r = zr
 	case "ASCIIHexDecode", "AHx":

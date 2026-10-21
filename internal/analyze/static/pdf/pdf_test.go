@@ -61,6 +61,26 @@ func objstmDoc(members []string, filter string, enc func([]byte) []byte, extra s
 
 func TestAnalyze(t *testing.T) {
 	flate := func(b []byte) []byte { return deflate(t, b) }
+	badAdler := func(b []byte) []byte {
+		z := deflate(t, b)
+		z[len(z)-1] ^= 0xff
+		return z
+	}
+	noAdler := func(b []byte) []byte { z := deflate(t, b); return z[:len(z)-4] }
+	stored := func(b []byte) []byte {
+		var buf bytes.Buffer
+		w, err := zlib.NewWriterLevel(&buf, zlib.NoCompression)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(b); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
 	hexEnc := func(b []byte) []byte { return []byte(fmt.Sprintf("%x>", b)) }
 	a85 := func(b []byte) []byte {
 		dst := make([]byte, ascii85.MaxEncodedLen(len(b)))
@@ -398,6 +418,25 @@ func TestAnalyze(t *testing.T) {
 			name:      "object stream with an undecodable filter hides its members and is reported as budget",
 			kind:      ident.PDF,
 			data:      objstmDoc([]string{catalog, action}, "/LZWDecode", func(b []byte) []byte { return b }, ""),
+			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"budget", "unsupported"},
+		},
+		{
+			name:      "object stream with a bad Adler-32 is read whole",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{catalog, action}, "/FlateDecode", badAdler, ""),
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-002"},
+		},
+		{
+			name:      "object stream without an Adler-32 is read whole",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{catalog, action}, "/FlateDecode", noAdler, ""),
+			wantRules: []string{"GAL-PDF-001", "GAL-PDF-002"},
+		},
+		{
+			name:      "object stream whose stored block holds endstream is cut short and reported as budget",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{"<< /Type /Catalog /OpenAction 11 0 R /X (endstream) >>", "<< /S /Launch /F (cmd.exe) >>"}, "/FlateDecode", stored, ""),
 			wantRules: []string{"GAL-PDF-007"},
 			wantSkips: []string{"budget", "unsupported"},
 		},
