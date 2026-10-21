@@ -116,5 +116,9 @@ func validHash(s string) error {
 	if _, err := hex.DecodeString(s); err != nil || len(s) != 64 || strings.ToLower(s) != s {
 		return fmt.Errorf("%q is not 64 lower-case hex digits", s)
 	}
+	// All zeros is the placeholder for a hash that is not known yet, so it must never be committed.
+	if s == strings.Repeat("0", 64) {
+		return errors.New("is the all-zero placeholder")
+	}
 	return nil
 }

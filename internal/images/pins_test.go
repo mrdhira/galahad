@@ -40,10 +40,12 @@ func TestParse(t *testing.T) {
 		{name: "short asset hash", mutate: func(p *images.Pins) { p.Assets[0].SHA256 = "abcd" }, wantErr: "asset core.ext4.gz sha256"},
 		{name: "upper-case asset hash", mutate: func(p *images.Pins) { p.Assets[0].SHA256 = strings.ToUpper(hash) }, wantErr: "asset core.ext4.gz sha256"},
 		{name: "non-hex raw hash", mutate: func(p *images.Pins) { p.Assets[0].RawSHA256 = strings.Repeat("g", 64) }, wantErr: "raw_sha256"},
+		{name: "placeholder asset hash", mutate: func(p *images.Pins) { p.Assets[0].SHA256 = strings.Repeat("0", 64) }, wantErr: "placeholder"},
 		{name: "negative size", mutate: func(p *images.Pins) { p.Assets[0].RawSize = -1 }, wantErr: "negative size"},
 		{name: "empty firecracker version", mutate: func(p *images.Pins) { p.Firecracker.Version = "" }, wantErr: "firecracker version"},
 		{name: "firecracker url not https", mutate: func(p *images.Pins) { p.Firecracker.URL = "http://example.test/fc.tgz" }, wantErr: "must be https"},
 		{name: "bad firecracker hash", mutate: func(p *images.Pins) { p.Firecracker.SHA256 = "" }, wantErr: "firecracker sha256"},
+		{name: "placeholder firecracker hash", mutate: func(p *images.Pins) { p.Firecracker.SHA256 = strings.Repeat("0", 64) }, wantErr: "placeholder"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

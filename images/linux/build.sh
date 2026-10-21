@@ -32,7 +32,7 @@ core() {
 	umask 022
 
 	use_snapshot
-	apt-get install -y mmdebstrap dpkg-dev
+	apt-get install -y mmdebstrap dpkg-dev e2fsprogs
 	dpkg-query -W mmdebstrap e2fsprogs gzip tar
 
 	# The packages are checked by apt against the signed indexes, so a cached deb is safe to reuse.
@@ -127,7 +127,7 @@ check_rootfs() {
 # manifest: one line per package: name, version, source package, source version.
 manifest() {
 	dpkg-query --admindir="$1/var/lib/dpkg" -W \
-		-f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' | sort >"$OUT/core.manifest"
+		-f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' | sort >"$OUT/core.manifest"
 }
 
 make_image() {
@@ -155,7 +155,7 @@ gpl_sources() {
 	local rootfs=$1 bin srcpkg srcver
 	mkdir -p "$OUT/sources"
 	while IFS=$'\t' read -r bin _ srcpkg srcver; do
-		if [ ! -e "$rootfs/usr/share/doc/$bin/copyright" ] || grep -qE 'GPL|General Public License' "$rootfs/usr/share/doc/$bin/copyright"; then
+		if [ ! -e "$rootfs/usr/share/doc/$bin/copyright" ] || grep -qiE 'GPL|General Public License' "$rootfs/usr/share/doc/$bin/copyright"; then
 			echo "$srcpkg=$srcver"
 		fi
 	done <"$OUT/core.manifest" | sort -u >"$OUT/core.gpl-sources"

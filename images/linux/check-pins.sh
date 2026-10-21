@@ -30,4 +30,14 @@ if [ "$(jq -c --sort-keys '.assets' "$pins")" != "$(jq -c --sort-keys '.' <<<"$a
 	jq '.' <<<"$assets" >&2
 	status=1
 fi
+# Firecracker is downloaded by galahad setup, not built here. Check the pin against the file
+# and against the checksum the Firecracker release publishes next to it.
+fc_url=$(jq -r '.firecracker.url' "$pins")
+fc_pin=$(jq -r '.firecracker.sha256' "$pins")
+fc_file=$(curl -fsSL --retry 3 "$fc_url" | sha256sum | cut -d' ' -f1)
+fc_published=$(curl -fsSL --retry 3 "$fc_url.sha256.txt" | cut -d' ' -f1)
+if [ "$fc_file" != "$fc_pin" ] || [ "$fc_published" != "$fc_pin" ]; then
+	echo "pins.json: firecracker sha256 is $fc_pin; the file hashes to $fc_file and the release publishes $fc_published" >&2
+	status=1
+fi
 exit "$status"
