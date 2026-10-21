@@ -8,6 +8,30 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze/static/deps"
 )
 
+func TestPinnedByName(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		file string
+		// expectations
+		want bool
+	}{
+		{name: "a lockfile", file: "web/package-lock.json", want: true},
+		{name: "a requirements file", file: "Requirements-dev.txt", want: true},
+		{name: "a txt file below a requirements directory", file: "requirements/prod.txt", want: true},
+		{name: "a txt file with another name", file: "notes.txt"},
+		{name: "a package.json", file: "package.json"},
+		{name: "a requirements name without the txt extension", file: "requirements.in"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deps.PinnedByName(tt.file); got != tt.want {
+				t.Errorf("PinnedByName(%q) = %v, want %v", tt.file, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPinned(t *testing.T) {
 	npm := func(name, version string) deps.Package {
 		return deps.Package{Ecosystem: deps.EcosystemNPM, Name: name, Version: version}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -104,6 +105,13 @@ func manyPins(n int) map[string][]byte {
 	return map[string][]byte{"requirements.txt": []byte(b.String())}
 }
 
+// withFile is files and one more file.
+func withFile(files map[string][]byte, name, content string) map[string][]byte {
+	out := maps.Clone(files)
+	out[name] = []byte(content)
+	return out
+}
+
 func TestOSV(t *testing.T) {
 	lock := `{"name":"demo","lockfileVersion":3,"packages":{"":{"name":"demo","version":"1.0.0"},
 "node_modules/evil-pkg":{"version":"1.0.1"},"node_modules/left-pad":{"version":"1.3.0"}}}`
@@ -167,6 +175,22 @@ func TestOSV(t *testing.T) {
 			wantQueries:  []string{"PyPI:flask@2.0.0"},
 			wantRequests: []int{1},
 			wantHosts:    []string{"api.osv.dev:443"},
+		},
+		{
+			name:         "a big text file that is not a requirements file does not make the lookup partial",
+			files:        withFile(both, "notes.txt", strings.Repeat("just words\n", 200000)),
+			respond:      ok,
+			wantQueries:  []string{"npm:evil-pkg@1.0.1", "npm:left-pad@1.3.0", "PyPI:flask@2.0.0"},
+			wantRequests: []int{3},
+			wantHosts:    []string{"api.osv.dev:443"},
+		},
+		{
+			name:         "a requirements file over 1 MiB is skipped and makes the lookup partial",
+			files:        withFile(both, "requirements-big.txt", strings.Repeat("# padding\n", 200000)),
+			respond:      ok,
+			wantRequests: []int{3},
+			wantHosts:    []string{"api.osv.dev:443"},
+			wantPartial:  true,
 		},
 		{
 			name:         "more than 1000 packages are sent in batches",

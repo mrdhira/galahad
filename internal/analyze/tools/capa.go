@@ -46,25 +46,38 @@ var capaNamespaces = []struct{ prefix, capability string }{
 	{"anti-analysis/anti-debugging", "anti-debugging"},
 }
 
+// capaBenign are rules of the mapped namespaces that fire on ordinary software, such as runtimes, games and
+// installers. They are not findings, because one medium finding is enough to make a scan suspicious.
+var capaBenign = map[string]bool{
+	"allocate or change RWX memory":                    true,
+	"free user process memory":                         true,
+	"attach user process memory":                       true,
+	"add value to global atom table":                   true,
+	"check for time delay via QueryPerformanceCounter": true,
+	"check for time delay via GetTickCount":            true,
+}
+
 func init() {
 	registered = append(registered, func(env Env) Tool {
 		if env.Image != protocol.ImageRE {
 			return nil
 		}
-		return NewCapa()
+		return NewCapa(env.Scratch)
 	})
 }
 
-type capa struct{}
+type capa struct{ scratch string }
 
 // NewCapa returns the capa tool, which runs the capa program of the re image on the PE, ELF and
-// Mach-O files of the input.
-func NewCapa() Tool { return capa{} }
+// Mach-O files of the input. Each run gets a temporary directory below scratch, which is removed
+// after the run: capa unpacks itself there, and a run that is killed leaves the files behind. An
+// empty scratch means the system temporary directory.
+func NewCapa(scratch string) Tool { return capa{scratch: scratch} }
 
 func (capa) Name() string  { return "capa" }
 func (capa) Stage() string { return protocol.StageCapa }
 
-func (capa) Run(ctx context.Context, target string) (Result, error) {
+func (c capa) Run(ctx context.Context, target string) (Result, error) {
 	root, err := scanRoot(target)
 	if err != nil {
 		return Result{}, err
@@ -100,11 +113,15 @@ func (capa) Run(ctx context.Context, target string) (Result, error) {
 			notes = append(notes, "out of time before "+rel)
 			break
 		}
-		caps, err := capaFile(ctx, bin, path)
+		caps, err := c.file(ctx, bin, path)
 		if err != nil {
 			res.Partial = true
 			if len(notes) < capaMaxNotes {
 				notes = append(notes, rel+": "+err.Error())
+			}
+			if errors.Is(err, errTimedOut) {
+				notes = append(notes, "stopped after the first timeout, since the other executables would be slow too")
+				break
 			}
 			continue
 		}
@@ -137,16 +154,16 @@ func executables(ctx context.Context, root string) (files []string, partial bool
 			partial = true
 			return nil
 		}
-		if seen++; seen > analyze.MaxFiles {
-			partial = true
-			return filepath.SkipAll
-		}
 		if d.IsDir() {
 			if rel, _ := filepath.Rel(root, path); strings.Count(rel, string(filepath.Separator)) >= analyze.MaxDirDepth {
 				partial = true
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if seen++; seen > analyze.MaxFiles {
+			partial = true
+			return filepath.SkipAll
 		}
 		if !d.Type().IsRegular() {
 			return nil
@@ -187,9 +204,16 @@ func isExecutable(path string) bool {
 	return false
 }
 
-// capaFile runs capa on one file and returns its mapped capabilities, "<capability>: <rule>".
-func capaFile(ctx context.Context, bin, path string) ([]string, error) {
-	out, err := executeMax(ctx, capaFileLimit, capaMaxOutput, bin, "-j", "-q", path)
+// file runs capa on one file and returns its mapped capabilities, "<capability>: <rule>". capa is a
+// PyInstaller bundle that unpacks about 72 MB into its TMPDIR and removes it only when it ends by
+// itself, so every run gets a directory of its own, which is removed whatever happens to the run.
+func (c capa) file(ctx context.Context, bin, path string) ([]string, error) {
+	tmp, err := os.MkdirTemp(c.scratch, "capa-")
+	if err != nil {
+		return nil, fmt.Errorf("cannot make a temporary directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }() // best effort; the directory is on the scratch disk of this job
+	out, err := executeMax(ctx, capaFileLimit, capaMaxOutput, []string{"TMPDIR=" + tmp}, bin, "-j", "-q", path)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +255,7 @@ func parseCapa(out []byte) ([]string, error) {
 		if name == "" || len(name) > protocol.MaxSnippet {
 			return nil, errors.New("output has a rule without a usable name")
 		}
-		if r.Meta.Namespace == nil {
+		if r.Meta.Namespace == nil || capaBenign[name] {
 			continue
 		}
 		for _, m := range capaNamespaces {

@@ -135,6 +135,20 @@ func TestCapa(t *testing.T) {
 			},
 		},
 		{
+			name:  "rules that fire on ordinary software are not findings, and the others of their namespaces are",
+			files: map[string][]byte{"a.exe": peFile},
+			fake: fakeRun{out: capaJSON(
+				[2]string{"allocate or change RWX memory", "host-interaction/process/inject"},
+				[2]string{"free user process memory", "host-interaction/process/inject"},
+				[2]string{"attach user process memory", "host-interaction/process/inject"},
+				[2]string{"add value to global atom table", "host-interaction/process/inject"},
+				[2]string{"check for time delay via QueryPerformanceCounter", "anti-analysis/anti-debugging/debugger-evasion"},
+				[2]string{"check for time delay via GetTickCount", "anti-analysis/anti-debugging/debugger-evasion"},
+				[2]string{"inject APC", "host-interaction/process/inject"},
+			)},
+			wantFinds: []string{"GAL-CAPA-001 a.exe: injection: inject APC"},
+		},
+		{
 			name:  "vm-detection alone is not a finding",
 			files: map[string][]byte{"a.exe": peFile},
 			fake:  fakeRun{out: capaJSON([2]string{"check for VMware I/O port", "anti-analysis/anti-vm/vm-detection"}, [2]string{"check for VirtualBox", "anti-analysis/anti-vm"})},
@@ -175,6 +189,11 @@ func TestCapa(t *testing.T) {
 			name:     "an executable over 32 MiB is not examined",
 			existing: bigELF, noBinary: true,
 			wantNote: "not every executable was examined", wantPartial: true,
+		},
+		{
+			name:  "the temporary files of a capa that ends are removed",
+			files: map[string][]byte{"a.exe": peFile},
+			fake:  fakeRun{out: capaJSON(), leak: true},
 		},
 		{
 			name:  "capa that is not installed leaves the tool out",
@@ -224,6 +243,20 @@ func TestCapa(t *testing.T) {
 			budget:  300 * time.Millisecond,
 			wantErr: "timed out",
 		},
+		{
+			name:    "the temporary files of a capa that is killed are removed",
+			files:   map[string][]byte{"a.exe": peFile},
+			fake:    fakeRun{mode: "hang", leak: true},
+			budget:  300 * time.Millisecond,
+			wantErr: "timed out",
+		},
+		{
+			name:    "after a timeout the other executables are not examined",
+			files:   map[string][]byte{"a.exe": peFile, "b.exe": peFile},
+			fake:    fakeRun{mode: "hang"},
+			budget:  300 * time.Millisecond,
+			wantErr: "stopped after the first timeout",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -240,7 +273,13 @@ func TestCapa(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), cmp.Or(tt.budget, time.Minute))
 			defer cancel()
 
-			res, err := tools.NewCapa().Run(ctx, target)
+			scratch := t.TempDir()
+
+			res, err := tools.NewCapa(scratch).Run(ctx, target)
+
+			if left, rerr := os.ReadDir(scratch); rerr != nil || len(left) != 0 {
+				t.Errorf("scratch directory holds %v (%v), want it empty", left, rerr)
+			}
 
 			if (err != nil) != (tt.wantErr != "") || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("error = %v, want %q", err, tt.wantErr)

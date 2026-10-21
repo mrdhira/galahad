@@ -136,10 +136,6 @@ func pinnedPackages(ctx context.Context, root string) (found []pinned, partial b
 			partial = true
 			return nil
 		}
-		if entries++; entries > analyze.MaxFiles {
-			partial = true
-			return filepath.SkipAll
-		}
 		if d.IsDir() {
 			if rel, _ := filepath.Rel(root, path); strings.Count(rel, string(filepath.Separator)) >= analyze.MaxDirDepth {
 				partial = true
@@ -147,6 +143,11 @@ func pinnedPackages(ctx context.Context, root string) (found []pinned, partial b
 			}
 			return nil
 		}
+		if entries++; entries > analyze.MaxFiles {
+			partial = true
+			return filepath.SkipAll
+		}
+		rel, _ := relPath(root, path)
 		name := strings.ToLower(d.Name())
 		limit := int64(analyze.MaxConfigSize)
 		switch {
@@ -162,17 +163,19 @@ func pinnedPackages(ctx context.Context, root string) (found []pinned, partial b
 		if err != nil {
 			return nil
 		}
+		// A file that is too big or past the read budget cuts the lookup short only if it is one that
+		// Pinned reads by its name. Any other .txt file is most likely not a list of requirements.
+		mustRead := deps.PinnedByName(rel)
 		if info.Size() > limit || read+info.Size() > osvMaxRead {
-			partial = true
+			partial = partial || mustRead
 			return nil
 		}
 		data, err := os.ReadFile(path) // #nosec G304 -- a regular file found below the scanned target, within the size limit
 		if err != nil {
-			partial = true
+			partial = partial || mustRead
 			return nil
 		}
 		read += int64(len(data))
-		rel, _ := relPath(root, path)
 		for _, p := range deps.Pinned(rel, data) {
 			if seen[p] {
 				continue

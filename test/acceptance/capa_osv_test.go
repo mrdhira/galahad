@@ -100,12 +100,12 @@ func TestScanCapa(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		args     []string
-		target   func(t *testing.T) string
-		stub     string // the capa JSON; no capa on PATH when empty
-		noCapa   bool   // PATH holds no capa at all
-		wantCode int
+		args   []string
+		target func(t *testing.T) string
+		stub   string // the capa JSON; no capa on PATH when empty
+		noCapa bool   // PATH holds no capa at all
 		// expectations
+		wantCode     int
 		wantRules    []string
 		wantEvidence string // path of the GAL-CAPA-001 evidence
 		wantSnippet  string // substring of its snippet
@@ -223,10 +223,10 @@ func TestScanOSV(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		mal      bool   // the server lists a MAL entry for the package
-		resolve  string // GALAHAD_TEST_RESOLVE; the server through the sinkhole when empty
-		wantCode int
+		mal     bool   // the server lists a MAL entry for the package
+		resolve string // GALAHAD_TEST_RESOLVE; the server through the sinkhole when empty
 		// expectations
+		wantCode     int
 		wantVerdict  string
 		wantRules    []string
 		wantSnippet  string

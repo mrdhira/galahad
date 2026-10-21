@@ -41,16 +41,35 @@ const (
 // version 1 and for a file that does not parse. Packages that come from a path, a workspace or a
 // range are not pinned and not listed. The lengths of names and versions are bounded.
 func Pinned(name string, data []byte) []Package {
-	base := strings.ToLower(path.Base(name))
+	lock, requirements := pinFile(name)
 	var c collector
 	switch {
-	case base == "package-lock.json":
+	case lock:
 		pinnedLock(&c, data)
-	case strings.HasPrefix(base, "requirements") && strings.HasSuffix(base, ".txt"),
-		strings.HasSuffix(base, ".txt") && (inRequirementsDir(name) || looksLikeRequirements(data)):
+	case requirements, strings.HasSuffix(strings.ToLower(name), ".txt") && looksLikeRequirements(data):
 		pinnedRequirements(&c, data)
 	}
 	return c.pkgs
+}
+
+// PinnedByName reports whether Pinned reads a file because of its name: a package-lock.json, a
+// requirements*.txt, or a .txt file below a directory named requirements. Pinned also reads any other
+// .txt file whose content looks like a requirements file, which a name cannot tell.
+func PinnedByName(name string) bool {
+	lock, requirements := pinFile(name)
+	return lock || requirements
+}
+
+// pinFile classifies a file by its name.
+func pinFile(name string) (lock, requirements bool) {
+	base := strings.ToLower(path.Base(name))
+	switch {
+	case base == "package-lock.json":
+		return true, false
+	case !strings.HasSuffix(base, ".txt"):
+		return false, false
+	}
+	return false, strings.HasPrefix(base, "requirements") || inRequirementsDir(name)
 }
 
 // collector keeps the well formed packages it is given, each once.

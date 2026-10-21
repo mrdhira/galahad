@@ -230,7 +230,7 @@ func TestGuest(t *testing.T) {
 		wantDepthSkip  string   // the path of the depth skip the Result must have, and then a verdict that is not clean
 	}{
 		{name: "directory target", wantTargetKind: protocol.TargetDir},
-		{name: "the re image runs capa too", image: protocol.ImageRE, wantTargetKind: protocol.TargetDir, wantTools: []string{"capa", "clamav", "osv", "yara"}},
+		{name: "the re image runs capa too", image: protocol.ImageRE, wantTargetKind: protocol.TargetDir, wantTools: []string{"clamav", "osv", "yara", "capa"}},
 		{name: "file target", entries: []tarEntry{{name: "one.txt", body: "hello\n"}}, target: "one.txt", wantTargetKind: protocol.TargetFile},
 		{name: "host stalls until the job timeout", mode: "stall", timeout: 1, wantCode: agent.ExitError, wantErrCode: protocol.CodeTimeout, wantMessage: "timed out"},
 		{name: "host hangs up", mode: "hang up", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "closed the connection"},

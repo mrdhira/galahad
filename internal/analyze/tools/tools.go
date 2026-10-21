@@ -51,6 +51,9 @@ type Tool interface {
 type Env struct {
 	// Image is the guest image, protocol.ImageCore or protocol.ImageRE. The empty string means core.
 	Image string
+	// Scratch is a writable directory on the work disk, for the temporary files of a tool. Empty means
+	// the system temporary directory.
+	Scratch string
 	// Relay is the host:port of the relay that reaches the host proxy. Empty means the job has no network.
 	Relay string
 }
@@ -70,7 +73,8 @@ type Result struct {
 // called and not when the package starts. A constructor returns nil for a tool that does not run in env.
 var registered []func(Env) Tool
 
-// All returns the registered tools that run in env, sorted by name.
+// All returns the registered tools that run in env, sorted by name, except that capa comes last: it is the
+// slowest tool and the most likely to run out of time, so it must not starve the signature tools.
 func All(env Env) []Tool {
 	var all []Tool
 	for _, mk := range registered {
@@ -78,7 +82,15 @@ func All(env Env) []Tool {
 			all = append(all, t)
 		}
 	}
-	slices.SortFunc(all, func(a, b Tool) int { return strings.Compare(a.Name(), b.Name()) })
+	slices.SortFunc(all, func(a, b Tool) int {
+		if (a.Name() == "capa") != (b.Name() == "capa") {
+			if a.Name() == "capa" {
+				return 1
+			}
+			return -1
+		}
+		return strings.Compare(a.Name(), b.Name())
+	})
 	return all
 }
 
@@ -111,6 +123,9 @@ func Apply(ctx context.Context, ts []Tool, target string, res *protocol.Result, 
 	return log.Bytes()[:min(log.Len(), maxLog)], nil
 }
 
+// errTimedOut is the error of a tool that was killed at its time limit.
+var errTimedOut = errors.New("timed out")
+
 // output is what a finished tool left.
 type output struct {
 	stdout []byte
@@ -122,16 +137,16 @@ type output struct {
 // time or its output cap is killed and gives an error. A tool that exits non-zero is not an
 // error here, since the exit code can mean a hit.
 func execute(ctx context.Context, limit time.Duration, path string, args ...string) (output, error) {
-	return executeMax(ctx, limit, maxOutput, path, args...)
+	return executeMax(ctx, limit, maxOutput, nil, path, args...)
 }
 
-// executeMax is execute with a cap of maxOut bytes of stdout.
-func executeMax(ctx context.Context, limit time.Duration, maxOut int, path string, args ...string) (output, error) {
+// executeMax is execute with a cap of maxOut bytes of stdout and extra variables for the environment of the tool.
+func executeMax(ctx context.Context, limit time.Duration, maxOut int, env []string, path string, args ...string) (output, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, args...) // #nosec G204 -- the program is found on PATH of the guest image and the arguments are fixed or absolute paths
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(append(os.Environ(), "LC_ALL=C"), env...)
 	cmd.WaitDelay = waitDelay
 	ownGroup(cmd)
 	out := &capped{max: maxOut, stop: cancel}
@@ -144,7 +159,7 @@ func executeMax(ctx context.Context, limit time.Duration, maxOut int, path strin
 	case out.over:
 		return output{}, fmt.Errorf("output is over %d bytes", maxOut)
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return output{}, fmt.Errorf("timed out after %s", time.Since(start).Round(time.Second))
+		return output{}, fmt.Errorf("%w after %s", errTimedOut, time.Since(start).Round(time.Second))
 	case ctx.Err() != nil:
 		return output{}, errors.New("stopped before it ended")
 	case errors.As(err, &ee):

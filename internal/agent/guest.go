@@ -232,7 +232,8 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fmt.Errorf("analyze: %w", err)
 	}
 	// The tools share what is left of the job time after the engine.
-	toolEnv := tools.Env{Image: job.Image}
+	// The tools keep their temporary files next to the input, on the work disk, and not in the small /tmp.
+	toolEnv := tools.Env{Image: job.Image, Scratch: filepath.Dir(dir)}
 	if relay != nil {
 		toolEnv.Relay = relay.addr
 	}

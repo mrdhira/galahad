@@ -28,6 +28,7 @@ const (
 	envExit = "GALAHAD_TOOLS_TEST_EXIT"
 	envErr  = "GALAHAD_TOOLS_TEST_ERR"  // what the fake writes to stderr
 	envArgs = "GALAHAD_TOOLS_TEST_ARGS" // file that gets the arguments of the fake
+	envLeak = "GALAHAD_TOOLS_TEST_LEAK" // when set, the fake writes a file into its TMPDIR, as capa unpacks itself
 )
 
 var binDir string // holds the fake clamscan, yara and capa
@@ -90,6 +91,11 @@ func fake(mode string) int {
 		}
 	}
 	_, _ = io.WriteString(os.Stderr, os.Getenv(envErr))
+	if os.Getenv(envLeak) != "" {
+		if err := os.WriteFile(filepath.Join(os.Getenv("TMPDIR"), "_MEIleak"), []byte("unpacked"), 0o600); err != nil {
+			return 95
+		}
+	}
 	switch mode {
 	case "print":
 		data, err := os.ReadFile(os.Getenv(envOut))
@@ -122,6 +128,7 @@ type fakeRun struct {
 	out  string
 	exit int
 	err  string
+	leak bool // write a file into TMPDIR first
 }
 
 // useFake puts the fake scanners alone on PATH and returns the file that gets their arguments.
@@ -140,6 +147,11 @@ func useFake(t *testing.T, f fakeRun) (argsFile string) {
 	t.Setenv(envExit, strconv.Itoa(f.exit))
 	t.Setenv(envErr, f.err)
 	t.Setenv(envArgs, argsFile)
+	if f.leak {
+		t.Setenv(envLeak, "1")
+	} else {
+		t.Setenv(envLeak, "")
+	}
 	return argsFile
 }
 
@@ -318,8 +330,8 @@ func TestAll(t *testing.T) {
 			wantNames: []string{"clamav", "osv", "yara"}, wantStages: []string{protocol.StageClamAV, protocol.StageOSV, protocol.StageYARA},
 		},
 		{
-			name: "the re image adds capa", env: tools.Env{Image: protocol.ImageRE},
-			wantNames: []string{"capa", "clamav", "osv", "yara"}, wantStages: []string{protocol.StageCapa, protocol.StageClamAV, protocol.StageOSV, protocol.StageYARA},
+			name: "the re image adds capa, last", env: tools.Env{Image: protocol.ImageRE},
+			wantNames: []string{"clamav", "osv", "yara", "capa"}, wantStages: []string{protocol.StageClamAV, protocol.StageOSV, protocol.StageYARA, protocol.StageCapa},
 		},
 	}
 	for _, tt := range tests {
