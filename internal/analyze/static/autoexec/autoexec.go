@@ -629,9 +629,15 @@ func (s *scan) devcontainer(root *node) {
 		s.add(ruleDevInit, v.start)
 		leaves(v)
 	}
+	// These change the environment or the folder every command runs in: a PATH
+	// or NODE_OPTIONS from the file, or a workspace other than the one graded.
+	changed := root.get("containerEnv") != nil || root.get("remoteEnv") != nil ||
+		root.get("workspaceFolder") != nil || root.get("workspaceMount") != nil
+	g := newGrader(s)
+	dir := workspaceDir(s.rel())
 	for _, key := range devLifecycle {
 		if v := root.get(key); v != nil {
-			s.add(ruleDevLife, v.start)
+			s.addGraded(ruleDevLife, v.start, !changed && g.allBenign(v, dir))
 			leaves(v)
 		}
 	}
@@ -639,13 +645,20 @@ func (s *scan) devcontainer(root *node) {
 
 func (s *scan) packageJSON(root *node) {
 	scripts := root.get("scripts")
+	dir := path.Dir(s.rel())
+	if dir == "." {
+		dir = ""
+	}
+	g := newGrader(s)
+	g.preload(dir, scripts)
 	for _, group := range []struct {
 		rule  protocol.Rule
 		names []string
-	}{{ruleNpm, npmInstall}, {ruleHook, npmPrepare}} {
+		grade bool // low severity when the script is benign
+	}{{ruleNpm, npmInstall, true}, {ruleHook, npmPrepare, false}} {
 		for _, name := range group.names {
 			if v := scripts.get(name); v != nil && v.kind == 's' {
-				s.add(group.rule, v.start)
+				s.addGraded(group.rule, v.start, group.grade && g.hook(dir, name, 0))
 				s.riskAt(v.str, v.start)
 			}
 		}
@@ -659,6 +672,23 @@ func (s *scan) packageJSON(root *node) {
 			}
 		}
 	}
+}
+
+// rel is the path of the file inside its container, or on disk.
+func (s *scan) rel() string {
+	if s.f.Member != "" {
+		return s.f.Member
+	}
+	return s.f.Path
+}
+
+// addGraded records a finding for rule at the byte offset, at low severity when
+// the command behind it is benign.
+func (s *scan) addGraded(r protocol.Rule, off int, benign bool) {
+	if benign {
+		r = lowered(r)
+	}
+	s.add(r, off)
 }
 
 // line is one line of a text file and its byte offset.

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -60,6 +61,7 @@ var (
 	pySeparators = regexp.MustCompile(`[-_.]+`)
 	pyScheme     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
 	errDepth     = errors.New("nested too deeply")
+	utf8BOM      = []byte("\xef\xbb\xbf")
 )
 
 type analyzer struct{}
@@ -109,6 +111,11 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 
 func packageJSON(_ context.Context, f analyze.File) ([]protocol.Finding, error) {
 	members, err := walkJSON(f.Data)
+	rel := f.Path
+	if f.Member != "" {
+		rel = f.Member
+	}
+	dir := path.Dir(rel)
 	var found []protocol.Finding
 	for _, m := range members {
 		if len(m.path) != 2 || !depSections[strings.ToLower(m.path[0])] {
@@ -116,7 +123,10 @@ func packageJSON(_ context.Context, f analyze.File) ([]protocol.Finding, error) 
 		}
 		name, spec := m.path[1], strings.TrimSpace(m.val)
 		lower := strings.ToLower(spec)
-		if strings.HasPrefix(lower, "file:") || strings.HasPrefix(lower, "workspace:") || strings.HasPrefix(lower, "link:") {
+		if local, inside := localDep(dir, lower, spec); local {
+			if !inside && !full(found, ruleURL) {
+				found = append(found, ruleURL.Finding(analyze.EvidenceAt(f, m.off)))
+			}
 			continue
 		}
 		if isNpmRemote(lower, spec) && !full(found, ruleURL) {
@@ -354,6 +364,32 @@ func eachLine(ctx context.Context, f analyze.File, fn func(line string, n int)) 
 	return nil
 }
 
+// localDep reports whether an npm version spec names a local path or a
+// workspace, and whether that path stays inside the target. dir is the folder of
+// the package.json, relative to the target. A path that is absolute, or that
+// climbs out of the target, is not inside: it is not code the repository owns.
+func localDep(dir, lower, spec string) (local, inside bool) {
+	if strings.HasPrefix(lower, "workspace:") {
+		return true, true
+	}
+	rest := spec
+	switch {
+	case strings.HasPrefix(lower, "file:"), strings.HasPrefix(lower, "link:"):
+		rest = spec[len("file:"):]
+	case strings.HasPrefix(lower, "portal:"):
+		rest = spec[len("portal:"):]
+	case strings.HasPrefix(spec, "./"), strings.HasPrefix(spec, "../"):
+	default:
+		return false, false
+	}
+	rest = strings.ReplaceAll(rest, `\`, "/")
+	if rest != "" && (rest[0] == '/' || rest[0] == '~' || (len(rest) > 1 && rest[1] == ':')) {
+		return true, false
+	}
+	p := path.Join(dir, rest)
+	return true, p != ".." && !strings.HasPrefix(p, "../")
+}
+
 // isNpmRemote reports whether an npm version spec points at git or a URL.
 func isNpmRemote(lower, spec string) bool {
 	for _, p := range []string{"git+", "git://", "git@", "github:", "gitlab:", "bitbucket:", "gist:", "http://", "https://", "ssh://"} {
@@ -491,7 +527,12 @@ type member struct {
 // to a nesting depth of maxJSONDepth. On an error it returns what it read so far.
 func walkJSON(data []byte) ([]member, error) {
 	type frame struct{ obj, wantKey bool }
-	dec := json.NewDecoder(bytes.NewReader(data))
+	// npm and Yarn read a file that starts with a byte order mark, so it is not a way past the check.
+	bom := 0
+	if bytes.HasPrefix(data, utf8BOM) {
+		bom = len(utf8BOM)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data[bom:]))
 	var (
 		out    []member
 		stack  []frame
@@ -533,7 +574,7 @@ func walkJSON(data []byte) ([]member, error) {
 				stack[len(stack)-1].wantKey = false
 			case inObj:
 				if s, ok := tok.(string); ok {
-					out = append(out, member{path: append([]string(nil), path...), val: s, off: keyOff[len(keyOff)-1]})
+					out = append(out, member{path: append([]string(nil), path...), val: s, off: bom + keyOff[len(keyOff)-1]})
 				}
 				path, keyOff = path[:len(path)-1], keyOff[:len(keyOff)-1]
 				stack[len(stack)-1].wantKey = true

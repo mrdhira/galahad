@@ -4,6 +4,7 @@ package analyze_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -73,6 +74,40 @@ func TestRunFIFO(t *testing.T) {
 			}
 			if len(res.Coverage.Skipped) != 1 || res.Coverage.Skipped[0] != tt.wantSkips[0] {
 				t.Errorf("skipped = %v, want %v", res.Coverage.Skipped, tt.wantSkips)
+			}
+		})
+	}
+}
+
+func TestRunOpenSymlink(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		link string // what the link "x" points at
+		// expectations
+		wantRead string
+	}{
+		{name: "a symlink inside the target is not followed", link: "real", wantRead: "error"},
+		{name: "a symlink out of the target is not followed", link: "../outside", wantRead: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "repo")
+			write(t, parent, "outside", []byte("secret"))
+			write(t, dir, "real", []byte("data"))
+			write(t, dir, "main", []byte("m"))
+			if err := os.Symlink(tt.link, filepath.Join(dir, "x")); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+
+			if _, err := analyze.Run(context.Background(), dir, []analyze.Analyzer{openProbe([]string{"x"}, 1, got)}); err != nil {
+				t.Fatal(err)
+			}
+
+			if got["x"] != tt.wantRead {
+				t.Errorf("Open(x) = %q, want %q", got["x"], tt.wantRead)
 			}
 		})
 	}

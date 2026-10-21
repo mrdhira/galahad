@@ -35,6 +35,7 @@ func TestAgentDependencyChecks(t *testing.T) {
 			},
 		},
 		{name: "benign npm project with a registry lockfile", fixture: "benign-npm-deps", wantCode: 0, wantClean: true},
+		{name: "benign npm project with local path dependencies", fixture: "benign-local-deps", wantCode: 0, wantClean: true},
 		{name: "benign python library", fixture: "benign-python-lib", wantCode: 0, wantClean: true},
 	}
 	for _, tt := range tests {
