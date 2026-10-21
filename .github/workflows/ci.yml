@@ -61,8 +61,16 @@ jobs:
           go-version: '1.27.3'
       - if: needs.changes.outputs.code != 'false'
         run: make tools
+      # The failing gate step and its error lines also go to annotations, which are readable
+      # without the job log.
       - if: needs.changes.outputs.code != 'false'
-        run: make gate
+        run: |
+          set -o pipefail
+          make gate 2>&1 | tee gate.log && exit 0
+          { grep -E '^== ' gate.log | tail -n 1
+            grep -E -- '--- FAIL|^FAIL|^panic:|\.go:[0-9]+:|^Vulnerability #' gate.log | head -n 9
+          } | sed 's/^/::error::/'
+          exit 1
 
   # Build and test only. The full gate runs on Linux.
   test:
