@@ -381,10 +381,49 @@ func inParams(text []byte, i, after int) bool {
 	if bytes.HasPrefix(bytes.TrimLeft(text[hi+1:], " \t"), []byte("=>")) {
 		return true
 	}
-	// A function without a name is a callback. A declared function is not
-	// handed to the call, so its parameters are not the response.
+	// A function without a name is a callback, and so is a named function
+	// expression such as .then(function run(code) {...}). A declared function is
+	// not handed to the call, so its parameters are not the response.
 	head := bytes.TrimRight(text[:lo], " \t")
-	return bytes.HasSuffix(head, []byte("function")) && (len(head) == len("function") || !isWord(head[len(head)-len("function")-1]))
+	if endsWithWord(head, "function") {
+		return true
+	}
+	j := len(head)
+	for j > 0 && isWord(head[j-1]) {
+		j--
+	}
+	if j == len(head) {
+		return false
+	}
+	head = bytes.TrimRight(head[:j], " \t")
+	if !endsWithWord(head, "function") {
+		return false
+	}
+	return isExpressionStart(bytes.TrimRight(head[:len(head)-len("function")], " \t"))
+}
+
+// endsWithWord reports whether b ends with the whole word w.
+func endsWithWord(b []byte, w string) bool {
+	return bytes.HasSuffix(b, []byte(w)) && (len(b) == len(w) || !isWord(b[len(b)-len(w)-1]))
+}
+
+// isExpressionStart reports whether a function keyword after before sits where
+// an expression is expected (an argument, an assignment, a return value), not
+// at the start of a statement, where it declares a function.
+func isExpressionStart(before []byte) bool {
+	before = bytes.TrimSuffix(before, []byte("async"))
+	before = bytes.TrimRight(before, " \t")
+	if endsWithWord(before, "return") {
+		return true
+	}
+	if len(before) == 0 {
+		return false
+	}
+	switch before[len(before)-1] {
+	case '(', ',', '=', ':', '?', '&', '|', '!', '[':
+		return true
+	}
+	return false
 }
 
 // destructured reports whether the name is in "{ a, t } = await".
