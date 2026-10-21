@@ -76,7 +76,7 @@ func runGuest(args []string, _, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "galahad-agent: WARNING: --unsafe-host: taking untrusted input outside a VM (%s)\n", reason)
 	}
 
-	applyMemoryLimit(env, memoryLimit)
+	applyMemoryLimit(env, memoryLimit, true)
 
 	conn, err := dialControl(context.Background())
 	if err != nil {

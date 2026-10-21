@@ -17,6 +17,7 @@ import (
 
 	"github.com/mrdhira/galahad/internal/analyze/tools"
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/scoring"
 )
 
 // The tests run the test binary as the scanners: TestMain copies it to a directory as clamscan
@@ -154,13 +155,14 @@ func format(fs []protocol.Finding) []string {
 type stubTool struct {
 	name string
 	fs   []protocol.Finding
+	note string
 	err  error
 }
 
 func (s stubTool) Name() string  { return s.name }
 func (s stubTool) Stage() string { return s.name + "-stage" }
-func (s stubTool) Run(context.Context, string) ([]protocol.Finding, error) {
-	return s.fs, s.err
+func (s stubTool) Run(context.Context, string) (tools.Result, error) {
+	return tools.Result{Findings: s.fs, Note: s.note}, s.err
 }
 
 func TestApply(t *testing.T) {
@@ -177,6 +179,9 @@ func TestApply(t *testing.T) {
 		wantStages    []string
 		wantLog       string
 		wantErr       string
+		wantTruncated bool   // a tool was left out
+		wantVerdict   string // of a result with one file, all analyzed, and the findings of the tools; not checked when empty
+		wantConf      int
 	}{
 		{
 			name:          "a tool that ran is covered and its findings are marked",
@@ -193,6 +198,16 @@ func TestApply(t *testing.T) {
 			wantAnalyzers: []string{"yara"},
 			wantStages:    []string{"yara-stage"},
 			wantLog:       "yara: ok, 0 findings\n",
+			wantVerdict:   "clean",
+			wantConf:      100,
+		},
+		{
+			name:          "a note of a tool goes to the log",
+			tools:         []tools.Tool{stubTool{name: "clamav", fs: []protocol.Finding{hit}, note: "output has a line\x1b that is not a hit"}},
+			wantAnalyzers: []string{"clamav"},
+			wantFindings:  1,
+			wantStages:    []string{"clamav-stage"},
+			wantLog:       "clamav: ok, 1 findings\nclamav: note: output has a line\\u001b that is not a hit\n",
 		},
 		{
 			name:          "a progress error ends the step",
@@ -211,6 +226,7 @@ func TestApply(t *testing.T) {
 			wantLog:       "clamav: left out: timed out after 3m0s\nyara: ok, 1 findings\n",
 			wantAnalyzers: []string{"filetype", "yara"},
 			wantFindings:  1,
+			wantTruncated: true,
 		},
 		{
 			name:          "the reason of a tool is cleaned in the log",
@@ -218,11 +234,14 @@ func TestApply(t *testing.T) {
 			wantAnalyzers: []string{},
 			wantStages:    []string{"yara-stage"},
 			wantLog:       "yara: left out: bad\\u001b[2J line\n",
+			wantTruncated: true,
+			wantVerdict:   "clean",
+			wantConf:      50,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res := protocol.Result{Coverage: protocol.Coverage{Analyzers: slices.Clone(tt.have)}}
+			res := protocol.Result{Coverage: protocol.Coverage{Analyzers: slices.Clone(tt.have), FilesSeen: 1, FilesAnalyzed: 1}}
 			var stages []string
 			calls := 0
 			progress := func(stage string) error {
@@ -250,6 +269,15 @@ func TestApply(t *testing.T) {
 			}
 			if len(res.Findings) != tt.wantFindings {
 				t.Errorf("findings = %d, want %d", len(res.Findings), tt.wantFindings)
+			}
+			if len(res.Coverage.Skipped) != 0 || res.Coverage.Truncated != tt.wantTruncated {
+				t.Errorf("skipped = %v, truncated = %v, want no skips and truncated = %v", res.Coverage.Skipped, res.Coverage.Truncated, tt.wantTruncated)
+			}
+			if tt.wantVerdict != "" {
+				scoring.Apply(&res)
+				if string(res.Verdict) != tt.wantVerdict || res.Confidence != tt.wantConf {
+					t.Errorf("verdict = %s, confidence = %d, want %s, %d", res.Verdict, res.Confidence, tt.wantVerdict, tt.wantConf)
+				}
 			}
 			for _, f := range res.Findings {
 				if f.Analyzer != "clamav" && f.Analyzer != "yara" {

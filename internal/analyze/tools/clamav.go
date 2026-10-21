@@ -33,53 +33,57 @@ func NewClamAV(db string) Tool { return clamav{db: db} }
 func (clamav) Name() string  { return "clamav" }
 func (clamav) Stage() string { return protocol.StageClamAV }
 
-func (c clamav) Run(ctx context.Context, target string) ([]protocol.Finding, error) {
+func (c clamav) Run(ctx context.Context, target string) (Result, error) {
 	if entries, err := os.ReadDir(c.db); err != nil || len(entries) == 0 {
-		return nil, fmt.Errorf("no signatures in %s", protocol.CleanPath(c.db))
+		return Result{}, fmt.Errorf("no signatures in %s", protocol.CleanPath(c.db))
 	}
 	bin, err := exec.LookPath("clamscan")
 	if err != nil {
-		return nil, fmt.Errorf("clamscan is not installed: %w", err)
+		return Result{}, fmt.Errorf("clamscan is not installed: %w", err)
 	}
 	root, err := scanRoot(target)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	out, err := execute(ctx, clamTimeout, bin, "-r", "--database="+c.db, "--infected", "--no-summary",
 		"--heuristic-alerts=no", "--max-filesize=32M", "--max-scansize=256M", "--max-recursion=6", root)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	switch out.code {
 	case 0: // nothing infected, and with --infected nothing is printed
 		if len(out.stdout) > 0 {
-			return nil, errors.New("exit 0 with output")
+			return Result{}, errors.New("exit 0 with output")
 		}
-		return nil, nil
+		return Result{}, nil
 	case 1: // infected files found
+		// The exit code is the one thing a file name cannot forge. So when the output does not
+		// parse in full, for example because a name holds " FOUND\n", the hit is not dropped:
+		// it is reported on the target, next to the records that did parse.
 		fs, err := parseClamAV(out.stdout, root)
-		if err != nil {
-			return nil, err
+		if err == nil && len(fs) > 0 {
+			return Result{Findings: fs}, nil
 		}
-		if len(fs) == 0 {
-			return nil, errors.New("exit 1 without a hit")
+		if err == nil {
+			err = errors.New("exit 1 without a hit")
 		}
-		return fs, nil
+		fs = append(fs, ruleAV.Finding(protocol.Evidence{Path: protocol.CleanPath(filepath.Base(root)), Snippet: "unparsed clamscan hit"}))
+		return Result{Findings: fs, Note: err.Error()}, nil
 	}
-	return nil, exitError(out)
+	return Result{}, exitError(out)
 }
 
 // parseClamAV reads the lines "<path>: <signature> FOUND" of clamscan --infected. A path can
 // hold ": " and newlines, so each record ends at " FOUND\n", the signature is what follows the
 // last ": ", and a piece that does not name a signature of a file under root is joined with the
-// next one.
+// next one. On an error it still returns the findings parsed before it.
 func parseClamAV(out []byte, root string) ([]protocol.Finding, error) {
 	var fs []protocol.Finding
 	text, pending := string(out), ""
 	for text != "" {
 		chunk, rest, ok := strings.Cut(text, " FOUND\n")
 		if !ok {
-			return nil, errors.New("output does not end in FOUND")
+			return fs, errors.New("output does not end in FOUND")
 		}
 		text = rest
 		rec := pending + chunk
@@ -97,7 +101,7 @@ func parseClamAV(out []byte, root string) ([]protocol.Finding, error) {
 		fs = append(fs, ruleAV.Finding(protocol.Evidence{Path: rel, Snippet: protocol.Snippet(rec[i+2:])}))
 	}
 	if pending != "" {
-		return nil, errors.New("output has a line that is not a hit")
+		return fs, errors.New("output has a line that is not a hit")
 	}
 	return fs, nil
 }

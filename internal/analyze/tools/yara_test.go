@@ -34,6 +34,12 @@ func TestYARA(t *testing.T) {
 			wantFindings: []string{"GAL-YARA-001 scripts/setup.js Suspicious_Script"},
 		},
 		{name: "no match is a clean scan", fake: fakeRun{}},
+		{name: "a lot of stderr does not break a clean scan", fake: fakeRun{err: strings.Repeat("warning: slowing down scanning\n", 300)}},
+		{
+			name:         "a lot of stderr does not break a match",
+			fake:         fakeRun{out: "Rule_A %ROOT%/a\n", err: strings.Repeat("warning: slowing down scanning\n", 300)},
+			wantFindings: []string{"GAL-YARA-001 a Rule_A"},
+		},
 		{name: "missing rules", noRules: true, wantErr: "no rules at"},
 		{name: "missing binary", noBinary: true, wantErr: "yara is not installed"},
 		{name: "output over the cap kills the tool", fake: fakeRun{mode: "flood"}, wantErr: "output is over"},
@@ -93,12 +99,12 @@ func TestYARA(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), cmp.Or(tt.budget, time.Minute))
 			defer cancel()
 
-			fs, err := tools.NewYARA(rules).Run(ctx, target)
+			res, err := tools.NewYARA(rules).Run(ctx, target)
 
 			if (err != nil) != (tt.wantErr != "") || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("error = %v, want %q", err, tt.wantErr)
 			}
-			if got := format(fs); !slices.Equal(got, tt.wantFindings) {
+			if got := format(res.Findings); !slices.Equal(got, tt.wantFindings) {
 				t.Errorf("findings = %q, want %q", got, tt.wantFindings)
 			}
 			if tt.wantFlags != nil {

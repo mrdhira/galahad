@@ -34,7 +34,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	image := fs.String("image", "core", "guest image: core or re")
-	timeout := fs.Duration("timeout", 0, "time limit of the whole scan (default 10m for core, 20m for re)")
+	timeout := fs.Duration("timeout", 0, "time limit of the whole scan; 0 means the default of the image (10m for core, 20m for re)")
 	cpus := fs.Int("cpus", defaultCPUs, "virtual CPUs of the guest")
 	memory := fs.Int("memory", defaultMemoryMiB, "memory of the guest in MiB")
 	noNetwork := fs.Bool("no-network", false, "give the sandbox no network at all, not even through the proxy")

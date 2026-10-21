@@ -33,26 +33,27 @@ func NewYARA(rules string) Tool { return yara{rules: rules} }
 func (yara) Name() string  { return "yara" }
 func (yara) Stage() string { return protocol.StageYARA }
 
-func (y yara) Run(ctx context.Context, target string) ([]protocol.Finding, error) {
+func (y yara) Run(ctx context.Context, target string) (Result, error) {
 	if info, err := os.Stat(y.rules); err != nil || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("no rules at %s", protocol.CleanPath(y.rules))
+		return Result{}, fmt.Errorf("no rules at %s", protocol.CleanPath(y.rules))
 	}
 	bin, err := exec.LookPath("yara")
 	if err != nil {
-		return nil, fmt.Errorf("yara is not installed: %w", err)
+		return Result{}, fmt.Errorf("yara is not installed: %w", err)
 	}
 	root, err := scanRoot(target)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	out, err := execute(ctx, yaraTimeout, bin, "-C", "-N", "-r", "-f", y.rules, root)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if out.code != 0 {
-		return nil, exitError(out)
+		return Result{}, exitError(out)
 	}
-	return parseYARA(out.stdout, root)
+	fs, err := parseYARA(out.stdout, root)
+	return Result{Findings: fs}, err
 }
 
 // parseYARA reads the lines "<rule> <path>" of yara. A rule name has no space, so the path

@@ -13,12 +13,14 @@ func TestMemoryLimit(t *testing.T) {
 		// inputs
 		ram        uint64
 		gomemlimit bool
+		guest      bool
 		flag       int64
 		// expectations
 		wantLimit int64
 		wantSet   bool
 	}{
-		{name: "50% of the memory", ram: 4 * gib, wantLimit: 2 * gib, wantSet: true},
+		{name: "75% of the memory", ram: 4 * gib, wantLimit: 3 * gib, wantSet: true},
+		{name: "50% of the memory in guest mode", ram: 4 * gib, guest: true, wantLimit: 2 * gib, wantSet: true},
 		{name: "the flag overrides the default", ram: 4 * gib, flag: 100 << 20, wantLimit: 100 << 20, wantSet: true},
 		{name: "the flag overrides GOMEMLIMIT", ram: 4 * gib, gomemlimit: true, flag: 100 << 20, wantLimit: 100 << 20, wantSet: true},
 		{name: "the flag may exceed the 4 GiB ceiling", ram: 64 * gib, flag: 8 * gib, wantLimit: 8 * gib, wantSet: true},
@@ -26,17 +28,17 @@ func TestMemoryLimit(t *testing.T) {
 		{name: "GOMEMLIMIT is left alone when the memory is unknown", gomemlimit: true, wantSet: false},
 		{name: "unknown memory falls back to 2 GiB", wantLimit: 2 * gib, wantSet: true},
 		{name: "the default is capped at 4 GiB", ram: 64 * gib, wantLimit: 4 * gib, wantSet: true},
-		{name: "5 GiB stays under the cap", ram: 5 * gib, wantLimit: 5 * gib / 2, wantSet: true},
-		{name: "8 GiB reaches the cap", ram: 8 * gib, wantLimit: 4 * gib, wantSet: true},
-		{name: "10 GiB would pass the cap", ram: 10 * gib, wantLimit: 4 * gib, wantSet: true},
+		{name: "5 GiB stays under the cap", ram: 5 * gib, wantLimit: 15 * gib / 4, wantSet: true},
+		{name: "6 GiB would pass the cap", ram: 6 * gib, wantLimit: 4 * gib, wantSet: true},
+		{name: "guest mode is capped at 4 GiB", ram: 10 * gib, guest: true, wantLimit: 4 * gib, wantSet: true},
 		{name: "a huge memory does not overflow", ram: 1<<64 - 1, wantLimit: 4 * gib, wantSet: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limit, set := agent.MemoryLimit(tt.ram, tt.gomemlimit, tt.flag)
+			limit, set := agent.MemoryLimit(tt.ram, tt.gomemlimit, tt.guest, tt.flag)
 
 			if limit != tt.wantLimit || set != tt.wantSet {
-				t.Errorf("MemoryLimit(%d, %v, %d) = %d, %v, want %d, %v", tt.ram, tt.gomemlimit, tt.flag, limit, set, tt.wantLimit, tt.wantSet)
+				t.Errorf("MemoryLimit(%d, %v, %v, %d) = %d, %v, want %d, %v", tt.ram, tt.gomemlimit, tt.guest, tt.flag, limit, set, tt.wantLimit, tt.wantSet)
 			}
 		})
 	}

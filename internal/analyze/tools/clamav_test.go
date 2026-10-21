@@ -24,7 +24,8 @@ func TestClamAV(t *testing.T) {
 		budget    time.Duration // time the job has left; a generous one when zero
 		wantFlags []string      // arguments the scanner must get; "ROOT" stands for the target
 		// expectations
-		wantFindings []string
+		wantFindings []string // "%ROOTNAME%" stands for the name of the target
+		wantNote     string
 		wantErr      string
 	}{
 		{
@@ -34,12 +35,23 @@ func TestClamAV(t *testing.T) {
 			wantFindings: []string{"GAL-AV-001 scripts/setup.js Win.Test.Sample-1"},
 		},
 		{name: "no hit is a clean scan", fake: fakeRun{}},
+		{name: "a lot of stderr does not break a clean scan", fake: fakeRun{err: strings.Repeat("LibClamAV Warning: odd\n", 400)}},
+		{
+			name:         "a lot of stderr does not break a hit",
+			fake:         fakeRun{out: "%ROOT%/a: Sig.One-1 FOUND\n", exit: 1, err: strings.Repeat("LibClamAV Warning: odd\n", 400)},
+			wantFindings: []string{"GAL-AV-001 a Sig.One-1"},
+		},
 		{name: "missing signatures", noSigs: true, wantErr: "no signatures in"},
 		{name: "missing binary", noBinary: true, wantErr: "clamscan is not installed"},
 		{name: "output over the cap kills the tool", fake: fakeRun{mode: "flood"}, wantErr: "output is over"},
 		{name: "a hang ends at the time limit", fake: fakeRun{mode: "hang"}, budget: 300 * time.Millisecond, wantErr: "timed out"},
 		{name: "exit 0 with output is not trusted", fake: fakeRun{out: "%ROOT%/a: Sig FOUND\n"}, wantErr: "exit 0 with output"},
-		{name: "exit 1 without a hit is not trusted", fake: fakeRun{exit: 1}, wantErr: "exit 1 without a hit"},
+		{
+			name:         "exit 1 without a hit still reports the hit on the target",
+			fake:         fakeRun{exit: 1},
+			wantFindings: []string{"GAL-AV-001 %ROOTNAME% unparsed clamscan hit"},
+			wantNote:     "exit 1 without a hit",
+		},
 		{
 			name:         "two hits and a file with spaces",
 			fake:         fakeRun{out: "%ROOT%/a b.exe: Sig.One-1 FOUND\n%ROOT%/c/d.dll: Sig.Two-2 FOUND\n", exit: 1},
@@ -71,9 +83,36 @@ func TestClamAV(t *testing.T) {
 			fileScan:     true,
 			wantFindings: []string{"GAL-AV-001 payload.bin Sig.One-1"},
 		},
-		{name: "a path outside the target", fake: fakeRun{out: "/etc/passwd: Sig.One-1 FOUND\n", exit: 1}, wantErr: "not a hit"},
-		{name: "a line that is not a hit", fake: fakeRun{out: "%ROOT%/a: Sig.One-1 FOUND\nWARNING: odd\n", exit: 1}, wantErr: "does not end in FOUND"},
-		{name: "a signature with a space", fake: fakeRun{out: "%ROOT%/a: Sig One FOUND\n", exit: 1}, wantErr: "not a hit"},
+		{
+			name:         "a path outside the target",
+			fake:         fakeRun{out: "/etc/passwd: Sig.One-1 FOUND\n", exit: 1},
+			wantFindings: []string{"GAL-AV-001 %ROOTNAME% unparsed clamscan hit"},
+			wantNote:     "not a hit",
+		},
+		{
+			name:         "a line that is not a hit keeps the hits before it",
+			fake:         fakeRun{out: "%ROOT%/a: Sig.One-1 FOUND\nWARNING: odd\n", exit: 1},
+			wantFindings: []string{"GAL-AV-001 a Sig.One-1", "GAL-AV-001 %ROOTNAME% unparsed clamscan hit"},
+			wantNote:     "does not end in FOUND",
+		},
+		{
+			name:         "a signature with a space",
+			fake:         fakeRun{out: "%ROOT%/a: Sig One FOUND\n", exit: 1},
+			wantFindings: []string{"GAL-AV-001 %ROOTNAME% unparsed clamscan hit"},
+			wantNote:     "not a hit",
+		},
+		{
+			name:         "a directory named to look like a hit does not hide the real one",
+			fake:         fakeRun{out: "%ROOT%/d: X FOUND\nz/m: Real.Sig FOUND\n", exit: 1},
+			wantFindings: []string{"GAL-AV-001 d X", "GAL-AV-001 %ROOTNAME% unparsed clamscan hit"},
+			wantNote:     "not a hit",
+		},
+		{
+			name:         "a file named to look like a hit does not hide the real one",
+			fake:         fakeRun{out: "%ROOT%/a: X FOUND\nb: Real.Sig FOUND\n", exit: 1},
+			wantFindings: []string{"GAL-AV-001 a X", "GAL-AV-001 %ROOTNAME% unparsed clamscan hit"},
+			wantNote:     "not a hit",
+		},
 		{name: "a crash", fake: fakeRun{exit: 2, err: "ERROR: Can't open database\nmore"}, wantErr: "exited with code 2: ERROR: Can't open database"},
 		{name: "a hit is not trusted when the exit code says error", fake: fakeRun{out: "%ROOT%/a: Sig.One-1 FOUND\n", exit: 2}, wantErr: "exited with code 2"},
 	}
@@ -99,13 +138,20 @@ func TestClamAV(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), cmp.Or(tt.budget, time.Minute))
 			defer cancel()
 
-			fs, err := tools.NewClamAV(db).Run(ctx, target)
+			res, err := tools.NewClamAV(db).Run(ctx, target)
 
 			if (err != nil) != (tt.wantErr != "") || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("error = %v, want %q", err, tt.wantErr)
 			}
-			if got := format(fs); !slices.Equal(got, tt.wantFindings) {
-				t.Errorf("findings = %q, want %q", got, tt.wantFindings)
+			want := slices.Clone(tt.wantFindings)
+			for i := range want {
+				want[i] = strings.ReplaceAll(want[i], "%ROOTNAME%", filepath.Base(target))
+			}
+			if got := format(res.Findings); !slices.Equal(got, want) {
+				t.Errorf("findings = %q, want %q", got, want)
+			}
+			if !strings.Contains(res.Note, tt.wantNote) || (tt.wantNote == "" && res.Note != "") {
+				t.Errorf("note = %q, want %q", res.Note, tt.wantNote)
 			}
 			if tt.wantFlags != nil {
 				args, err := os.ReadFile(argsFile)

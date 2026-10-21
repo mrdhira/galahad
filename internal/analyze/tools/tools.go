@@ -43,7 +43,15 @@ type Tool interface {
 	Stage() string
 	// Run scans target, a file or a directory, within ctx. Evidence paths are relative to the
 	// target and cleaned. An error means the tool did not scan, and says why.
-	Run(ctx context.Context, target string) ([]protocol.Finding, error)
+	Run(ctx context.Context, target string) (Result, error)
+}
+
+// Result is what a tool that scanned found.
+type Result struct {
+	Findings []protocol.Finding
+	// Note is a problem that did not stop the scan, such as output that did not parse in full.
+	// It goes to tools.log.
+	Note string
 }
 
 // registered holds one constructor per tool, so that a tool picks up sigRoot when All is
@@ -62,7 +70,8 @@ func All() []Tool {
 
 // Apply runs the tools one after the other within ctx, which holds what is left of the job
 // time, and adds what they find to res. A tool that ran is added to res.Coverage.Analyzers.
-// progress gets the stage of each tool before it runs. The returned bytes are tools.log, with
+// A tool that is left out marks the coverage truncated, which lowers the confidence of a clean
+// verdict without making it suspicious. progress gets the stage of each tool before it runs. The returned bytes are tools.log, with
 // one line per tool.
 func Apply(ctx context.Context, ts []Tool, target string, res *protocol.Result, progress func(stage string) error) ([]byte, error) {
 	var log bytes.Buffer
@@ -70,15 +79,19 @@ func Apply(ctx context.Context, ts []Tool, target string, res *protocol.Result, 
 		if err := progress(t.Stage()); err != nil {
 			return log.Bytes(), err
 		}
-		fs, err := t.Run(ctx, target)
+		r, err := t.Run(ctx, target)
 		if err != nil {
 			fmt.Fprintf(&log, "%s: left out: %s\n", t.Name(), protocol.CleanPath(err.Error()))
+			res.Coverage.Truncated = true
 			continue
 		}
-		analyze.AddFindings(res, t.Name(), fs)
+		analyze.AddFindings(res, t.Name(), r.Findings)
 		res.Coverage.Analyzers = append(res.Coverage.Analyzers, t.Name())
 		slices.Sort(res.Coverage.Analyzers)
-		fmt.Fprintf(&log, "%s: ok, %d findings\n", t.Name(), len(fs))
+		fmt.Fprintf(&log, "%s: ok, %d findings\n", t.Name(), len(r.Findings))
+		if r.Note != "" {
+			fmt.Fprintf(&log, "%s: note: %s\n", t.Name(), protocol.CleanPath(r.Note))
+		}
 	}
 	return log.Bytes()[:min(log.Len(), maxLog)], nil
 }
@@ -100,6 +113,7 @@ func execute(ctx context.Context, limit time.Duration, path string, args ...stri
 	cmd := exec.CommandContext(ctx, path, args...) // #nosec G204 -- the program is found on PATH of the guest image and the arguments are fixed or absolute paths
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	cmd.WaitDelay = waitDelay
+	ownGroup(cmd)
 	out := &capped{max: maxOutput, stop: cancel}
 	errb := &capped{max: maxStderr}
 	cmd.Stdout, cmd.Stderr = out, errb
@@ -121,8 +135,10 @@ func execute(ctx context.Context, limit time.Duration, path string, args ...stri
 	return output{stdout: out.buf.Bytes(), stderr: errb.buf.String()}, nil
 }
 
-// capped keeps the first max bytes written to it and swallows the rest. When more arrives it
-// calls stop, which kills the tool, and sets over.
+// capped keeps the first max bytes written to it and drops the rest. It always reports the whole
+// write as done, so the copy from the tool never stops early and the tool never gets a broken
+// pipe. When more than max arrives and stop is set, it calls stop, which kills the tool, and
+// sets over.
 type capped struct {
 	buf  bytes.Buffer
 	max  int
@@ -131,16 +147,17 @@ type capped struct {
 }
 
 func (c *capped) Write(p []byte) (int, error) {
+	n := len(p)
 	room := c.max - c.buf.Len()
-	if len(p) > room {
-		c.over = true
+	if n > room {
 		if c.stop != nil {
+			c.over = true
 			c.stop()
 		}
 		p = p[:room]
 	}
 	c.buf.Write(p)
-	return len(p), nil
+	return n, nil
 }
 
 // relPath makes path, which a tool printed for a file under root, relative to the target and
