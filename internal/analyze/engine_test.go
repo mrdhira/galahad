@@ -1187,3 +1187,93 @@ func TestRunBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestRunCaps(t *testing.T) {
+	over := protocol.MaxSkipped + 100
+	tests := []struct {
+		name string
+		// inputs
+		setup     func(t *testing.T, dir string) string
+		analyzers []analyze.Analyzer
+		// expectations
+		wantSkips     int
+		wantLastSkip  protocol.Skip
+		wantEvidence  int
+		wantTruncated bool
+	}{
+		{
+			name: "a flood of symlinks ends in one budget skip",
+			setup: func(t *testing.T, dir string) string {
+				for i := range over {
+					if err := os.Symlink("nowhere", filepath.Join(dir, fmt.Sprintf("l%06d", i))); err != nil {
+						t.Skipf("symlinks not available: %v", err)
+					}
+				}
+				return dir
+			},
+			analyzers:     []analyze.Analyzer{nothing},
+			wantSkips:     protocol.MaxSkipped,
+			wantLastSkip:  protocol.Skip{Path: fmt.Sprintf("l%06d", protocol.MaxSkipped-1), Reason: protocol.SkipBudget},
+			wantTruncated: true,
+		},
+		{
+			name: "a flood of skips from an analyzer ends in one budget skip",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.txt", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "skips", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
+				var out analyze.Output
+				for i := range over {
+					out.Skips = append(out.Skips, protocol.Skip{Path: fmt.Sprintf("a.txt!/m%06d", i), Reason: protocol.SkipUnsupported})
+				}
+				return out, nil
+			}}},
+			wantSkips:     protocol.MaxSkipped,
+			wantLastSkip:  protocol.Skip{Path: fmt.Sprintf("a.txt!/m%06d", protocol.MaxSkipped-1), Reason: protocol.SkipBudget},
+			wantTruncated: true,
+		},
+		{
+			name: "evidence past the cap is cut",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.txt", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "ev", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
+				fd := finding("GAL-T-001", protocol.SeverityLow, f.Path, 1, "x")
+				fd.Evidence = slices.Repeat(fd.Evidence, protocol.MaxEvidence+3)
+				return analyze.Output{Findings: []protocol.Finding{fd}}, nil
+			}}},
+			wantEvidence: protocol.MaxEvidence,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := tt.setup(t, t.TempDir())
+
+			res, err := analyze.Run(context.Background(), target, tt.analyzers)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			sk := res.Coverage.Skipped
+			if tt.wantSkips > 0 {
+				if len(sk) != tt.wantSkips || sk[len(sk)-1] != tt.wantLastSkip {
+					t.Errorf("%d skips, last %+v; want %d, last %+v", len(sk), sk[len(sk)-1], tt.wantSkips, tt.wantLastSkip)
+				}
+			}
+			if res.Coverage.Truncated != tt.wantTruncated {
+				t.Errorf("Truncated = %v, want %v", res.Coverage.Truncated, tt.wantTruncated)
+			}
+			if tt.wantEvidence > 0 {
+				if n := len(res.Findings[0].Evidence); n != tt.wantEvidence {
+					t.Errorf("%d evidence entries, want %d", n, tt.wantEvidence)
+				}
+			}
+			res.Tool = protocol.Tool{Name: "t", Version: "v"}
+			if err := res.Validate(); err != nil {
+				t.Errorf("result does not validate: %v", err)
+			}
+		})
+	}
+}

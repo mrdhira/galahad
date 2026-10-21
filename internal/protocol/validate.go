@@ -57,6 +57,18 @@ func (r *Result) Validate() error {
 	if len(r.IOCs) > MaxIOCs {
 		return fmt.Errorf("%d iocs, max %d", len(r.IOCs), MaxIOCs)
 	}
+	if len(r.Files) > MaxFiles {
+		return fmt.Errorf("%d files, max %d", len(r.Files), MaxFiles)
+	}
+	if len(r.Coverage.Skipped) > MaxSkipped {
+		return fmt.Errorf("%d skipped, max %d", len(r.Coverage.Skipped), MaxSkipped)
+	}
+	if len(r.Coverage.Analyzers) > MaxAnalyzers {
+		return fmt.Errorf("%d analyzers, max %d", len(r.Coverage.Analyzers), MaxAnalyzers)
+	}
+	if len(r.Reasons) > MaxReasonCount {
+		return fmt.Errorf("%d reasons, max %d", len(r.Reasons), MaxReasonCount)
+	}
 	for i, f := range r.Files {
 		if err := checkPath(f.Path); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
@@ -126,6 +138,9 @@ func (f Finding) validate() error {
 	}
 	if len(f.Evidence) == 0 {
 		return errors.New("no evidence")
+	}
+	if len(f.Evidence) > MaxEvidence {
+		return fmt.Errorf("%d evidence entries, max %d", len(f.Evidence), MaxEvidence)
 	}
 	for i, e := range f.Evidence {
 		if err := checkPath(e.Path); err != nil {

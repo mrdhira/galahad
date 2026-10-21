@@ -154,6 +154,7 @@ func Apply(res *protocol.Result) {
 	res.Score = score
 	res.Confidence = conf
 	res.ConfidenceLevel = level(conf)
+	reasons = reasons[:min(len(reasons), protocol.MaxReasonCount)]
 	for i, r := range reasons {
 		reasons[i] = limit(r)
 	}

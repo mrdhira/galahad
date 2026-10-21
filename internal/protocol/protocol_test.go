@@ -2,7 +2,9 @@ package protocol_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +112,16 @@ func TestValidate(t *testing.T) {
 		{name: "confidence above 100", mutate: func(r *protocol.Result) { r.Confidence = 101 }, wantErr: "confidence "},
 		{name: "too many findings", mutate: func(r *protocol.Result) { manyFindings(r, protocol.MaxFindings+1) }, wantErr: "findings, max"},
 		{name: "too many iocs", mutate: func(r *protocol.Result) { r.IOCs = make([]protocol.IOC, protocol.MaxIOCs+1) }, wantErr: "iocs, max"},
+		{name: "too many files", mutate: func(r *protocol.Result) { r.Files = make([]protocol.FileInfo, protocol.MaxFiles+1) }, wantErr: "files, max"},
+		{name: "too many skipped", mutate: func(r *protocol.Result) { r.Coverage.Skipped = make([]protocol.Skip, protocol.MaxSkipped+1) }, wantErr: "skipped, max"},
+		{name: "too many analyzers", mutate: func(r *protocol.Result) { r.Coverage.Analyzers = make([]string, protocol.MaxAnalyzers+1) }, wantErr: "analyzers, max"},
+		{name: "too many reasons", mutate: func(r *protocol.Result) { r.Reasons = make([]string, protocol.MaxReasonCount+1) }, wantErr: "reasons, max"},
+		{name: "files at the limit", mutate: func(r *protocol.Result) {
+			r.Files = slices.Repeat(r.Files, protocol.MaxFiles)
+			r.Coverage.Skipped = slices.Repeat(r.Coverage.Skipped, protocol.MaxSkipped)
+			r.Coverage.Analyzers = slices.Repeat(r.Coverage.Analyzers, protocol.MaxAnalyzers)
+			r.Reasons = slices.Repeat(r.Reasons, protocol.MaxReasonCount)
+		}},
 		{name: "file path empty", mutate: func(r *protocol.Result) { r.Files[0].Path = "" }, wantErr: "files[0]: path is empty"},
 		{name: "file kind has control character", mutate: func(r *protocol.Result) { r.Files[0].Kind = "a\x1b" }, wantErr: "files[0]: kind"},
 		{name: "rule id malformed", mutate: func(r *protocol.Result) { r.Findings[0].RuleID = "gal-exec-1" }, wantErr: "rule_id"},
@@ -122,6 +134,12 @@ func TestValidate(t *testing.T) {
 		{name: "title has control character", mutate: func(r *protocol.Result) { r.Findings[0].Title = "a\x1bb" }, wantErr: "title"},
 		{name: "title has bidi character", mutate: func(r *protocol.Result) { r.Findings[0].Title = "a\u202eb" }, wantErr: "title"},
 		{name: "no evidence", mutate: func(r *protocol.Result) { r.Findings[0].Evidence = nil }, wantErr: "no evidence"},
+		{name: "evidence at the limit", mutate: func(r *protocol.Result) {
+			r.Findings[0].Evidence = slices.Repeat(r.Findings[0].Evidence, protocol.MaxEvidence)
+		}},
+		{name: "too many evidence entries", mutate: func(r *protocol.Result) {
+			r.Findings[0].Evidence = slices.Repeat(r.Findings[0].Evidence, protocol.MaxEvidence+1)
+		}, wantErr: "9 evidence entries, max 8"},
 		{name: "evidence path empty", mutate: func(r *protocol.Result) { r.Findings[0].Evidence[0].Path = "" }, wantErr: "path is empty"},
 		{name: "evidence path too long", mutate: func(r *protocol.Result) { r.Findings[0].Evidence[0].Path = strings.Repeat("a", protocol.MaxPath+1) }, wantErr: "max 1024"},
 		{name: "evidence path has NUL", mutate: func(r *protocol.Result) { r.Findings[0].Evidence[0].Path = "a\x00b" }, wantErr: "NUL"},
@@ -241,6 +259,64 @@ func TestSkipUnreadAndHidesContent(t *testing.T) {
 			if s.Unread() != tt.wantUnread || s.HidesContent() != tt.wantHides {
 				t.Errorf("Unread() = %v, HidesContent() = %v, want %v, %v", s.Unread(), s.HidesContent(), tt.wantUnread, tt.wantHides)
 			}
+		})
+	}
+}
+
+func TestWorstCaseResultSize(t *testing.T) {
+	// Every list is full and every bounded string is at its limit. Strings with no
+	// cap of their own (title, tool, kind) get a realistic length. Equal strings share
+	// their memory, which keeps the test cheap without changing the encoded size; 100
+	// rules with 20 findings each stay within the per-rule, per-file limit.
+	path := strings.Repeat("p", protocol.MaxPath)
+	snippet := strings.Repeat("é", protocol.MaxSnippet)
+	tests := []struct {
+		name string
+		// expectations
+		wantMax int
+	}{
+		{name: "fits the Result frame", wantMax: 64 << 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := validResult()
+			r.Files = make([]protocol.FileInfo, protocol.MaxFiles)
+			for i := range r.Files {
+				r.Files[i] = protocol.FileInfo{Path: path, Size: 1 << 40, Kind: "executable", SHA256: strings.Repeat("f", 64), Entropy: 7.123456789012345}
+			}
+			r.Findings = make([]protocol.Finding, protocol.MaxFindings)
+			for i := range r.Findings {
+				ev := make([]protocol.Evidence, protocol.MaxEvidence)
+				for k := range ev {
+					ev[k] = protocol.Evidence{Path: path, Line: 1 << 30, Snippet: snippet}
+				}
+				f := testRule.Finding(ev...)
+				f.RuleID = fmt.Sprintf("GAL-EXEC-%03d", i%100)
+				f.Title = strings.Repeat("t", 100)
+				f.Analyzer = "autoexec"
+				r.Findings[i] = f
+			}
+			r.IOCs = make([]protocol.IOC, protocol.MaxIOCs)
+			for i := range r.IOCs {
+				r.IOCs[i] = protocol.IOC{Type: "url", Value: strings.Repeat("u", protocol.MaxPath), Path: path, Line: 1 << 30}
+			}
+			r.Coverage.Skipped = make([]protocol.Skip, protocol.MaxSkipped)
+			for i := range r.Coverage.Skipped {
+				r.Coverage.Skipped[i] = protocol.Skip{Path: path, Reason: protocol.SkipUnsupported}
+			}
+			r.Coverage.Analyzers = slices.Repeat([]string{strings.Repeat("a", 32)}, protocol.MaxAnalyzers)
+			r.Reasons = slices.Repeat([]string{strings.Repeat("é", protocol.MaxReason)}, protocol.MaxReasonCount)
+			if err := r.Validate(); err != nil {
+				t.Fatalf("worst-case result is not valid: %v", err)
+			}
+			data, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(data) >= tt.wantMax {
+				t.Errorf("worst-case result is %d bytes, want under %d", len(data), tt.wantMax)
+			}
+			t.Logf("worst-case result: %d bytes", len(data))
 		})
 	}
 }

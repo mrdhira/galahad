@@ -1,6 +1,7 @@
 package scoring_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -481,6 +482,36 @@ func TestApplyReasonLength(t *testing.T) {
 			res.Findings = nil // the test path is deliberately unclean; only the reasons must validate
 			if err := res.Validate(); err != nil {
 				t.Errorf("does not validate: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyReasonCount(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		rules int
+		// expectations
+		wantReasons int
+	}{
+		{name: "one hard trigger per critical rule, cut at the cap", rules: protocol.MaxReasonCount + 50, wantReasons: protocol.MaxReasonCount},
+		{name: "under the cap nothing is cut", rules: 3, wantReasons: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := protocol.Result{Coverage: protocol.Coverage{FilesSeen: 1, FilesAnalyzed: 1}}
+			for i := range tt.rules {
+				res.Findings = append(res.Findings, finding(fmt.Sprintf("GAL-T-%03d", i), protocol.SeverityCritical, "a", "f", 1))
+			}
+
+			scoring.Apply(&res)
+
+			if len(res.Reasons) != tt.wantReasons {
+				t.Errorf("%d reasons, want %d", len(res.Reasons), tt.wantReasons)
+			}
+			if res.Verdict != protocol.VerdictMalicious {
+				t.Errorf("verdict = %q, want malicious", res.Verdict)
 			}
 		})
 	}

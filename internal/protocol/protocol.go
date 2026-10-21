@@ -41,6 +41,17 @@ const (
 	MaxIOCs                   = 1000
 	MaxSnippet                = 200  // runes
 	MaxPath                   = 1024 // bytes
+	MaxEvidence               = 8    // entries per finding; the producers emit at most 3
+
+	// The caps below keep a worst-case Result under the 64 MiB Result frame.
+	// MaxFiles is analyze.MaxFiles + analyze.MaxExtraFiles (20 000 + 2 000); protocol
+	// must not import analyze, so the sum is repeated here. Files, skips, findings
+	// and evidence at their caps with paths and snippets at their limits come to
+	// about 63 MiB (TestWorstCaseResultSize), so MaxSkipped is lower than MaxFiles.
+	MaxFiles       = 22000
+	MaxSkipped     = 13000
+	MaxAnalyzers   = 32  // the engine has about a dozen, plus the guest tools
+	MaxReasonCount = 128 // one per critical rule, plus a few fixed lines
 )
 
 // Severity is the impact level of a rule.

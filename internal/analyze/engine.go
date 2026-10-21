@@ -122,6 +122,7 @@ type job struct {
 	extraBytes int64 // their size
 	extraFull  bool  // an extra file was refused for want of allowance
 	memberCut  bool  // a member past the file cap was dropped, and a skip says so
+	skipsFull  bool  // the skip list is at protocol.MaxSkipped and ends in a budget skip
 }
 
 func newJob(analyzers []Analyzer, lim Limits) *job {
@@ -477,6 +478,7 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 			continue
 		}
 		fd.Analyzer = analyzer
+		fd.Evidence = fd.Evidence[:min(len(fd.Evidence), protocol.MaxEvidence)]
 		if len(j.res.Findings) >= protocol.MaxFindings {
 			j.res.Coverage.Truncated = true
 			if !j.evictFor(fd) {
@@ -503,7 +505,9 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 			j.admit()
 		}
 	}
-	j.res.Coverage.Skipped = append(j.res.Coverage.Skipped, out.Skips...)
+	for _, s := range out.Skips {
+		j.addSkip(s)
+	}
 	for _, c := range out.Children {
 		// Extractors on Windows split member names at a backslash, and any extractor
 		// ignores empty and "." segments, so path rules must see the same path.
@@ -581,7 +585,23 @@ func (j *job) dropMember(path string) {
 }
 
 func (j *job) skip(path, reason string) {
-	j.res.Coverage.Skipped = append(j.res.Coverage.Skipped, protocol.Skip{Path: path, Reason: reason})
+	j.addSkip(protocol.Skip{Path: path, Reason: reason})
+}
+
+// addSkip records a skip. The list holds at most protocol.MaxSkipped entries: the
+// first skip that does not fit becomes one budget skip, at its path, and later
+// ones are dropped. A budget skip hides content, so a clean verdict turns suspicious.
+func (j *job) addSkip(s protocol.Skip) {
+	c := &j.res.Coverage
+	switch {
+	case j.skipsFull:
+		return
+	case len(c.Skipped) >= protocol.MaxSkipped-1:
+		j.skipsFull = true
+		c.Truncated = true
+		s.Reason = protocol.SkipBudget
+	}
+	c.Skipped = append(c.Skipped, s)
 }
 
 func (j *job) finish() protocol.Result {
