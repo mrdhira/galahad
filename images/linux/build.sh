@@ -62,6 +62,14 @@ build_image() {
 	export DEB_CACHE=$CACHE/debs
 	write_sources "$WORK/chroot.sources" deb
 	packages=$(paste -sd, "$here/packages-$name.txt")
+	# The Java packages register man page alternatives under /usr/share/man/man1, which the
+	# path-exclude below leaves out, so their postinst fails unless the directory exists.
+	# Only the re image gets it, so the core image bytes stay the same.
+	local extra=()
+	if [ "$name" = re ]; then
+		# shellcheck disable=SC2016 # $1 is expanded by the hook's own shell
+		extra=(--essential-hook='mkdir -p "$1/usr/share/man/man1"')
+	fi
 	# The hooks run in a shell of their own, which expands $1 (the new root) and $DEB_CACHE.
 	# shellcheck disable=SC2016
 	mmdebstrap --mode=root --variant=minbase --architectures=amd64 \
@@ -75,6 +83,7 @@ build_image() {
 		--dpkgopt='path-exclude=/usr/share/lintian/*' \
 		--setup-hook='mkdir -p "$1/var/cache/apt/archives" && cp -a "$DEB_CACHE/." "$1/var/cache/apt/archives/"' \
 		--customize-hook='cp -u "$1"/var/cache/apt/archives/*.deb "$DEB_CACHE/"' \
+		"${extra[@]}" \
 		trixie "$rootfs" "$WORK/chroot.sources"
 
 	if [ "$name" = re ]; then
