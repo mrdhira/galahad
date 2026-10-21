@@ -53,13 +53,21 @@ jobs:
 
       - name: Build the core image
         run: |
+          # The last lines also go to annotations, which can be read without the job log.
+          set -o pipefail
           docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
-            "$BUILD_IMAGE" bash images/linux/build.sh core
+            "$BUILD_IMAGE" bash images/linux/build.sh core 2>&1 | tee core.log && exit 0
+          tail -n 25 core.log | sed 's/^/::error::/'
+          exit 1
 
       - name: Build the kernel
         run: |
+          # The last lines also go to annotations, which can be read without the job log.
+          set -o pipefail
           docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
-            "$BUILD_IMAGE" bash images/linux/kernel/build.sh
+            "$BUILD_IMAGE" bash images/linux/kernel/build.sh 2>&1 | tee kernel.log && exit 0
+          tail -n 25 kernel.log | sed 's/^/::error::/'
+          exit 1
 
       # Saved only after both builds worked, so a failed build cannot leave a half-filled cache behind.
       - if: steps.cache.outputs.cache-hit != 'true'
