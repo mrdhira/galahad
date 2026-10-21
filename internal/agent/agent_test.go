@@ -3,6 +3,7 @@ package agent_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -282,6 +283,58 @@ func TestRunAnalyze(t *testing.T) {
 				if st, err := os.Stat(report); err != nil || st.Mode().Perm() != 0o600 {
 					t.Errorf("report stat = %v, %v, want mode 0600", st, err)
 				}
+			}
+		})
+	}
+}
+
+func TestRunAnalyzeLimitDivisor(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		flags []string
+		files int
+		// expectations
+		wantCode      int
+		wantTruncated bool
+		wantStderr    string
+	}{
+		{name: "no flag keeps the default limits", files: 8, wantCode: agent.ExitClean},
+		{name: "a divisor lowers the file cap", flags: []string{"--limit-divisor", "4000"}, files: 8, wantCode: agent.ExitClean, wantTruncated: true},
+		{name: "a divisor of 1 changes nothing", flags: []string{"--limit-divisor", "1"}, files: 8, wantCode: agent.ExitClean},
+		{name: "a divisor below 1 is a usage error", flags: []string{"--limit-divisor", "0"}, files: 1, wantCode: agent.ExitUsage, wantStderr: "limit-divisor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			target := filepath.Join(tmp, "target")
+			for i := range tt.files {
+				mustWrite(t, filepath.Join(target, fmt.Sprintf("f%d.txt", i)), "hello\n")
+			}
+			out := filepath.Join(tmp, "out")
+			args := append([]string{"analyze"}, tt.flags...)
+			args = append(args, "-o", out, target)
+			var stdout, stderr bytes.Buffer
+
+			code := agent.RunWithEnv(args, &stdout, &stderr, agent.Env{DetectVM: func() (bool, string) { return true, "test" }})
+
+			if code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tt.wantCode, stderr.String())
+			}
+			checkOutput(t, "stderr", stderr.String(), tt.wantStderr)
+			if tt.wantCode == agent.ExitUsage {
+				return
+			}
+			b, err := os.ReadFile(filepath.Join(out, "report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var res protocol.Result
+			if err := json.Unmarshal(b, &res); err != nil {
+				t.Fatal(err)
+			}
+			if res.Coverage.Truncated != tt.wantTruncated {
+				t.Errorf("truncated = %v, want %v", res.Coverage.Truncated, tt.wantTruncated)
 			}
 		})
 	}

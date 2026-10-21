@@ -34,3 +34,36 @@ const maxFilesSeen = MaxFiles * 10
 
 // identifyWindow is how many leading bytes identify a file too large to keep.
 const identifyWindow = 4096
+
+// Limits are the caps the engine enforces on one job. They have the same meaning
+// as the constants above, and DefaultLimits returns those. MaxFilesSeen is where
+// counting stops.
+type Limits struct {
+	MaxFileSize   int64
+	MaxTotalBytes int64
+	MaxFiles      int
+	MaxFilesSeen  int
+	MaxExtraFiles int
+	MaxExtraBytes int64
+}
+
+// DefaultLimits returns the limits a job runs with unless WithLimits says otherwise.
+func DefaultLimits() Limits {
+	return Limits{
+		MaxFileSize:   MaxFileSize,
+		MaxTotalBytes: MaxTotalBytes,
+		MaxFiles:      MaxFiles,
+		MaxFilesSeen:  maxFilesSeen,
+		MaxExtraFiles: MaxExtraFiles,
+		MaxExtraBytes: MaxExtraBytes,
+	}
+}
+
+// Option changes how Run works.
+type Option func(*Limits)
+
+// WithLimits makes Run enforce l instead of the defaults. Tests use it to cross a
+// limit with a few small files.
+func WithLimits(l Limits) Option {
+	return func(p *Limits) { *p = l }
+}
