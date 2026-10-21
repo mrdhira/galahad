@@ -114,7 +114,7 @@ func isDoubleExt(name string) bool {
 		return false
 	}
 	decoy := lastExt(strings.TrimRightFunc(name[:i], isPadding))
-	return decoyExts[decoy] && !(exec == "js" && dataExts[decoy])
+	return decoyExts[decoy] && (exec != "js" || !dataExts[decoy])
 }
 
 // isSourceFixture reports a plain JavaScript file on disk below a test or example
