@@ -4,6 +4,7 @@ import (
 	"bytes"
 	_ "embed"
 	"html/template"
+	"strings"
 
 	"github.com/mrdhira/galahad/internal/protocol"
 )
@@ -11,21 +12,39 @@ import (
 //go:embed report.html.tmpl
 var htmlSource string
 
-var htmlTemplate = template.Must(template.New("report").Parse(htmlSource))
+// A Windows checkout can turn the template's line endings into CRLF. The page, and the copyable IOC
+// list in it, must be the same on every OS, so the template is read with LF.
+var htmlTemplate = template.Must(template.New("report").Parse(strings.ReplaceAll(htmlSource, "\r\n", "\n")))
 
 type htmlData struct {
 	Verdict, VerdictClass string
-	Score, Confidence     int
-	ConfidenceLevel       string
+	Action, Meta          string
+	Why, AutoExec         []htmlLine
 	Reasons               []string
 	TargetName            string
 	Target                targetInfo
-	Findings, AutoExec    []row
+	FindingsHeading       string
+	Findings              []htmlGroup
+	IOCHeading            string
 	IOCs                  []htmlIOC
+	IOCValues             []string
 	CoverageLine          string
 	CoverageWarning       string
 	Truncated             bool
 	Skips                 []protocol.Skip
+}
+
+// htmlLine is one line of the Why and Runs automatically lists.
+type htmlLine struct{ Severity, Title, Location string }
+
+type htmlEntry struct {
+	Severity, Rule, Title, Attack string
+	Auto                          bool
+}
+
+type htmlGroup struct {
+	Entries           []htmlEntry
+	Location, Snippet string
 }
 
 type htmlIOC struct{ Type, Value, Location string }
@@ -34,16 +53,17 @@ type htmlIOC struct{ Type, Value, Location string }
 // strings are defanged first and the template has no links, scripts or external resources.
 func renderHTML(res *protocol.Result) ([]byte, error) {
 	hosts := iocHosts(res)
+	all := groups(res, nil)
 	d := htmlData{
-		Verdict:         clean(string(res.Verdict)),
+		Verdict:         strings.ToUpper(clean(string(res.Verdict))),
 		VerdictClass:    "clean",
-		Score:           res.Score,
-		Confidence:      res.Confidence,
-		ConfidenceLevel: clean(res.ConfidenceLevel),
+		Action:          actionLine(res.Verdict),
+		Meta:            metaLine(res),
 		TargetName:      clean(res.Target.Name),
 		Target:          describeTarget(res.Target),
-		Findings:        cleanRows(hosts, rows(res, nil)),
-		AutoExec:        cleanRows(hosts, rows(res, isAutoexec)),
+		FindingsHeading: findingsHeading(res, all),
+		Findings:        cleanGroups(hosts, all),
+		IOCHeading:      iocHeading(res),
 		CoverageLine:    coverageLine(res.Coverage),
 		CoverageWarning: coverageWarning(res.Coverage),
 		Truncated:       res.Coverage.Truncated,
@@ -52,11 +72,24 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 	if res.Verdict == protocol.VerdictSuspicious || res.Verdict == protocol.VerdictMalicious {
 		d.VerdictClass = string(res.Verdict)
 	}
+	for _, g := range why(res.Verdict, all) {
+		e := g.Entries[0]
+		d.Why = append(d.Why, htmlLine{Severity: cleanSeverity(e.Severity), Title: text(hosts, e.Title), Location: clean(g.Location)})
+	}
+	for _, g := range groups(res, isAutoexec) {
+		d.AutoExec = append(d.AutoExec, htmlLine{Severity: cleanSeverity(g.severity()), Title: text(hosts, g.titles()), Location: clean(g.Location)})
+	}
 	for _, r := range res.Reasons {
 		d.Reasons = append(d.Reasons, text(hosts, r))
 	}
+	seen := map[string]bool{}
 	for _, i := range res.IOCs {
-		d.IOCs = append(d.IOCs, htmlIOC{Type: clean(i.Type), Value: cleanValue(i.Value), Location: clean(location(i.Path, i.Line))})
+		v := cleanValue(i.Value)
+		d.IOCs = append(d.IOCs, htmlIOC{Type: clean(i.Type), Value: v, Location: clean(location(i.Path, i.Line))})
+		if !seen[v] {
+			seen[v] = true
+			d.IOCValues = append(d.IOCValues, v)
+		}
 	}
 	for _, s := range res.Coverage.Skipped {
 		d.Skips = append(d.Skips, protocol.Skip{Path: clean(s.Path), Reason: clean(s.Reason)})
@@ -68,14 +101,21 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func cleanRows(hosts map[string]bool, rs []row) []row {
-	out := make([]row, len(rs))
-	for i, r := range rs {
-		sev := r.Severity
-		if _, ok := severityRank[sev]; !ok {
-			sev = "unknown"
+func cleanGroups(hosts map[string]bool, gs []group) []htmlGroup {
+	out := make([]htmlGroup, len(gs))
+	for i, g := range gs {
+		out[i] = htmlGroup{Location: clean(g.Location), Snippet: text(hosts, g.Snippet)}
+		for _, e := range g.Entries {
+			out[i].Entries = append(out[i].Entries, htmlEntry{Severity: cleanSeverity(e.Severity), Rule: clean(e.Rule), Title: text(hosts, e.Title), Attack: clean(e.Attack), Auto: e.Auto})
 		}
-		out[i] = row{Severity: sev, Rule: clean(r.Rule), Title: text(hosts, r.Title), Attack: clean(r.Attack), Location: clean(r.Location), Snippet: text(hosts, r.Snippet)}
 	}
 	return out
+}
+
+// cleanSeverity keeps only the known severities, so the value is safe in a CSS class name.
+func cleanSeverity(s protocol.Severity) string {
+	if _, ok := severityRank[s]; !ok {
+		return "unknown"
+	}
+	return string(s)
 }
