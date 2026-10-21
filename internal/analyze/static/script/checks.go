@@ -525,7 +525,8 @@ func (s *scan) farNet(d *doc, nets []int, sec secretHit) (int, bool) {
 
 // carriers returns the variables that hold a copy of the environment: the one
 // it is assigned to and the ones assigned from that, in the next maxFar bytes.
-// A variable counts when the right side uses it as a whole, not one property.
+// A variable counts when the right side uses it as a whole, not one property
+// and not as a function that is called.
 // A hit that is not a copy has none. The search is bounded: a window is charged
 // to the budget, a name is looked at in at most maxCarrierUses places, and
 // the regular expression runs at most maxCarrierRuns times per file. When one
@@ -550,7 +551,7 @@ func (s *scan) carriers(d *doc, sec secretHit) []string {
 			at := from + k
 			from = at + 1
 			end := at + len(names[i])
-			if at > 0 && (isWord(win[at-1]) || win[at-1] == '.') || end < len(win) && (isWord(win[end]) || win[end] == '.' || win[end] == '[') {
+			if at > 0 && (isWord(win[at-1]) || win[at-1] == '.') || end < len(win) && (isWord(win[end]) || win[end] == '.' || win[end] == '[' || win[end] == '(') {
 				continue
 			}
 			if uses++; uses > maxCarrierUses || s.carrierRuns >= maxCarrierRuns {

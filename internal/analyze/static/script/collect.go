@@ -270,7 +270,8 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 		}
 	})
 	eachMatch(d, bulkEnvVar, base, minEnd, text, func(off, _ int) {
-		if g := assignRE.FindSubmatch(d.data[max(0, off-160):off]); g != nil && !bytes.ContainsRune(g[0], '\n') {
+		before := d.data[max(0, off-160):off]
+		if g := assignRE.FindSubmatch(before); g != nil && !bytes.ContainsRune(g[0], '\n') && !envOption(before) && !returnRE.Match(before) {
 			keep(s, &f.secrets, secretHit{off: off, kind: secretDump, name: string(g[1])})
 		}
 	})
@@ -282,7 +283,7 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 // that is the env option of a call, the environment of a child process.
 func copyName(data []byte, off int) (name string, ok bool) {
 	before := data[max(0, off-160):off]
-	if envOptionRE.Match(before) {
+	if envOption(before) {
 		return "", false
 	}
 	if g := copyRE.FindSubmatchIndex(before); g != nil && !unclosed(before[:g[2]]) {
@@ -292,6 +293,13 @@ func copyName(data []byte, off int) (name string, ok bool) {
 		return string(before[g[2]:g[3]]), true
 	}
 	return "", true
+}
+
+// envOption reports whether the copy of the environment that follows before is
+// the env option of a call: an "env" inside a bracket, not a variable named env.
+func envOption(before []byte) bool {
+	loc := envOptionRE.FindIndex(before)
+	return loc != nil && unclosed(before[:loc[0]])
 }
 
 // unclosed reports whether text ends inside a bracket that it opens.

@@ -119,8 +119,12 @@ var (
 	copyRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*(?:[\w$.]+\s*\(\s*)*$`)
 
 	// envOptionRE ends the text before a copy of the environment that is the
-	// env option of a call: "env=", "env: ", "env={**".
-	envOptionRE = regexp.MustCompile(`\benv\s*[:=]\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*)?$`)
+	// env option of a call: "env=", "env: ", "env={**". It is the option only
+	// when "env" is inside a bracket that the text opens (see envForChild).
+	// returnRE ends the text before a copy that a function returns: "return
+	// {...". Both are the environment for a child process.
+	envOptionRE = regexp.MustCompile(`\benv\s*[:=]\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*|Object\s*\.\s*assign\(\s*\{\s*\}\s*,\s*)?$`)
+	returnRE    = regexp.MustCompile(`\breturn\b\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*|Object\s*\.\s*assign\(\s*\{\s*\}\s*,\s*)?$`)
 
 	// assignRE ends at the end of a line prefix and captures the name in
 	// "name = ...".
