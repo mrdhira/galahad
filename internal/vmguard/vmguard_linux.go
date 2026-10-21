@@ -8,6 +8,8 @@ func gather() Signals {
 	return Signals{
 		CPUHypervisor:  cpuHasHypervisor(readSmall("/proc/cpuinfo")),
 		HypervisorType: readSmall("/sys/hypervisor/type"),
+		DeviceTreeHV:   deviceTreeHypervisor(),
+		KernelRelease:  readSmall("/proc/sys/kernel/osrelease"),
 		Vendor:         readSmall("/sys/class/dmi/id/sys_vendor"),
 		Product:        readSmall("/sys/class/dmi/id/product_name"),
 		Container:      exists("/.dockerenv") || exists("/run/.containerenv"),
@@ -27,4 +29,18 @@ func cpuHasHypervisor(cpuinfo string) bool {
 		}
 	}
 	return false
+}
+
+// deviceTreeHypervisor returns the hypervisor/compatible property of the device tree, or "" when absent.
+// The property is a list of NUL-separated strings; they are joined with commas.
+func deviceTreeHypervisor() string {
+	for _, p := range []string{
+		"/proc/device-tree/hypervisor/compatible",
+		"/sys/firmware/devicetree/base/hypervisor/compatible",
+	} {
+		if v := strings.ReplaceAll(strings.Trim(readSmall(p), "\x00"), "\x00", ","); v != "" {
+			return v
+		}
+	}
+	return ""
 }

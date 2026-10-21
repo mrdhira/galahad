@@ -12,6 +12,8 @@ type Signals struct {
 	GalahadGuest   bool   // the Galahad guest marker file exists
 	CPUHypervisor  bool   // the CPU reports a hypervisor (cpuinfo flag, kern.hv_vmm_present)
 	HypervisorType string // /sys/hypervisor/type, trimmed
+	DeviceTreeHV   string // device tree hypervisor/compatible (arm64 guests without DMI), trimmed
+	KernelRelease  string // kernel release string, for example /proc/sys/kernel/osrelease
 	Vendor         string // DMI sys_vendor, or the BIOS system manufacturer
 	Product        string // DMI product_name, or the BIOS system product name
 	Container      bool   // a container marker file exists; containers share the host kernel
@@ -21,7 +23,12 @@ type Signals struct {
 var vmVendors = []string{
 	"qemu", "kvm", "vmware", "virtualbox", "innotek", "xen", "amazon ec2",
 	"google compute engine", "firecracker", "parallels", "apple virtualization", "bhyve",
+	"openstack", "digitalocean", "bochs", "oracle cloud", "alibaba cloud", "nutanix",
 }
+
+// wsl2Kernel is a lower-case fragment of the kernel release of WSL2, which runs in a Hyper-V utility VM.
+// The WSL1 release has no such fragment and WSL1 is not a VM.
+const wsl2Kernel = "microsoft-standard-wsl2"
 
 // FromSignals decides from the raw signals whether the process is in a VM and why.
 func FromSignals(s Signals) (inVM bool, reason string) {
@@ -32,6 +39,10 @@ func FromSignals(s Signals) (inVM bool, reason string) {
 		return true, "cpu reports a hypervisor"
 	case s.HypervisorType != "":
 		return true, "hypervisor type " + s.HypervisorType
+	case s.DeviceTreeHV != "":
+		return true, "device tree hypervisor " + s.DeviceTreeHV
+	case strings.Contains(strings.ToLower(s.KernelRelease), wsl2Kernel):
+		return true, "wsl2 kernel " + s.KernelRelease
 	}
 	id := strings.ToLower(s.Vendor + " " + s.Product)
 	vendor := "vm vendor " + strings.TrimSpace(s.Vendor+" "+s.Product)
