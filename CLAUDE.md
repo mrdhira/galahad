@@ -14,6 +14,7 @@ Galahad is a Go CLI that inspects untrusted files, links and Git repositories in
 ## Commits and pull requests
 - Author: `Dhira Wigata <dwigata.putra@gmail.com>`. Nobody else. Exception: `dependabot[bot]` may author dependency-bump commits from its own PRs.
 - No `Co-Authored-By` lines, no AI or tool attribution, no session links in commits, PR titles, PR bodies or docs.
+  Exception (owner decision, 2026-10-21): the footer the cloud environment appends to PR bodies on its own is allowed, because it never reaches commits or files. Do not write it yourself, keep squash-merge messages free of it, and do not open issues or post comments, which would carry it too.
 - Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `ci:`, `refactor:`.
 - One branch and one PR per task: `feat/T<id>-<slug>` (for example `feat/T1.5-autoexec`). Squash-merge when the workflow below passes.
 - `main` is protected: one approving review and green `gate`, `test (macos-latest)` and `test (windows-latest)` checks. The repository owner authorized merging with the owner bypass only when the reviewer agent approved, QA passed and all CI checks are green on the PR head. Never bypass on red CI or an open review finding.
@@ -37,7 +38,7 @@ At most 3 fix loops per task. After that, escalate to opus with high effort, the
 
 ## Scope
 - Each release has a written definition of done before work starts: the problems it must answer, the repos it must keep clean, and the known gaps it may ship with. Work outside that list waits for the next release.
-- One PR has one purpose. A finding outside that purpose becomes a backlog item, not a new commit on the PR. The backlog is GitHub issues with the `backlog` label.
+- One PR has one purpose. A finding outside that purpose becomes a backlog item, not a new commit on the PR. The backlog is `docs/backlog.md`: add the item there, and remove it in the PR that fixes it.
 - A review finding blocks a PR only when it is one of these:
   1. a regression against `main`;
   2. a bypass of exactly what the PR claims to fix;
@@ -45,7 +46,7 @@ At most 3 fix loops per task. After that, escalate to opus with high effort, the
   4. a crash or a hang.
   Everything else is a follow-up in the backlog.
 - A violation of a Hard rule or of the commit and attribution rules always blocks, whatever the bar above says.
-- Only `CHANGES REQUIRED` items count as open review findings. Follow-ups listed with an `APPROVE` do not block the merge; file them as backlog issues.
+- Only `CHANGES REQUIRED` items count as open review findings. Follow-ups listed with an `APPROVE` do not block the merge; add them to `docs/backlog.md`.
 - PRs that touch the same files merge one at a time. The next one merges `main` into its branch and runs `make gate` before its review.
 - Run the false-positive sweep on popular repos before tuning detection, so the fixes target real false alarms.
 
