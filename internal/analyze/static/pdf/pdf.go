@@ -7,14 +7,21 @@
 // cannot be read is reported twice: as GAL-PDF-007 (low) with the object line,
 // and as one coverage Skip per file, so the verdict cannot claim a full
 // analysis. The Skip reason is "encrypted" for a document with an /Encrypt
-// entry, "too_large" when the object or token limit was hit, and "unsupported"
-// when a non-image stream (always an object stream) could not be decoded.
+// entry; "budget" when a limit left part of the file's syntax unread (more
+// objects than MaxObjects, a dictionary, trailer or object stream cut by the
+// token limit, an inline action dictionary longer than the examined tokens, an
+// object stream that was cut by a size limit or could not be decoded), because
+// a payload could sit in the part that was not read; "too_large" when only plain
+// page content was cut by the token limit, which never holds actions; and
+// "unsupported" when another non-image stream could not be decoded. A whole file
+// over the size limit is skipped by the engine as "too_large" before this
+// analyzer runs.
 // Image streams are never decoded and never reported.
 package pdf
 
 import (
 	"bytes"
-	"compress/zlib"
+	"compress/flate"
 	"context"
 	"encoding/ascii85"
 	"errors"
@@ -76,7 +83,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if b, ok := analyze.Budget(ctx); ok && b < maxDecoded {
 		maxDecoded, byJob = b, true
 	}
-	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, lineNo: 1, maxDecoded: int(maxDecoded), byJob: byJob}
+	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, strs: map[int]stringVal{}, lineNo: 1, maxDecoded: int(maxDecoded), byJob: byJob}
 	return s.run()
 }
 
@@ -119,9 +126,10 @@ func evidenceKey(kind, off int) int { return off*4 + kind }
 // when buf is decoded data that is not in the file; hdr is then the offset of
 // the stream object that holds it.
 type region struct {
-	buf []byte
-	at  int
-	hdr int
+	buf     []byte
+	at      int
+	hdr     int
+	content bool // page content or other plain stream data, not a dictionary or object stream
 }
 
 // key returns the evidence key of the region.
@@ -145,6 +153,12 @@ func (r region) where(off int) (int, string) {
 
 type hit struct{ evs []evidence }
 
+// stringVal is the cached result of stringAt for one object.
+type stringVal struct {
+	val string
+	ok  bool
+}
+
 type scanner struct {
 	ctx        context.Context
 	f          analyze.File
@@ -153,16 +167,18 @@ type scanner struct {
 	hits       map[string]*hit
 	seenURI    map[string]bool
 	memo       map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
+	strs       map[int]stringVal
 	iocs       []protocol.IOC
 	decoded    int
 	maxDecoded int  // decoded bytes allowed for the file
 	byJob      bool // the job budget, not MaxFileBytes, sets maxDecoded
-	overBudget bool // decoding stopped at the job budget
+	overBudget bool // decoding stopped at the job budget: budget
 	lineOff    int  // lineAt cursor: offset in the file and its line number
 	lineNo     int
 	encrypted  bool
 	undecoded  bool
-	truncated  bool
+	truncated  bool // the token limit cut a dictionary, trailer or object stream: budget
+	cutPlain   bool // the token limit cut plain stream content: too_large
 	tooMany    bool
 }
 
@@ -202,11 +218,10 @@ func (s *scanner) run() (analyze.Output, error) {
 		out.Findings = append(out.Findings, r.Finding(evs...))
 	}
 	out.IOCs = s.iocs
-	if s.tooMany || s.truncated {
-		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipTooLarge})
-	}
-	if s.overBudget {
+	if s.tooMany || s.truncated || s.overBudget {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipBudget})
+	} else if s.cutPlain {
+		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipTooLarge})
 	}
 	if s.encrypted {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipEncrypted})
@@ -241,7 +256,7 @@ func (s *scanner) scanObject(o *object) error {
 		return nil
 	}
 	if o.objStm || looksText(o.content) {
-		return s.scanRegion(region{buf: o.content, at: at, hdr: o.hdr})
+		return s.scanRegion(region{buf: o.content, at: at, hdr: o.hdr, content: !o.objStm})
 	}
 	return nil
 }
@@ -250,6 +265,20 @@ func (s *scanner) scanObject(o *object) error {
 func (s *scanner) full(r protocol.Rule) bool {
 	h := s.hits[r.ID]
 	return h != nil && len(h.evs) >= maxEvidence
+}
+
+// hasKey reports whether the rule already has a hit with the evidence key.
+func (s *scanner) hasKey(r protocol.Rule, key int) bool {
+	h := s.hits[r.ID]
+	if h == nil {
+		return false
+	}
+	for _, e := range h.evs {
+		if e.key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // add records a hit for the rule at the token buf[off] of the region.
@@ -498,13 +527,15 @@ func (s *scanner) prepareStream(o *object, raw []byte, rawAt int) {
 		out, err := s.decode(f, data)
 		data = out
 		if err == reasonBudget {
-			// The job ran out of budget, which says nothing about the stream.
+			// The job ran out of budget, which says nothing about the stream. The
+			// budget skip covers it, with no GAL-PDF-007 and no unsupported skip.
 			s.overBudget = true
 			break
 		}
 		if err != "" {
 			s.addAt(ruleOpaque, o.hdr, err, evidenceKey(keyStream, o.hdr))
 			s.undecoded = true
+			s.truncated = s.truncated || o.objStm // its members stay unread
 			break
 		}
 	}
@@ -530,10 +561,12 @@ func (s *scanner) decode(filter string, in []byte) ([]byte, string) {
 	var r io.Reader
 	switch filter {
 	case "FlateDecode", "Fl":
-		zr, err := zlib.NewReader(bytes.NewReader(in))
-		if err != nil {
+		// The zlib header is checked here and the Adler-32 trailer is ignored,
+		// like PDF viewers do. A stream that ends early is still an error.
+		if len(in) < 2 || in[0]&0x0f != 8 || in[0]>>4 > 7 || (int(in[0])<<8|int(in[1]))%31 != 0 || in[1]&0x20 != 0 {
 			return nil, "undecodable Flate stream"
 		}
+		zr := flate.NewReader(bytes.NewReader(in[2:]))
 		defer func() { _ = zr.Close() }()
 		r = zr
 	case "ASCIIHexDecode", "AHx":
@@ -592,7 +625,11 @@ func (s *scanner) registerMembers(o *object) error {
 	head := s.tok(o.content[:o.first])
 	type member struct{ num, off int }
 	var ms []member
-	for i := 0; i+1 < len(head) && len(ms) < o.n && len(s.byNum)+len(ms) < 2*MaxObjects; i += 2 {
+	for i := 0; i+1 < len(head) && len(ms) < o.n; i += 2 {
+		if len(s.byNum)+len(ms) >= 2*MaxObjects {
+			s.tooMany = true
+			break
+		}
 		num, err1 := strconv.Atoi(head[i].val)
 		off, err2 := strconv.Atoi(head[i+1].val)
 		if err1 != nil || err2 != nil || off < 0 {

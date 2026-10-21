@@ -33,7 +33,12 @@ func (s *scanner) scanTrailers() error {
 // scanRegion looks at the names and strings of one dictionary or decoded
 // stream. Each finding points at the token that triggered it.
 func (s *scanner) scanRegion(reg region) error {
-	toks := s.tok(reg.buf)
+	toks, cut := tokenize(reg.buf, maxTokens)
+	if cut && reg.content {
+		s.cutPlain = true
+	} else if cut {
+		s.truncated = true
+	}
 	for i, t := range toks {
 		if i&1023 == 0 {
 			if err := s.ctx.Err(); err != nil {
@@ -79,7 +84,8 @@ func (s *scanner) scanRegion(reg region) error {
 }
 
 // stringAt returns the string value at toks[i]: a literal or hex string, or a
-// reference to an object that holds one.
+// reference to an object that holds one. The result for a referenced object is
+// cached, so many references to one large string cost one copy of it.
 func (s *scanner) stringAt(toks []token, i int) (string, bool) {
 	if i >= len(toks) {
 		return "", false
@@ -91,15 +97,20 @@ func (s *scanner) stringAt(toks []token, i int) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	if c, ok := s.strs[n]; ok {
+		return c.val, c.ok
+	}
 	o := s.byNum[n]
 	if o == nil {
 		return "", false
 	}
+	var c stringVal
 	first, _ := tokenize(o.buf[o.ds:o.de], 1)
 	if len(first) == 1 && (first[0].kind == tStr || first[0].kind == tHex) {
-		return first[0].val, true
+		c = stringVal{first[0].val, true}
 	}
-	return "", false
+	s.strs[n] = c
+	return c.val, c.ok
 }
 
 // addScript records /JS at toks[i] and, when its value is a hex string or a
@@ -127,12 +138,16 @@ func (s *scanner) addScript(reg region, toks []token, i int) {
 	if o == nil {
 		return
 	}
+	key := evidenceKey(keyObject, o.hdr)
+	if s.hasKey(ruleJS, key) {
+		return
+	}
 	body, ok := s.stringAt(toks, i+1)
 	if !ok && o.content != nil {
 		body = string(o.content[:min(len(o.content), maxSnippetRaw)])
 	}
 	if body != "" {
-		s.addAt(ruleJS, o.hdr, scriptSnippet(body), evidenceKey(keyObject, o.hdr))
+		s.addAt(ruleJS, o.hdr, scriptSnippet(body), key)
 	}
 }
 
@@ -193,6 +208,7 @@ func (s *scanner) targetsAction(toks []token, j int) bool {
 	if toks[j].kind == tPunct && toks[j].val == "<<" {
 		level := 0
 		end := min(len(toks), j+maxInlineToks)
+		closed := false
 		for k := j; k < end; k++ {
 			if toks[k].kind != tPunct {
 				continue
@@ -205,8 +221,12 @@ func (s *scanner) targetsAction(toks []token, j int) bool {
 			}
 			if level == 0 {
 				end = k + 1
+				closed = true
 				break
 			}
+		}
+		if !closed && end < len(toks) {
+			s.truncated = true // the dictionary goes on past what is examined
 		}
 		return s.holdsAction(toks[j:end])
 	}

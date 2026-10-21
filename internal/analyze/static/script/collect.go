@@ -25,12 +25,13 @@ type secretHit struct {
 
 // found holds the byte offsets that the patterns matched in a doc.
 type found struct {
-	sinks   [][2]int // calls that run a string as code: [start, end) with the "(" last
-	dl      []int    // shell download-and-run commands
-	dec     []int    // shell decode-and-run commands
-	spawns  []int    // process starts
-	secrets []secretHit
-	nets    []int // network use
+	sinks    [][2]int // calls that run a string as code: [start, end) with the "(" last
+	dl       []int    // shell download-and-run commands
+	dec      []int    // shell decode-and-run commands
+	spawns   []int    // process starts
+	thenEval []int    // .then(eval) callbacks
+	secrets  []secretHit
+	nets     []int // network use
 }
 
 // anchor is a literal (lowercase) that every match of some pattern contains.
@@ -249,6 +250,9 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 		sinks = sinksPy
 	}
 	eachMatch(d, sinks, base, minEnd, text, func(off, end int) { keep(s, &f.sinks, [2]int{off, end}) })
+	if d.lang&langJS != 0 {
+		eachMatch(d, thenEval, base, minEnd, text, func(off, _ int) { keep(s, &f.thenEval, off) })
+	}
 	spawn := func(off, _ int) { keep(s, &f.spawns, off) }
 	if d.lang&langJS != 0 && d.childProc {
 		eachMatch(d, spawnsJS, base, minEnd, text, func(off, end int) {
@@ -392,6 +396,134 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 			keep(s, &f.secrets, secretHit{off: off, kind: kind})
 		}
 	}
+	segments := segmentRE.FindAllStringSubmatchIndex(text, signals.MaxMatches)
+	s.limited = s.limited || len(segments) == signals.MaxMatches
+	for _, m := range segments {
+		if off, ok := match(d, base, minEnd, text, m[0], m[1]); ok && s.builtPath(d.data, off, text[m[2]:m[3]]) {
+			keep(s, &f.secrets, secretHit{off: off, kind: secretFile})
+		}
+	}
+}
+
+// builtPath reports whether the quoted directory name at off is a segment of a
+// path that the code builds, and the path is one that signals.SecretRefs
+// counts: .ssh and .gnupg, .aws followed by credentials, .kube by config,
+// .docker by config.json, and .env on a line that reads, and not for dotenv.
+// A path that is the return value of an arrow function or a function ("() =>
+// process.env.X || join(", "return path.join(") only defines where a file
+// lives and is not a read.
+func (s *scan) builtPath(data []byte, off int, name string) bool {
+	if !s.spend(pathLook) {
+		return false
+	}
+	if next, ok := segmentNext[name]; ok && !followedBy(data, off+len(name)+2, next) {
+		return false
+	}
+	if !pathlibOperand(data, off) {
+		call := enclosingPathCall(data, off)
+		if call < 0 || returned(data, call) {
+			return false
+		}
+	}
+	if name != ".env" {
+		return true
+	}
+	line := lineAround(data, off)
+	return envReadRE.Match(line) && !dotenvRE.Match(line)
+}
+
+// pathLook is how far back builtPath looks for the start of a path call.
+const pathLook = 256
+
+// pathlibOperand reports whether the / operator of pathlib ends the text
+// before off, on the same line or on a line before it.
+func pathlibOperand(data []byte, off int) bool {
+	return bytes.HasSuffix(bytes.TrimRight(data[max(0, off-pathLook):off], " \t\r\n"), []byte("/"))
+}
+
+// enclosingPathCall returns the offset where the callee of a join, joinpath or
+// resolve call that is still open at off starts (path.join starts at path),
+// looking back across lines, or -1. It counts parentheses and stops at a
+// semicolon.
+func enclosingPathCall(data []byte, off int) int {
+	depth := 0
+	for i := off - 1; i >= max(0, off-pathLook); i-- {
+		switch data[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			end := i
+			for end > 0 && (data[end-1] == ' ' || data[end-1] == '\t') {
+				end--
+			}
+			start := end
+			for start > 0 && isWord(data[start-1]) {
+				start--
+			}
+			switch string(data[start:end]) {
+			case "join", "joinpath", "resolve":
+				for start > 0 && (isWord(data[start-1]) || data[start-1] == '.') {
+					start--
+				}
+				return start
+			}
+		case ';':
+			if depth == 0 {
+				return -1
+			}
+		}
+	}
+	return -1
+}
+
+// returnedRE matches the text between "=>" or "return" and a callee when the
+// callee is the value that the function returns: nothing, or a chain of names
+// joined by || or ??.
+var returnedRE = regexp.MustCompile(`^\s*\(?\s*(?:[\w$.]+\s*(?:\|\||\?\?)\s*)*[\w$.]*$`)
+
+// returned reports whether the callee that starts at callee is the return
+// value of an arrow function or a function.
+func returned(data []byte, callee int) bool {
+	lo := max(0, callee-pathLook)
+	before := data[lo:callee]
+	end := -1
+	if i := bytes.LastIndex(before, []byte("=>")); i >= 0 {
+		end = i + 2
+	}
+	for from := len(before); ; {
+		i := bytes.LastIndex(before[:from], []byte("return"))
+		if i < 0 {
+			break
+		}
+		if wordStart(before, i) && (i+6 == len(before) || !isWord(before[i+6])) {
+			end = max(end, i+6)
+			break
+		}
+		from = i
+	}
+	return end >= 0 && returnedRE.Match(before[end:])
+}
+
+// followedBy reports whether the quoted segment seg follows after a comma or
+// a / operator at data[i:], across lines.
+func followedBy(data []byte, i int, seg string) bool {
+	skip := func(i int) int {
+		for n := 0; n < pathLook && i < len(data) && strings.IndexByte(" \t\r\n", data[i]) >= 0; n++ {
+			i++
+		}
+		return i
+	}
+	i = skip(i)
+	if i >= len(data) || data[i] != ',' && data[i] != '/' {
+		return false
+	}
+	i = skip(i + 1)
+	end := i + 1 + len(seg)
+	return end < len(data) && strings.IndexByte("'\"`", data[i]) >= 0 && string(data[i+1:end]) == seg && data[end] == data[i]
 }
 
 // spend charges n bytes of text given to the signals patterns, which are slow

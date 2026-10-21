@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/zlib"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,68 @@ func corpusWithBig(name, bigName string, size int64) func(t *testing.T) string {
 		}
 		writeBytes(t, filepath.Join(dir, bigName), make([]byte, size))
 		return dir
+	}
+}
+
+// paddedPDF returns a builder for a PDF with n empty objects followed by an OpenAction
+// that launches a program, like padding that pushes the action past the object limit.
+func paddedPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var b strings.Builder
+		b.WriteString("%PDF-1.7\n")
+		for i := range n {
+			fmt.Fprintf(&b, "%d 0 obj\nendobj\n", i+10)
+		}
+		b.WriteString("1 0 obj\n<< /Type /Catalog /OpenAction 2 0 R >>\nendobj\n")
+		b.WriteString("2 0 obj\n<< /S /Launch /F (cmd.exe) >>\nendobj\n")
+		b.WriteString("trailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, []byte(b.String()))
+	}
+}
+
+// pagedPDF returns a builder for a benign PDF with n pages, each with a link.
+func pagedPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var b, kids strings.Builder
+		b.WriteString("%PDF-1.7\n")
+		b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction [10 0 R /Fit] >>\nendobj\n")
+		for i := range n {
+			page := 10 + 3*i
+			fmt.Fprintf(&kids, "%d 0 R ", page)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R /Annots [%d 0 R] >>\nendobj\n", page, page+1, page+2)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Length 25 >>\nstream\nBT /F1 12 Tf (page %d) Tj ET\nendstream\nendobj\n", page+1, i)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Type /Annot /Subtype /Link /A << /S /URI /URI (https://docs.example.test/p%d) >> >>\nendobj\n", page+2, i)
+		}
+		fmt.Fprintf(&b, "2 0 obj\n<< /Type /Pages /Kids [%s] /Count %d >>\nendobj\n", kids.String(), n)
+		b.WriteString("trailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, []byte(b.String()))
+	}
+}
+
+// vectorPDF returns a builder for a one-page PDF whose Flate content stream draws n line
+// segments, more tokens than the analyzer reads from one region.
+func vectorPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var raw bytes.Buffer
+		for i := range n {
+			fmt.Fprintf(&raw, "%d %d m %d %d l S\n", i%600, i%700, i%500, i%400)
+		}
+		var z bytes.Buffer
+		w := zlib.NewWriter(&z)
+		if _, err := w.Write(raw.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		var b bytes.Buffer
+		b.WriteString("%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+		b.WriteString("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+		b.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n")
+		fmt.Fprintf(&b, "4 0 obj\n<< /Filter /FlateDecode /Length %d >>\nstream\n", z.Len())
+		b.Write(z.Bytes())
+		b.WriteString("\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, b.Bytes())
 	}
 }
 
@@ -162,6 +225,41 @@ func TestCorpus(t *testing.T) {
 			wantRules: []string{"GAL-DEPS-004 requirements.txt:2", "GAL-DEPS-001 requirements.txt:3"},
 		},
 		{
+			name:   "p2-requirements-include: an included requirements file with another name sets a custom index",
+			target: corpusDir("p2-requirements-include"), wantCode: 10,
+			wantRules: []string{"GAL-DEPS-004 deps/base.txt:3"},
+		},
+		{
+			name:   "p2-npmrc-hijack: .npmrc sets a registry and node-options",
+			target: corpusDir("p2-npmrc-hijack"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-013 .npmrc:2", "GAL-AUTOEXEC-013 .npmrc:3"},
+		},
+		{
+			name:   "p2-yarnrc-hijack: .yarnrc.yml loads a patched yarn and sets a registry",
+			target: corpusDir("p2-yarnrc-hijack"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-013 .yarnrc.yml:1", "GAL-AUTOEXEC-013 .yarnrc.yml:2"},
+		},
+		{
+			name:   "p2-pnpmfile: pnpm runs .pnpmfile.cjs on install",
+			target: corpusDir("p2-pnpmfile"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-015 .pnpmfile.cjs:1"},
+		},
+		{
+			name:   "p2-uv-sources: pyproject with a custom uv index and a git source",
+			target: corpusDir("p2-uv-sources"), wantCode: 10,
+			wantRules: []string{"GAL-DEPS-004 pyproject.toml:9", "GAL-DEPS-002 pyproject.toml:12"},
+		},
+		{
+			name:   "p2-prisma-provider: a generator provider that is a command",
+			target: corpusDir("p2-prisma-provider"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-016 prisma/schema.prisma:8"},
+		},
+		{
+			name:   "p2-gyp-expansion: binding.gyp downloads and runs code while gyp reads it",
+			target: corpusDir("p2-gyp-expansion"), wantCode: 20,
+			wantRules: []string{"GAL-AUTOEXEC-017 binding.gyp:6", "GAL-AUTOEXEC-011 binding.gyp:6"},
+		},
+		{
 			name: "git-config fsmonitor: .git/config runs a command (built)",
 			target: gitConfigRepo("[core]\n\trepositoryformatversion = 0\n" +
 				"\tfsmonitor = ./.git/hooks/fsmonitor-evil\n"),
@@ -173,6 +271,7 @@ func TestCorpus(t *testing.T) {
 			target: corpusDir("p3-padded-js"), wantCode: 20,
 			wantRules:    []string{"GAL-OBF-001 index.js:12"},
 			wantSnippets: []string{"decoded:", "c2.sinkhole.test"},
+			wantIOCs:     []string{"https://c2.sinkhole.test/collect"},
 		},
 		{
 			name:   "p3-padded-py: environment sent away from hidden code",
@@ -190,6 +289,11 @@ func TestCorpus(t *testing.T) {
 			name:   "p4-pdf-openaction-uri: OpenAction to a URI action",
 			target: corpusDir("p4-pdf-openaction-uri"), wantCode: 10,
 			wantRules: []string{"GAL-PDF-002 statement.pdf:3"},
+		},
+		{
+			name:     "p4-pdf-padding: a Launch action behind more objects than the analyzer reads is not clean (built)",
+			target:   builtFile("padded.pdf", paddedPDF(100001)),
+			wantCode: 10, wantSkips: 1,
 		},
 		{
 			name: "p5-lnk-in-zip: decoy pdf name hides a shortcut with a PowerShell launcher (built)",
@@ -409,6 +513,18 @@ func TestCorpus(t *testing.T) {
 			target: corpusDir("benign-pdf"), wantCode: 0, wantQuiet: true,
 		},
 		{
+			name:   "benign-pdf with 300 pages and a link on each (built)",
+			target: builtFile("pages.pdf", pagedPDF(300)), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:   "benign-pdf with 5000 pages, a content stream and a link on each (built)",
+			target: builtFile("manual.pdf", pagedPDF(5000)), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:   "benign-pdf: one page of vector drawing with 300000 segments in a Flate content stream (built)",
+			target: builtFile("drawing.pdf", vectorPDF(300000)), wantCode: 0, wantQuiet: true, wantSkips: 1,
+		},
+		{
 			name:   "benign-docx: internal and external hyperlinks (built)",
 			target: builtFile("guide.docx", benignDocx), wantCode: 0, wantQuiet: true,
 			wantIOCs: []string{"https://docs.sinkhole.test/guide"},
@@ -428,6 +544,53 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "benign-npm-deps: npm project with a registry lockfile (twin of p2-typosquat)",
 			target: corpusDir("benign-npm-deps"), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign .npmrc: npm defaults (built, twin of p2-npmrc-hijack)",
+			target: filesRepo(map[string]string{
+				".npmrc":       "save-exact=true\nengine-strict=true\nfund=false\nregistry=https://registry.npmjs.org/\n",
+				"package.json": "{\n  \"name\": \"plain\",\n  \"version\": \"1.0.0\"\n}\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign .yarnrc.yml: node-modules linker and the committed Yarn release (built, twin of p2-yarnrc-hijack)",
+			target: filesRepo(map[string]string{
+				".yarnrc.yml":                   "nodeLinker: node-modules\nyarnPath: .yarn/releases/yarn-4.5.0.cjs\n",
+				".yarn/releases/yarn-4.5.0.cjs": "// stand-in for the committed Yarn release\n",
+				"package.json":                  "{\n  \"name\": \"plain\",\n  \"version\": \"1.0.0\"\n}\n",
+			}),
+			wantCode: 0,
+		},
+		{
+			name: "benign prisma schema: the default client generator (built, twin of p2-prisma-provider)",
+			target: filesRepo(map[string]string{
+				"prisma/schema.prisma": "generator client {\n  provider = \"prisma-client-js\"\n}\n\ndatasource db {\n  provider = \"postgresql\"\n  url      = env(\"DATABASE_URL\")\n}\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign binding.gyp: the node-addon-api include expansion only (built, twin of p2-gyp-expansion)",
+			target: filesRepo(map[string]string{
+				"binding.gyp": "{\n  'targets': [{\n    'target_name': 'addon',\n    'sources': ['addon.cc'],\n    'include_dirs': [\"<!@(node -p \\\"require('node-addon-api').include\\\")\"]\n  }]\n}\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign pyproject: PyPI dependencies only (built, twin of p2-uv-sources)",
+			target: filesRepo(map[string]string{
+				"pyproject.toml": "[project]\nname = \"plain\"\nversion = \"1.0.0\"\ndependencies = [\"requests>=2.31\", \"numpy\"]\n\n[tool.uv]\nindex-url = \"https://pypi.org/simple\"\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign text files: README, LICENSE and notes are not requirements files (built, twin of p2-requirements-include)",
+			target: filesRepo(map[string]string{
+				"README.txt":  "Project notes\nSee https://docs.sinkhole.test/guide for details.\nInstall with requests==2.0 first.\n",
+				"LICENSE.txt": "MIT License\n\nCopyright (c) 2024 Someone\n",
+				"notes.txt":   "reqeusts\nbeta\ngamma\n",
+			}),
+			wantCode: 0, wantQuiet: true,
 		},
 		{
 			name: "benign devcontainer: image and forwardPorts only (built, twin of p1-devcontainer-init)",
