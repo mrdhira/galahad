@@ -57,7 +57,8 @@ jobs:
           set -o pipefail
           docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
             "$BUILD_IMAGE" bash images/linux/build.sh core 2>&1 | tee core.log && exit 0
-          tail -n 25 core.log | sed 's/^/::error::/'
+          # GitHub keeps at most 10 annotations per step: error lines first, then the last lines.
+          { grep -E 'build.sh:|rror|curl: |No such|not found' core.log | tail -n 6; tail -n 4 core.log; } | sed 's/^/::error::/'
           exit 1
 
       - name: Build the kernel
@@ -66,7 +67,8 @@ jobs:
           set -o pipefail
           docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
             "$BUILD_IMAGE" bash images/linux/kernel/build.sh 2>&1 | tee kernel.log && exit 0
-          tail -n 25 kernel.log | sed 's/^/::error::/'
+          # GitHub keeps at most 10 annotations per step: error lines first, then the last lines.
+          { grep -E 'build.sh:|rror|curl: |No such|not found' kernel.log | tail -n 6; tail -n 4 kernel.log; } | sed 's/^/::error::/'
           exit 1
 
       # Saved only after both builds worked, so a failed build cannot leave a half-filled cache behind.
