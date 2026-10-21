@@ -94,6 +94,18 @@ dependencies = []
 [dependency-groups]
 all = [{include-group = "dev"}]
 `
+	pyprojectMultilineValues = `[tool.uv]
+index-url = """\
+    https://pypi.sinkhole.test/simple"""
+[tool.uv.sources]
+helper = { git = """\
+    https://git.sinkhole.test/h.git""" }
+other = { git = "https://git.sinkhole.test/o.git" }
+`
+	pyprojectNestedTables = `[tool]
+uv = { sources = { helper = { git = "https://git.sinkhole.test/h.git" } }, index-url = "https://pypi.sinkhole.test/simple" }
+uv.pip = { extra-index-url = ["https://pypi.org/simple", "https://p2.sinkhole.test/simple"] }
+`
 	pyprojectBenign = `[build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -214,6 +226,18 @@ func TestAnalyze(t *testing.T) {
 			file:         "pyproject.toml",
 			data:         pyprojectMultiline,
 			wantFindings: []string{"GAL-DEPS-002@9"},
+		},
+		{
+			name:         "pyproject multi-line string values are joined across line continuations",
+			file:         "pyproject.toml",
+			data:         pyprojectMultilineValues,
+			wantFindings: []string{"GAL-DEPS-002@5", "GAL-DEPS-002@7", "GAL-DEPS-004@2"},
+		},
+		{
+			name:         "pyproject nested inline tables are classified by the keys above them",
+			file:         "pyproject.toml",
+			data:         pyprojectNestedTables,
+			wantFindings: []string{"GAL-DEPS-002@2", "GAL-DEPS-004@2", "GAL-DEPS-004@3"},
 		},
 		{
 			name:         "pyproject dotted keys and inline tables are classified by their full path",

@@ -2,22 +2,25 @@ package deps
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
-// How the strings of a TOML value are read.
+// How a string at a TOML path is read.
 const (
 	valueNone         = iota
-	valueRequirement  // PEP 508 requirement strings
-	valueIndex        // index URLs: a custom host or a path is a custom index
+	valueRequirement  // PEP 508 requirement string
+	valueIndex        // index URL: a custom host or a path is a custom index
 	valueFindLinks    // find-links: only a URL on another host is custom
-	valueIndexTable   // inline tables with a "url" index
-	valueSources      // inline tables with a "git" or "url" source
-	valueSourceString // a git or url key of a source table
+	valueSourceString // git or url of a dependency source
 )
+
+// tomlContinuation is a TOML line continuation in a multi-line string: a
+// backslash and the blanks and newlines after it.
+var tomlContinuation = regexp.MustCompile(`\\[ \t\r\n]+`)
 
 // pyproject reads the dependency and index settings of a pyproject.toml:
 // [project], [build-system], [dependency-groups], [tool.uv] and [tool.poetry].
@@ -31,25 +34,32 @@ func uvToml(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
 }
 
 // toml is a line reader for the parts of TOML that name dependencies. A value
-// may continue over lines while its brackets are open.
+// may continue over lines while its brackets are open or a multi-line string
+// is. Every string is classified by its full path: the section, the dotted key
+// and the inline table keys above it.
 type toml struct {
-	f       analyze.File
-	prefix  string
-	section string
-	kind    int // how the strings of the value being read are used
-	open    int // brackets and braces of that value still open
-	braces  int
-	multi   byte   // quote of the multi-line string that is open at the end of the line
-	key     string // inline table key before the next string
-	word    string // last bare word, the key if "=" follows
-	found   []protocol.Finding
+	f         analyze.File
+	prefix    string
+	section   string
+	base      string  // path of the key being read
+	frames    []frame // open brackets and braces of that value
+	word      string  // last bare word, the key if "=" follows
+	off       int     // offset of the line being read
+	multi     byte    // quote of the multi-line string that is open at the end of the line
+	multiText string  // its text so far
+	multiPath string  // its path
+	multiOff  int     // where it opened
+	found     []protocol.Finding
 }
 
-// lit is a string of a value and, in an inline table, the key it belongs to.
-type lit struct {
-	val, key string
-	inTable  bool
+// frame is an open bracket or brace. A table remembers its latest key.
+type frame struct {
+	table bool
+	key   string
 }
+
+// lit is a string of a value and its path.
+type lit struct{ val, path string }
 
 func readTOML(ctx context.Context, f analyze.File, prefix string) ([]protocol.Finding, error) {
 	t := &toml{f: f, prefix: prefix, section: prefix}
@@ -62,13 +72,16 @@ func (t *toml) line(line string, off int) {
 		// inside a multi-line string: brackets and tables there are text
 		end := strings.Index(line, strings.Repeat(string(t.multi), 3))
 		if end < 0 {
+			t.multiText += line + "\n"
 			return
 		}
-		t.multi = 0
+		text := tomlContinuation.ReplaceAllString(t.multiText+line[:end], "")
+		t.multi, t.multiText = 0, ""
+		t.apply(lit{val: strings.TrimSpace(text), path: t.multiPath}, analyze.EvidenceAt(t.f, t.multiOff))
 		t.value(line[end+3:], off)
 		return
 	}
-	if t.open > 0 {
+	if len(t.frames) > 0 {
 		t.value(line, off)
 		return
 	}
@@ -84,8 +97,8 @@ func (t *toml) line(line string, off int) {
 		if !ok {
 			return
 		}
-		t.kind = valueKindOf(strings.TrimPrefix(t.section+"."+key, "."))
-		t.open, t.braces, t.key, t.word = 0, 0, "", ""
+		t.base = strings.TrimPrefix(t.section+"."+key, ".")
+		t.frames, t.word = nil, ""
 		t.value(rest, off)
 	}
 }
@@ -109,11 +122,12 @@ func cutKey(s string) (key, value string, ok bool) {
 	return "", "", false
 }
 
-// valueKindOf says how to read the value at a full path: the section and the
-// dotted key together, so "[tool]" with "uv.sources.x = ..." and "[tool.uv.sources]"
-// with "x = ..." are the same place.
+// valueKindOf says how to read a string at a full path, so "[tool]" with
+// "uv.sources.x = ..." and "[tool.uv.sources]" with "x = ..." are the same place.
 func valueKindOf(p string) int {
 	switch {
+	case strings.HasSuffix(p, ".include-group"):
+		return valueNone
 	case p == "project.dependencies", p == "build-system.requires", p == "project.optional-dependencies", p == "dependency-groups",
 		strings.HasPrefix(p, "project.optional-dependencies."), strings.HasPrefix(p, "dependency-groups."):
 		return valueRequirement
@@ -122,14 +136,9 @@ func valueKindOf(p string) int {
 		return valueIndex
 	case p == "tool.uv.find-links", p == "tool.uv.pip.find-links":
 		return valueFindLinks
-	case p == "tool.uv.index":
-		return valueIndexTable
 	}
-	if rest, ok := sourcesRest(p); ok {
-		if strings.HasSuffix(rest, ".git") || strings.HasSuffix(rest, ".url") {
-			return valueSourceString
-		}
-		return valueSources
+	if rest, ok := sourcesRest(p); ok && (strings.HasSuffix(rest, ".git") || strings.HasSuffix(rest, ".url")) {
+		return valueSourceString
 	}
 	return valueNone
 }
@@ -157,35 +166,52 @@ func sourcesRest(p string) (string, bool) {
 }
 
 // value reads the strings of text, which is the rest of a key line or a
-// continuation line, and records a finding for each string the kind calls out.
+// continuation line, and records a finding for each string that calls for one.
 func (t *toml) value(text string, off int) {
-	if t.kind == valueNone {
-		t.scan(text) // keep the brackets balanced
-		return
-	}
+	t.off = off
 	ev := analyze.EvidenceAt(t.f, off)
 	for _, l := range t.scan(text) {
-		switch {
-		case l.val == "":
-		case t.kind == valueRequirement && l.key != "include-group":
-			t.found = append(t.found, requirement(l.val, ev)...)
-		case t.kind == valueIndex && !l.inTable, t.kind == valueIndexTable && l.inTable && l.key == "url":
-			if foreignHost(l.val, pypiHosts) || !strings.Contains(l.val, "://") {
-				t.found = append(t.found, ruleIndex.Finding(ev))
-			}
-		case t.kind == valueFindLinks && !l.inTable:
-			if foreignHost(l.val, pypiHosts) {
-				t.found = append(t.found, ruleIndex.Finding(ev))
-			}
-		case t.kind == valueSources && l.inTable && (l.key == "git" || l.key == "url"), t.kind == valueSourceString && !l.inTable:
-			if !strings.HasPrefix(strings.ToLower(l.val), "file:") {
-				t.found = append(t.found, ruleURL.Finding(ev))
-			}
+		t.apply(l, ev)
+	}
+}
+
+// apply records the finding for a string at its path, if any.
+func (t *toml) apply(l lit, ev protocol.Evidence) {
+	if l.val == "" {
+		return
+	}
+	switch valueKindOf(l.path) {
+	case valueRequirement:
+		t.found = append(t.found, requirement(l.val, ev)...)
+	case valueIndex:
+		if foreignHost(l.val, pypiHosts) || !strings.Contains(l.val, "://") {
+			t.found = append(t.found, ruleIndex.Finding(ev))
+		}
+	case valueFindLinks:
+		if foreignHost(l.val, pypiHosts) {
+			t.found = append(t.found, ruleIndex.Finding(ev))
+		}
+	case valueSourceString:
+		if !strings.HasPrefix(strings.ToLower(l.val), "file:") {
+			t.found = append(t.found, ruleURL.Finding(ev))
 		}
 	}
 }
 
-// scan returns the strings of text and keeps count of the open brackets and braces.
+// path is the path of the string being read: the key line and the key of every
+// open inline table.
+func (t *toml) path() string {
+	p := t.base
+	for _, fr := range t.frames {
+		if fr.table && fr.key != "" {
+			p += "." + fr.key
+		}
+	}
+	return strings.TrimPrefix(p, ".")
+}
+
+// scan returns the strings of text and keeps track of the open brackets, braces
+// and inline table keys.
 func (t *toml) scan(text string) []lit {
 	var out []lit
 	for i := 0; i < len(text); i++ {
@@ -196,11 +222,10 @@ func (t *toml) scan(text string) []lit {
 			if triple := strings.Repeat(string(c), 3); strings.HasPrefix(text[i:], triple) {
 				end := strings.Index(text[i+3:], triple)
 				if end < 0 {
-					t.multi = c
+					t.multi, t.multiText, t.multiPath, t.multiOff = c, text[i+3:]+"\n", t.path(), t.off
 					return out
 				}
-				out = append(out, lit{val: text[i+3 : i+3+end], key: t.key, inTable: t.braces > 0})
-				t.key = ""
+				out = append(out, lit{val: text[i+3 : i+3+end], path: t.path()})
 				i += 3 + end + 2
 				continue
 			}
@@ -217,21 +242,22 @@ func (t *toml) scan(text string) []lit {
 				t.word = strings.ToLower(val) // a quoted key
 				continue
 			}
-			out = append(out, lit{val: val, key: t.key, inTable: t.braces > 0})
-			t.key = ""
-		case '[':
-			t.open++
-		case '{':
-			t.open++
-			t.braces++
+			out = append(out, lit{val: val, path: t.path()})
+		case '[', '{':
+			t.frames = append(t.frames, frame{table: c == '{'})
 		case ']', '}':
-			t.open = max(0, t.open-1)
-			if c == '}' {
-				t.braces = max(0, t.braces-1)
+			if n := len(t.frames); n > 0 {
+				t.frames = t.frames[:n-1]
 			}
 		case '=':
-			t.key = t.word
-		case ',', ' ', '\t':
+			if n := len(t.frames); n > 0 && t.frames[n-1].table {
+				t.frames[n-1].key = t.word
+			}
+		case ',':
+			if n := len(t.frames); n > 0 && t.frames[n-1].table {
+				t.frames[n-1].key = ""
+			}
+		case ' ', '\t':
 		default:
 			start := i
 			for i+1 < len(text) && !strings.ContainsRune(" \t,=[]{}#\"'", rune(text[i+1])) {

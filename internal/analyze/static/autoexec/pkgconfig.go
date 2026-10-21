@@ -16,7 +16,8 @@ const maxBlock = 4096 // bytes read for one Prisma generator block or one gyp ex
 var (
 	scopedRegistryRE = regexp.MustCompile(`^@[^:\s]+:registry$`)
 	yamlKeyRE        = regexp.MustCompile(`^(\s*)(?:-\s+)?["']?([A-Za-z_][A-Za-z0-9_-]*)["']?\s*:(?:\s+(.*))?$`)
-	yamlKeysRE       = regexp.MustCompile(`(?:^|[\s{,\[])["']?(?:yarnPath|npmRegistryServer|plugins)["']?\s*:`)
+	yamlKeysRE       = regexp.MustCompile(`(?:^|[^A-Za-z0-9_./-])(?:yarnPath|npmRegistryServer|plugins)(?:[^A-Za-z0-9_./-]|$)`)
+	yamlOddKeyRE     = regexp.MustCompile(`^\s*[?:](?:\s|$)|"[^"\n]*\\[^"\n]*"\s*:`)
 	yamlItemRE       = regexp.MustCompile(`^\s*-\s+(\S.*)$`)
 	yarnReleaseRE    = regexp.MustCompile(`^\.yarn/releases/yarn-[A-Za-z0-9._-]+\.c?js$`)
 	yarnPluginRE     = regexp.MustCompile(`^\.yarn/plugins/@yarnpkg/plugin-[A-Za-z0-9._-]+\.c?js$`)
@@ -130,19 +131,47 @@ func (s *scan) npmrc() {
 	}
 }
 
-// yarnrcPair splits a Yarn 1 .yarnrc line into key and value. The key may be
-// quoted, and the separator is a blank, = or :.
-func yarnrcPair(text string) (key, value string) {
-	if q := text[0]; q == '"' || q == '\'' {
-		if j := strings.IndexByte(text[1:], q); j >= 0 {
-			return text[1 : j+1], unquote(strings.TrimLeft(text[j+2:], " \t=:"))
+// yarnrcPair splits a Yarn 1 .yarnrc line into its keys and value. Like the
+// lockfile format it comes from, a line may list several keys separated by
+// commas, a key may be a double-quoted JSON string, and the separator before the
+// value is a blank, = or :.
+func yarnrcPair(text string) (keys []string, value string) {
+	rest := text
+	for {
+		var key string
+		key, rest = yarnrcKey(rest)
+		keys = append(keys, key)
+		rest = strings.TrimLeft(rest, " \t")
+		if !strings.HasPrefix(rest, ",") {
+			return keys, unquote(strings.TrimLeft(rest, " \t=:"))
+		}
+		rest = strings.TrimLeft(rest[1:], " \t")
+	}
+}
+
+// yarnrcKey reads one key from the start of s and returns the rest of s.
+func yarnrcKey(s string) (key, rest string) {
+	if s != "" && (s[0] == '"' || s[0] == '\'') {
+		for j := 1; j < len(s); j++ {
+			switch {
+			case s[0] == '"' && s[j] == '\\':
+				j++
+			case s[j] == s[0]:
+				key = s[1:j]
+				if s[0] == '"' {
+					var decoded string
+					if json.Unmarshal([]byte(s[:j+1]), &decoded) == nil {
+						key = decoded
+					}
+				}
+				return key, s[j+1:]
+			}
 		}
 	}
-	i := strings.IndexAny(text, " \t=:")
-	if i < 0 {
-		return text, ""
+	if i := strings.IndexAny(s, " \t,=:"); i >= 0 {
+		return s[:i], s[i:]
 	}
-	return text[:i], unquote(strings.TrimLeft(text[i:], " \t=:"))
+	return s, ""
 }
 
 // yarnrc reads a Yarn 1 .yarnrc: "key value" lines.
@@ -155,13 +184,15 @@ func (s *scan) yarnrc() {
 		if text == "" || text[0] == '#' {
 			continue
 		}
-		key, value := yarnrcPair(text)
-		switch {
-		case key == "yarn-path":
-			s.committed(value, yarnReleaseRE, l.off)
-		case key == "registry", scopedRegistryRE.MatchString(key):
-			if !defaultRegistry(value) {
-				s.add(ruleConfig, l.off)
+		keys, value := yarnrcPair(text)
+		for _, key := range keys {
+			switch {
+			case key == "yarn-path":
+				s.committed(value, yarnReleaseRE, l.off)
+			case key == "registry", scopedRegistryRE.MatchString(key):
+				if !defaultRegistry(value) {
+					s.add(ruleConfig, l.off)
+				}
 			}
 		}
 	}
@@ -235,7 +266,10 @@ func (s *scan) yarnrcYML() {
 			consumed = true
 			s.committed(unquote(item[1]), yarnPluginRE, l.off)
 		}
-		if !consumed && yamlKeysRE.MatchString(text) {
+		// An explicit key (? key), a bare value (: value) or an escaped key can
+		// spell a name the reader above does not see, and so can a name with no
+		// colon after it; none of them can be read by line, so they are reported.
+		if yamlOddKeyRE.MatchString(text) || (!consumed && yamlKeysRE.MatchString(text)) {
 			s.add(ruleConfig, l.off)
 		}
 	}
@@ -376,7 +410,7 @@ func (s *scan) gyp() {
 			return
 		}
 		cmd := expansion(text[loc[1]:min(len(text), loc[1]+maxBlock)])
-		if text[loc[0]] != '<' || strings.Contains(text[loc[0]:loc[1]], "pymod") || !gypKnownRE.MatchString(cmd) {
+		if text[loc[0]] != '<' || strings.Contains(text[loc[0]:loc[1]], "pymod") || !knownExpansion(cmd) {
 			s.add(ruleGypExpand, loc[0])
 		}
 		s.riskAt(cmd, loc[0])
@@ -384,6 +418,20 @@ func (s *scan) gyp() {
 	for _, loc := range gypActionsRE.FindAllStringIndex(text, signals.MaxMatches) {
 		s.add(ruleGypAction, loc[0])
 	}
+}
+
+// knownExpansion reports whether cmd is one of the expansions benign addons use.
+// A pkg-config argument that ends in .pc names a file in the repo, so it is not.
+func knownExpansion(cmd string) bool {
+	if !gypKnownRE.MatchString(cmd) {
+		return false
+	}
+	for _, arg := range strings.Fields(cmd) {
+		if strings.HasSuffix(arg, ".pc") {
+			return false
+		}
+	}
+	return true
 }
 
 // expansion returns the text up to the parenthesis that closes the expansion,
