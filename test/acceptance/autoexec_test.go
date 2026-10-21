@@ -164,6 +164,19 @@ func TestAutoexec(t *testing.T) {
 			wantAbsent: []string{"GAL-AUTOEXEC-001", "GAL-AUTOEXEC-010", "GAL-AUTOEXEC-011", "GAL-AUTOEXEC-012"},
 		},
 		{
+			name: "benign twin: devcontainer npm ci and postinstall node-gyp rebuild are low",
+			setup: filesRepo(map[string]string{
+				".devcontainer/devcontainer.json": "{\n  \"name\": \"app\",\n  \"postCreateCommand\": \"npm ci\"\n}\n",
+				"package.json":                    "{\n  \"name\": \"app\",\n  \"scripts\": {\n    \"postinstall\": \"node-gyp rebuild\"\n  }\n}\n",
+			}),
+			wantCode: 0,
+			wantAt: map[string]string{
+				"GAL-AUTOEXEC-004": ".devcontainer/devcontainer.json:3",
+				"GAL-AUTOEXEC-005": "package.json:4",
+			},
+			wantAbsent: []string{"GAL-AUTOEXEC-010", "GAL-AUTOEXEC-011", "GAL-AUTOEXEC-012"},
+		},
+		{
 			name:       "benign twin: husky hook that runs lint-staged",
 			setup:      func(t *testing.T) string { return corpus(t, "benign-husky-lint") },
 			wantCode:   0,

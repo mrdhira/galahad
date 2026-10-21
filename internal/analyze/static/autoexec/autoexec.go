@@ -35,6 +35,75 @@ var (
 	ruleObfuscate = protocol.Rule{ID: "GAL-AUTOEXEC-012", Severity: protocol.SeverityHigh, Title: "Auto-run command is obfuscated", Attack: "T1027"}
 )
 
+// Same rules as 004 and 005 for entries where every command is a known-harmless
+// install command (see harmless). Scoring counts a rule ID once at its highest
+// severity, so one other command in the repo keeps the medium finding.
+var (
+	ruleDevLifeLow = lowered(ruleDevLife)
+	ruleNpmLow     = lowered(ruleNpm)
+)
+
+func lowered(r protocol.Rule) protocol.Rule {
+	r.Severity = protocol.SeverityLow
+	return r
+}
+
+const flags = `(?:[ \t]+--[a-z][a-z-]*(?:=[A-Za-z0-9._-]+)?)*`
+
+// harmlessREs match a whole command: a dependency install or a local build step.
+// Only flags may follow, never a positional argument, URL or package name.
+var harmlessREs = []*regexp.Regexp{
+	regexp.MustCompile(`^(?:npm[ \t]+(?:ci|install|i)|pnpm[ \t]+(?:install|i)|yarn(?:[ \t]+install)?|bun[ \t]+install)` + flags + `$`),
+	regexp.MustCompile(`^(?:poetry[ \t]+install|uv[ \t]+sync|go[ \t]+mod[ \t]+download|node-gyp[ \t]+rebuild|husky[ \t]+install|prisma[ \t]+generate)` + flags + `$`),
+	regexp.MustCompile(`^(?:pip3?|python3?[ \t]+-m[ \t]+pip)[ \t]+install[ \t]+(?:-r[ \t]+[A-Za-z0-9._/][A-Za-z0-9._/-]*\.txt|-e[ \t]+\.|\.)$`),
+}
+
+// harmless reports whether cmd is one of the known-harmless commands. A command
+// with a shell metacharacter or a newline never is.
+func harmless(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	if strings.ContainsAny(cmd, ";&|`$()<>\n\r") {
+		return false
+	}
+	for _, re := range harmlessREs {
+		if re.MatchString(cmd) {
+			return true
+		}
+	}
+	return false
+}
+
+// harmlessCommands reports whether a devcontainer command value is a string, an
+// array of strings (argv, joined with spaces) or an object of those, and every
+// command in it is harmless.
+func harmlessCommands(n *node) bool {
+	one := func(n *node) bool {
+		switch n.kind {
+		case 's':
+			return harmless(n.str)
+		case 'a':
+			words := make([]string, len(n.vals))
+			for i, v := range n.vals {
+				if v.kind != 's' {
+					return false
+				}
+				words[i] = v.str
+			}
+			return harmless(strings.Join(words, " "))
+		}
+		return false
+	}
+	if n.kind != 'o' {
+		return one(n)
+	}
+	for _, v := range n.vals {
+		if !one(v) {
+			return false
+		}
+	}
+	return len(n.vals) > 0
+}
+
 var (
 	shellArgsRE  = regexp.MustCompile(`(?i)(?:^|\s)(?:-c|-command|-encodedcommand|-enc|/c)(?:\s|$)`)
 	repoRE       = regexp.MustCompile(`^\s*-\s*repo:\s*(\S+)`)
@@ -486,7 +555,11 @@ func (s *scan) devcontainer(root *node) {
 	}
 	for _, key := range devLifecycle {
 		if v := root.get(key); v != nil {
-			s.add(ruleDevLife, v.start)
+			rule := ruleDevLife
+			if harmlessCommands(v) {
+				rule = ruleDevLifeLow
+			}
+			s.add(rule, v.start)
 			leaves(v)
 		}
 	}
@@ -500,7 +573,11 @@ func (s *scan) packageJSON(root *node) {
 	}{{ruleNpm, npmInstall}, {ruleHook, npmPrepare}} {
 		for _, name := range group.names {
 			if v := scripts.get(name); v != nil && v.kind == 's' {
-				s.add(group.rule, v.start)
+				rule := group.rule
+				if rule.ID == ruleNpm.ID && harmless(v.str) {
+					rule = ruleNpmLow
+				}
+				s.add(rule, v.start)
 				s.riskAt(v.str, v.start)
 			}
 		}
