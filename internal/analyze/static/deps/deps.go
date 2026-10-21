@@ -116,15 +116,14 @@ func packageJSON(_ context.Context, f analyze.File) ([]protocol.Finding, error) 
 		if strings.HasPrefix(lower, "file:") || strings.HasPrefix(lower, "workspace:") || strings.HasPrefix(lower, "link:") {
 			continue
 		}
-		ev := analyze.EvidenceAt(f, m.off)
-		if isNpmRemote(lower, spec) {
-			found = append(found, ruleURL.Finding(ev))
+		if isNpmRemote(lower, spec) && !full(found, ruleURL) {
+			found = append(found, ruleURL.Finding(analyze.EvidenceAt(f, m.off)))
 		}
 		if alias, ok := strings.CutPrefix(lower, "npm:"); ok {
 			name = aliasTarget(alias)
 		}
-		if topNpm.squat(npmName(name)) {
-			found = append(found, ruleTypo.Finding(ev))
+		if topNpm.squat(npmName(name)) && !full(found, ruleTypo) {
+			found = append(found, ruleTypo.Finding(analyze.EvidenceAt(f, m.off)))
 		}
 	}
 	return found, err
@@ -135,22 +134,39 @@ func packageLock(_ context.Context, f analyze.File) ([]protocol.Finding, error) 
 	var found []protocol.Finding
 	for _, m := range members {
 		if len(m.path) == 3 && m.path[0] == "packages" && m.path[2] == "resolved" && foreignHost(m.val, npmHosts) {
+			if full(found, ruleLock) {
+				break
+			}
 			found = append(found, ruleLock.Finding(analyze.EvidenceAt(f, m.off)))
 		}
 	}
 	return found, err
 }
 
+// full reports whether found holds protocol.MaxFindingsPerRulePerFile findings of
+// rule r. The engine keeps no more than that, and EvidenceAt counts lines from the
+// start of the file, so building evidence for every finding of a large file is
+// quadratic.
+func full(found []protocol.Finding, r protocol.Rule) bool {
+	n := 0
+	for _, fd := range found {
+		if fd.RuleID == r.ID {
+			n++
+		}
+	}
+	return n >= protocol.MaxFindingsPerRulePerFile
+}
+
 func yarnLock(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
 	var found []protocol.Finding
-	err := eachLine(ctx, f, func(line string, off int) {
+	err := eachLine(ctx, f, func(line string, n int) {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "resolved ")
 		if !ok {
 			return
 		}
 		val, _, _ := strings.Cut(strings.Trim(strings.TrimSpace(rest), `"`), "#")
 		if foreignHost(val, yarnHosts) {
-			found = append(found, ruleLock.Finding(analyze.EvidenceAt(f, off)))
+			found = append(found, ruleLock.Finding(where{f.Path, n, line}.evidence()))
 		}
 	})
 	return found, err
@@ -158,7 +174,7 @@ func yarnLock(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
 
 func requirements(ctx context.Context, f analyze.File) ([]protocol.Finding, error) {
 	var found []protocol.Finding
-	err := eachLine(ctx, f, func(line string, off int) {
+	err := eachLine(ctx, f, func(line string, n int) {
 		s := strings.TrimSpace(line)
 		if i := strings.Index(s, " #"); i >= 0 {
 			s = strings.TrimSpace(s[:i])
@@ -166,18 +182,18 @@ func requirements(ctx context.Context, f analyze.File) ([]protocol.Finding, erro
 		if s == "" || s[0] == '#' {
 			return
 		}
-		ev := analyze.EvidenceAt(f, off)
+		at := where{f.Path, n, line}
 		if s[0] == '-' {
 			opt, val := splitOption(s)
 			switch opt {
 			case "-i", "--index-url", "--extra-index-url":
 				if foreignHost(val, pypiHosts) || !strings.Contains(val, "://") {
-					found = append(found, ruleIndex.Finding(ev))
+					found = append(found, ruleIndex.Finding(at.evidence()))
 				}
 				return
 			case "-f", "--find-links":
 				if foreignHost(val, pypiHosts) {
-					found = append(found, ruleIndex.Finding(ev))
+					found = append(found, ruleIndex.Finding(at.evidence()))
 				}
 				return
 			case "-e", "--editable":
@@ -186,7 +202,7 @@ func requirements(ctx context.Context, f analyze.File) ([]protocol.Finding, erro
 				return
 			}
 		}
-		found = append(found, requirement(s, ev)...)
+		found = append(found, requirement(s, at)...)
 	})
 	return found, err
 }
@@ -254,7 +270,7 @@ func looksLikeRequirements(data []byte) bool {
 }
 
 // requirement checks one requirement specifier: a URL requirement and the name.
-func requirement(s string, ev protocol.Evidence) []protocol.Finding {
+func requirement(s string, at where) []protocol.Finding {
 	var found []protocol.Finding
 	spec, name := strings.ToLower(s), ""
 	if !pyScheme.MatchString(s) && !strings.HasPrefix(spec, "git+") {
@@ -267,10 +283,10 @@ func requirement(s string, ev protocol.Evidence) []protocol.Finding {
 		}
 	}
 	if (strings.Contains(spec, "://") || strings.HasPrefix(spec, "git+")) && !strings.HasPrefix(spec, "file:") {
-		found = append(found, ruleURL.Finding(ev))
+		found = append(found, ruleURL.Finding(at.evidence()))
 	}
 	if name != "" && topPypi.squat(pypiName(name)) {
-		found = append(found, ruleTypo.Finding(ev))
+		found = append(found, ruleTypo.Finding(at.evidence()))
 	}
 	return found
 }
@@ -296,10 +312,24 @@ func splitOption(s string) (opt, val string) {
 	return opt, strings.TrimSpace(strings.TrimPrefix(val, "="))
 }
 
-// eachLine calls fn with every line and its byte offset, and stops when ctx is done.
-func eachLine(ctx context.Context, f analyze.File, fn func(line string, off int)) error {
+// where is a line of a file: its path, 1-based number and text. Its evidence is
+// built only for a finding, because counting lines from the start of the file
+// for every line read is quadratic.
+type where struct {
+	path string
+	n    int
+	text string
+}
+
+func (w where) evidence() protocol.Evidence {
+	return protocol.Evidence{Path: w.path, Line: w.n, Snippet: protocol.Snippet(strings.TrimSuffix(w.text, "\r"))}
+}
+
+// eachLine calls fn with every line, cut at MaxLineScan, and its 1-based number,
+// and stops when ctx is done.
+func eachLine(ctx context.Context, f analyze.File, fn func(line string, n int)) error {
 	off := 0
-	for len(f.Data) > off {
+	for n := 1; len(f.Data) > off; n++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -312,7 +342,7 @@ func eachLine(ctx context.Context, f analyze.File, fn func(line string, off int)
 			end = len(f.Data)
 		}
 		line := f.Data[off:end]
-		fn(string(line[:min(len(line), analyze.MaxLineScan)]), off)
+		fn(string(line[:min(len(line), analyze.MaxLineScan)]), n)
 		off = next
 	}
 	return nil
@@ -357,12 +387,12 @@ func pypiName(name string) string {
 // popular is a snapshot of well-known package names.
 type popular struct {
 	names    map[string]bool
-	stripped map[string]bool // names without - _ .
-	long     []string        // names of at least 5 characters
+	stripped map[string]bool  // names without - _ .
+	long     map[int][]string // names of at least 5 characters, by length
 }
 
 func load(snapshot string) popular {
-	p := popular{names: map[string]bool{}, stripped: map[string]bool{}}
+	p := popular{names: map[string]bool{}, stripped: map[string]bool{}, long: map[int][]string{}}
 	for line := range strings.SplitSeq(snapshot, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -371,7 +401,7 @@ func load(snapshot string) popular {
 		p.names[line] = true
 		p.stripped[strip(line)] = true
 		if len(line) >= 5 {
-			p.long = append(p.long, line)
+			p.long[len(line)] = append(p.long[len(line)], line)
 		}
 	}
 	return p
@@ -387,16 +417,23 @@ func (p popular) squat(name string) bool {
 	if p.stripped[strip(name)] {
 		return true
 	}
-	for _, n := range p.long {
-		if oneEdit(name, n) {
-			return true
+	// one edit changes the length by at most one
+	for l := len(name) - 1; l <= len(name)+1; l++ {
+		for _, n := range p.long[l] {
+			if oneEdit(name, n) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// separators are dropped by strip. The replacer is built once: building it per
+// name is most of the cost of a long requirements file.
+var separators = strings.NewReplacer("-", "", "_", "", ".", "")
+
 func strip(s string) string {
-	return strings.NewReplacer("-", "", "_", "", ".", "").Replace(s)
+	return separators.Replace(s)
 }
 
 // oneEdit reports whether a and b are at Damerau-Levenshtein distance exactly 1:

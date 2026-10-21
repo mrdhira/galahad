@@ -3,6 +3,7 @@ package deps_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -142,6 +143,18 @@ a = { git = "https://git.sinkhole.test/a.git" }
 func TestAnalyze(t *testing.T) {
 	filler := strings.Repeat("x", 3<<19) // 1.5 MiB, above MaxConfigSize
 	deep := strings.Repeat(`{"a":`, 40) + "1" + strings.Repeat("}", 40)
+	var manyGit, manyLock strings.Builder
+	var wantManyGit, wantManyLock []string
+	for i := range 25 {
+		fmt.Fprintf(&manyGit, "\"g%d\": \"git+https://git.sinkhole.test/g%d.git\",\n", i, i)
+		fmt.Fprintf(&manyLock, "\"node_modules/l%d\": {\"resolved\": \"https://npm.sinkhole.test/l%d.tgz\"},\n", i, i)
+		if i < 20 {
+			wantManyGit = append(wantManyGit, fmt.Sprintf("GAL-DEPS-002@%d", i+3))
+			wantManyLock = append(wantManyLock, fmt.Sprintf("GAL-DEPS-003@%d", i+3))
+		}
+	}
+	slices.Sort(wantManyGit)
+	slices.Sort(wantManyLock)
 	tomlAtLimit := "[project]\noptional-dependencies = " + strings.Repeat("{a=", 31) + `["pkg @ https://dl.sinkhole.test/p.zip"]` + strings.Repeat("}", 31) + "\n"
 	tomlTooDeep := "[tool]\nx = " + strings.Repeat("{a=", 33) + `"v"` + strings.Repeat("}", 33) + "\n"
 	tests := []struct {
@@ -184,6 +197,12 @@ func TestAnalyze(t *testing.T) {
 			data:         "{\n\"dependencies\": {\n\"express\": \"1\",\n\"@types/react\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"Ex_Press\": \"1\"\n}\n}",
 			wantFindings: []string{"GAL-DEPS-001@5", "GAL-DEPS-001@6"},
 		},
+		{
+			name:         "package.json reports only the findings per rule the engine keeps",
+			file:         "package.json",
+			data:         "{\n\"dependencies\": {\n" + manyGit.String() + "\"x\": \"1\"\n}\n}\n",
+			wantFindings: wantManyGit,
+		},
 		{name: "malformed json keeps what was read and skips the rest", file: "package.json", data: "{\n\"dependencies\": {\n\"expresss\": \"1\",\n", wantFindings: []string{"GAL-DEPS-001@3"}, wantSkip: "parse_error"},
 		{name: "deeply nested json is skipped", file: "package.json", data: deep, wantSkip: "depth"},
 		{
@@ -191,6 +210,12 @@ func TestAnalyze(t *testing.T) {
 			file:         "package-lock.json",
 			data:         "{\n\"packages\": {\n\"\": {\"name\": \"x\"},\n\"node_modules/a\": {\n\"resolved\": \"https://registry.npmjs.org/a/-/a-1.tgz\"\n},\n\"node_modules/b\": {\n\"resolved\": \"https://npm.sinkhole.test/b/-/b-1.tgz\"\n},\n\"node_modules/c\": {\n\"resolved\": \"file:../c\"\n},\n\"node_modules/d\": {\n\"resolved\": \"git+ssh://git@git.example.test/d.git\"\n}\n}\n}",
 			wantFindings: []string{"GAL-DEPS-003@14", "GAL-DEPS-003@8"},
+		},
+		{
+			name:         "lockfile reports only the findings the engine keeps",
+			file:         "package-lock.json",
+			data:         "{\n\"packages\": {\n" + manyLock.String() + "\"x\": {}\n}\n}\n",
+			wantFindings: wantManyLock,
 		},
 		{
 			name:         "yarn lock resolved lines",
@@ -412,7 +437,7 @@ func TestAnalyzeMetadata(t *testing.T) {
 	}
 }
 
-func TestAnalyzeLargeTOMLWithinDeadline(t *testing.T) {
+func TestAnalyzeLargeFilesWithinDeadline(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
@@ -429,6 +454,12 @@ func TestAnalyzeLargeTOMLWithinDeadline(t *testing.T) {
 			wantFindings: []string{"GAL-DEPS-002@500004"},
 		},
 		{
+			name:         "open array over a million blank lines",
+			file:         "pyproject.toml",
+			data:         "[tool.x]\nv = [\n" + strings.Repeat("\n", 1000000) + "]\n[tool.uv.sources]\nhelper = { git = \"https://git.sinkhole.test/h.git\" }\n",
+			wantFindings: []string{"GAL-DEPS-002@1000005"},
+		},
+		{
 			name:     "long inline table key followed by many strings",
 			file:     "pyproject.toml",
 			data:     "[tool]\nx = {" + strings.Repeat("k", 500000) + "=[\"" + strings.Repeat("\",\"", 150000) + "\"]}\n",
@@ -439,6 +470,12 @@ func TestAnalyzeLargeTOMLWithinDeadline(t *testing.T) {
 			file:     "pyproject.toml",
 			data:     "[" + strings.Repeat("t", 512<<10) + "]\n" + strings.Repeat("a=\"1\"\n", 87000) + "[tool.uv.sources]\nhelper = { git = \"https://git.sinkhole.test/h.git\" }\n",
 			wantSkip: "depth",
+		},
+		{
+			name:         "requirements index option after 340k lines",
+			file:         "requirements.txt",
+			data:         strings.Repeat("-q\n", 340000) + "--index-url https://pypi.sinkhole.test/simple\n",
+			wantFindings: []string{"GAL-DEPS-004@340001"},
 		},
 	}
 	for _, tt := range tests {
@@ -469,6 +506,64 @@ func TestAnalyzeLargeTOMLWithinDeadline(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAnalyzeLinesCostAlike(t *testing.T) {
+	const uvGit = "[tool.uv.sources]\nhelper = { git = \"https://git.sinkhole.test/h.git\" }\n"
+	tests := []struct {
+		name string
+		// inputs
+		file     string
+		data     string // lines the reader handles one by one
+		baseline string // as many lines, skipped before any work per line
+		// expectations
+		wantMaxRatio float64 // time for data over time for baseline: 1 to 2 when linear, 15 under heavy load, over 60 when quadratic
+	}{
+		{
+			name:         "pyproject open array over blank lines",
+			file:         "pyproject.toml",
+			data:         "[tool.x]\nv = [\n" + strings.Repeat("\n", 1000000) + "]\n" + uvGit,
+			baseline:     "[tool.x]\n\n" + strings.Repeat("\n", 1000000) + "\n" + uvGit,
+			wantMaxRatio: 25,
+		},
+		{
+			name:         "requirements option lines",
+			file:         "requirements.txt",
+			data:         strings.Repeat("-q\n", 340000) + "--index-url https://pypi.sinkhole.test/simple\n",
+			baseline:     strings.Repeat("#q\n", 340000) + "--index-url https://pypi.sinkhole.test/simple\n",
+			wantMaxRatio: 25,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := analyze.File{Path: tt.file, Name: tt.file, Data: []byte(tt.data)}
+			baseline := analyze.File{Path: tt.file, Name: tt.file, Data: []byte(tt.baseline)}
+			// the fastest of runs that take turns: both are long enough to share
+			// the CPU alike under load, and a garbage collector pause does not
+			// decide the ratio
+			bestData, bestBaseline := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+			for range 3 {
+				bestData = min(bestData, timeAnalyze(t, data))
+				bestBaseline = min(bestBaseline, timeAnalyze(t, baseline))
+			}
+
+			if ratio := float64(bestData) / float64(bestBaseline); ratio > tt.wantMaxRatio {
+				t.Errorf("data took %.1fx the time of the baseline (%v, %v), want at most %.0fx", ratio, bestData, bestBaseline, tt.wantMaxRatio)
+			}
+		})
+	}
+}
+
+// timeAnalyze runs the analyzer on f, which must give one finding, and returns how long it took.
+func timeAnalyze(t *testing.T, f analyze.File) time.Duration {
+	t.Helper()
+	start := time.Now()
+	out, err := deps.New().Analyze(context.Background(), f)
+	took := time.Since(start)
+	if err != nil || len(out.Findings) != 1 {
+		t.Fatalf("err = %v, findings = %d, want 1 finding", err, len(out.Findings))
+	}
+	return took
 }
 
 func TestAnalyzeCancelled(t *testing.T) {

@@ -26,6 +26,10 @@ const (
 	maxTOMLPath  = 1024
 )
 
+// keyQuotes drops the quotes and blanks of a table name or key. It is built once,
+// not per line.
+var keyQuotes = strings.NewReplacer(`"`, "", "'", "", " ", "", "\t", "")
+
 // tomlContinuation is a TOML line continuation in a multi-line string: a
 // backslash and the blanks and newlines after it.
 var tomlContinuation = regexp.MustCompile(`\\[ \t\r\n]+`)
@@ -52,11 +56,11 @@ type toml struct {
 	base      string          // path of the key being read
 	frames    []frame         // open brackets and braces of that value
 	word      string          // last bare word, the key if "=" follows
-	off       int             // offset of the line being read
+	at        where           // line being read
 	multi     byte            // quote of the multi-line string that is open at the end of the line
 	multiText strings.Builder // its text so far
 	multiPath string          // its path
-	multiOff  int             // where it opened
+	multiAt   where           // line where it opened
 	found     []protocol.Finding
 	err       error // errDepth once a limit is hit; the rest of the file is not read
 }
@@ -81,10 +85,11 @@ func readTOML(ctx context.Context, f analyze.File, prefix string) ([]protocol.Fi
 	return t.found, err
 }
 
-func (t *toml) line(line string, off int) {
+func (t *toml) line(line string, n int) {
 	if t.err != nil {
 		return
 	}
+	at := where{t.f.Path, n, line}
 	if t.multi != 0 {
 		// inside a multi-line string: brackets and tables there are text
 		end := strings.Index(line, strings.Repeat(string(t.multi), 3))
@@ -97,12 +102,12 @@ func (t *toml) line(line string, off int) {
 		text := tomlContinuation.ReplaceAllString(t.multiText.String(), "")
 		t.multi = 0
 		t.multiText.Reset()
-		t.apply(lit{val: strings.TrimSpace(text), path: t.multiPath}, analyze.EvidenceAt(t.f, t.multiOff))
-		t.value(line[end+3:], off)
+		t.apply(lit{val: strings.TrimSpace(text), path: t.multiPath}, t.multiAt)
+		t.value(line[end+3:], at)
 		return
 	}
 	if len(t.frames) > 0 {
-		t.value(line, off)
+		t.value(line, at)
 		return
 	}
 	s := strings.TrimSpace(line)
@@ -110,7 +115,7 @@ func (t *toml) line(line string, off int) {
 	case s == "" || s[0] == '#':
 	case s[0] == '[':
 		name, _, _ := strings.Cut(strings.TrimLeft(s, "[ "), "]")
-		name = strings.ToLower(strings.NewReplacer(`"`, "", "'", "", " ", "", "\t", "").Replace(name))
+		name = strings.ToLower(keyQuotes.Replace(name))
 		if len(name) > maxTOMLPath {
 			t.err = errDepth
 			return
@@ -127,7 +132,7 @@ func (t *toml) line(line string, off int) {
 		}
 		t.base = strings.TrimPrefix(t.section+"."+key, ".")
 		t.frames, t.word = nil, ""
-		t.value(rest, off)
+		t.value(rest, at)
 	}
 }
 
@@ -143,7 +148,7 @@ func cutKey(s string) (key, value string, ok bool) {
 		case c == '"' || c == '\'':
 			quote = c
 		case c == '=':
-			key = strings.ToLower(strings.NewReplacer(`"`, "", "'", "", " ", "", "\t", "").Replace(s[:i]))
+			key = strings.ToLower(keyQuotes.Replace(s[:i]))
 			return key, s[i+1:], key != ""
 		}
 	}
@@ -196,33 +201,32 @@ func sourcesRest(p string) (string, bool) {
 
 // value reads the strings of text, which is the rest of a key line or a
 // continuation line, and records a finding for each string that calls for one.
-func (t *toml) value(text string, off int) {
-	t.off = off
-	ev := analyze.EvidenceAt(t.f, off)
+func (t *toml) value(text string, at where) {
+	t.at = at
 	for _, l := range t.scan(text) {
-		t.apply(l, ev)
+		t.apply(l, at)
 	}
 }
 
 // apply records the finding for a string at its path, if any.
-func (t *toml) apply(l lit, ev protocol.Evidence) {
+func (t *toml) apply(l lit, at where) {
 	if l.val == "" {
 		return
 	}
 	switch valueKindOf(l.path) {
 	case valueRequirement:
-		t.found = append(t.found, requirement(l.val, ev)...)
+		t.found = append(t.found, requirement(l.val, at)...)
 	case valueIndex:
 		if foreignHost(l.val, pypiHosts) || !strings.Contains(l.val, "://") {
-			t.found = append(t.found, ruleIndex.Finding(ev))
+			t.found = append(t.found, ruleIndex.Finding(at.evidence()))
 		}
 	case valueFindLinks:
 		if foreignHost(l.val, pypiHosts) {
-			t.found = append(t.found, ruleIndex.Finding(ev))
+			t.found = append(t.found, ruleIndex.Finding(at.evidence()))
 		}
 	case valueSourceString:
 		if !strings.HasPrefix(strings.ToLower(l.val), "file:") {
-			t.found = append(t.found, ruleURL.Finding(ev))
+			t.found = append(t.found, ruleURL.Finding(at.evidence()))
 		}
 	}
 }
@@ -248,7 +252,7 @@ func (t *toml) scan(text string) []lit {
 			if triple := strings.Repeat(string(c), 3); strings.HasPrefix(text[i:], triple) {
 				end := strings.Index(text[i+3:], triple)
 				if end < 0 {
-					t.multi, t.multiPath, t.multiOff = c, t.path(), t.off
+					t.multi, t.multiPath, t.multiAt = c, t.path(), t.at
 					t.multiText.WriteString(text[i+3:])
 					t.multiText.WriteByte('\n')
 					return out
