@@ -63,6 +63,7 @@ const (
 // Limits on message fields.
 const (
 	MaxInputBytes   = 1 << 30 // local input: bytes sent in Data frames
+	MaxInputEntries = 200000  // local input: entries of the tar stream
 	MaxTimeoutSec   = 24 * 60 * 60
 	MaxErrorMessage = 512 // runes
 	MaxVersion      = 64  // bytes
