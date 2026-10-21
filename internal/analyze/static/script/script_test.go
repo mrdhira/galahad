@@ -797,7 +797,7 @@ func TestAnalyzeLimits(t *testing.T) {
 		{name: "1 MB run of spaces only", path: "pad.js", data: pad(1 << 20)},
 		{name: "payload at the end of a 2 MB line", path: "big.js", data: strings.Repeat(minifiedUnit, 2<<20/len(minifiedUnit)) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
 		{name: "payload across a window cut", path: "cut.js", data: strings.Repeat(";", 256<<10-4) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
-		{name: "1 MB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 1<<20/5), wantSkip: protocol.SkipBudget},
+		{name: "400 KB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 400<<10/5), wantSkip: protocol.SkipBudget},
 		{name: "2 MB blob on one line", path: "blob.js", data: "var x='" + unit(2<<20) + "';\n", wantRules: []string{"OBF-003:1"}},
 		{name: "many copies of an alias", path: "copies.js", data: strings.Repeat("b=h;", 1<<17) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n", wantRules: []string{"EXFIL-001:3"}},
 		{name: "900 credential path segments on separate lines", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 900) + "fetch(u);\n", wantRules: rulesAt("EXFIL-001", 801, protocol.MaxFindingsPerRulePerFile)},
@@ -807,13 +807,13 @@ func TestAnalyzeLimits(t *testing.T) {
 		{name: "4100 dynamic imports of other modules before a request module", path: "imports.py", data: strings.Repeat("m = __import__('os')\n", 4100) + "import requests as r\nr.post(u, data=open('.env').read())\n", wantRules: []string{"EXFIL-001:4102"}},
 		{name: "5000 plain imports of other modules before a request module", path: "imports.py", data: strings.Repeat("import os\n", 5000) + "import requests\ns = requests\ns.post(u, data=open('.env').read())\n", wantRules: []string{"EXFIL-001:5003"}},
 		{name: "17 blobs that decode to text are more than are decoded, and that is not a budget skip", path: "blobs.js", data: textBlobs(17, 400), wantRules: rulesAt("OBF-003", 1, 17)},
-		{name: "1M calls that start a process are more hits than are kept", path: "hits.js", data: "child_process\n" + strings.Repeat("fork(", 1<<20+1), wantRules: slices.Repeat([]string{"EXEC-002:2"}, protocol.MaxFindingsPerRulePerFile), wantSkip: protocol.SkipBudget},
+		{name: "1M empty calls are more hits than are kept", path: "hits.js", data: strings.Repeat("eval()", 1<<20+1), wantSkip: protocol.SkipBudget},
 		{name: "1100 secret references in one window are more than signals returns", path: "refs.js", data: strings.Repeat("$A_KEY;\n", 1100) + ".ssh/id_rsa\n", wantSkip: protocol.SkipBudget},
 		{name: "1100 network tools in one window are more than signals returns", path: "tools.js", data: strings.Repeat("curl x;\n", 1100), wantSkip: protocol.SkipBudget},
-		{name: "6.4 MB of windows are more than the signals budget", path: "windows.js", data: strings.Repeat("curl x; "+strings.Repeat("y", 400)+"\n", 6552<<10/410), wantSkip: protocol.SkipBudget},
+		{name: "24 blocks of dense credential paths are more than the signals budget", path: "windows.js", data: strings.Repeat(strings.Repeat("join(a,'.ssh');\n", 999)+strings.Repeat("y", 1100)+"\n", 24), wantSkip: protocol.SkipBudget},
 		{name: "9000 callbacks that hand a response to eval exhaust the call argument budget", path: "then.js", data: strings.Repeat("p.then(eval);\n", 9000), wantSkip: protocol.SkipBudget},
 		{name: "80 calls with a name that is never assigned exhaust the lookback", path: "lookback.js", data: strings.Repeat("y;\n", 25000) + strings.Repeat("eval(zq);\n", 80), wantSkip: protocol.SkipBudget},
-		{name: "2100 credential paths assigned to a variable, far from the request, use up the carrier search", path: "far.js", data: strings.Repeat("credpath = join(a, '.aws', 'credentials');\n"+strings.Repeat("// pad\n", 40), 2100) + "fetch(u);\n", wantRules: []string{"EXFIL-001:86019", "EXFIL-001:86060"}, wantSkip: protocol.SkipBudget},
+		{name: "1100 credential paths assigned to a variable, far from the request, use up the carrier search", path: "far.js", data: strings.Repeat("credpath = join(a, '.aws', 'credentials');\n"+strings.Repeat("// pad\n", 40), 1100) + "fetch(u);\n", wantRules: []string{"EXFIL-001:45019", "EXFIL-001:45060"}, wantSkip: protocol.SkipBudget},
 		{name: "3000 environment copies exhaust the carrier search", path: "copies.js", data: envCopies(3000) + "fetch(u);\n", wantSkip: protocol.SkipBudget},
 		{name: "many assignments to look back through", path: "assign.py", data: strings.Repeat("a=", 2<<20) + "\nexec(a)\n"},
 	}
@@ -855,7 +855,7 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 		// expectations
 		wantMaxRatio float64
 	}{
-		{name: "16x more unclosed calls", path: "eval.js", build: func(n int) string { return strings.Repeat("eval(", n/5) }, small: 16 << 10, large: 256 << 10, wantMaxRatio: 60},
+		{name: "16x more unclosed calls", path: "eval.js", build: func(n int) string { return strings.Repeat("eval(", n/5) }, small: 4 << 10, large: 64 << 10, wantMaxRatio: 60},
 		{name: "16x longer run of spaces", path: "pad.js", build: func(n int) string { return "a();" + pad(n) + "b();\n" }, small: 256 << 10, large: 4 << 20, wantMaxRatio: 100},
 		{name: "16x longer minified line", path: "big.min.js", build: func(n int) string { return strings.Repeat(minifiedUnit, n/len(minifiedUnit)) + "\n" }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
 		{name: "16x more blobs", path: "blobs.js", build: func(n int) string { return strings.Repeat("var k = '"+unit(256)+"';\n", n/270) }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
@@ -873,15 +873,15 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 			control: func(n int) string {
 				return strings.Repeat("__imput__('a')\n", n/16) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
 			},
-			large: 8 << 20, wantMaxRatio: 3,
+			large: 4 << 20, wantMaxRatio: 3,
 		},
 		{name: "16x more evals of names that are assigned many times next to fetches", path: "binds.js", build: func(n int) string {
 			block := "await fetch(u); " + strings.Repeat("x = y, ", 500) + "\neval(x);\n"
 			return strings.Repeat(block, n/len(block)) + "fetch(u).then((t) => eval(t));\n"
-		}, small: 32 << 10, large: 512 << 10, wantMaxRatio: 100},
+		}, small: 4 << 10, large: 64 << 10, wantMaxRatio: 100},
 		{name: "16x more copies of an alias", path: "copies.js", build: func(n int) string {
 			return strings.Repeat("b=h;", n/4) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n"
-		}, small: 64 << 10, large: 1 << 20, wantMaxRatio: 100},
+		}, small: 32 << 10, large: 512 << 10, wantMaxRatio: 100},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

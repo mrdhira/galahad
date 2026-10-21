@@ -171,11 +171,13 @@ var responseReads = words("await", ".text(", ".json(", ".blob(", ".buffer(", ".a
 var loopVarRE = regexp.MustCompile(`\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+$`)
 
 const (
-	maxBindHops   = 2   // plain assignments followed from a name to the one that gets the response
-	maxBindUses   = 64  // places where a name is looked at in one window
-	maxBindSpan   = 100 // bytes searched around a name for its parameter list or braces
-	maxStmt       = 400 // bytes of a statement that are read
-	maxBindIdents = 4   // names of a right side that are followed
+	maxBindHops    = 2   // plain assignments followed from a name to the one that gets the response
+	maxBindUses    = 64  // places where a name is looked at in one window
+	maxBindHopUses = 8   // the same, for a name followed from a right side
+	maxBindSpan    = 100 // bytes searched around a name for its parameter list or braces
+	maxStmt        = 400 // bytes of a statement that are read
+	maxBindIdents  = 4   // names of a right side that are followed
+	maxBindCalls   = 8   // names followed from the one that eval is given
 )
 
 // bound reports whether the name root gets a value from the response of the
@@ -190,13 +192,21 @@ const (
 // name that is assigned from something else, such as process.argv, is not
 // bound. The bytes searched are charged to the call argument budget.
 func (s *scan) bound(d *doc, text []byte, root string, hops, net int) bool {
-	if s.argBytes += len(text); s.argBytes > argBudget {
+	cost, limit := len(text), maxBindUses
+	if hops == maxBindHops {
+		s.bindCalls = 0
+	} else if s.bindCalls++; s.bindCalls > maxBindCalls {
+		return false
+	} else {
+		cost, limit = cost/16, maxBindHopUses
+	}
+	if s.argBytes += cost; s.argBytes > argBudget {
 		s.limited = true
 		return false
 	}
 	name := []byte(root)
 	uses := 0
-	for end := len(text); end > 0 && uses < maxBindUses; {
+	for end := len(text); end > 0 && uses < limit; {
 		i := bytes.LastIndex(text[:end], name)
 		if i < 0 {
 			break

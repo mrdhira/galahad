@@ -136,6 +136,8 @@ type scan struct {
 	looked   int // lookback bytes used
 	farTries int // credential paths checked for far network use
 
+	bindCalls int // names followed from the one that the current eval is given
+
 	pyImports   int // Python import statements examined by the alias search
 	carrierRuns int // windows searched for the variables that hold an environment copy
 
