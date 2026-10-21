@@ -227,6 +227,16 @@ def get(url):
 			wantScoreAtMost: 5,
 		},
 		{
+			name: "benign requester copies the environment to drop the proxy variables",
+			setup: filesRepo(map[string]string{"requester.py": "import os\nimport requests\n\n\nclass Requester:\n    def __init__(self):\n        self._http_requester = requests.Session()\n\n" +
+				"    def get(self, url, **kwargs):\n        popped = False\n        old_env = dict(os.environ)\n" +
+				"        for var_name in (\"http_proxy\", \"https_proxy\", \"no_proxy\"):\n            popped = True if os.environ.pop(var_name, None) else popped\n" +
+				"        try:\n            return self._http_requester.get(url, **kwargs)\n        finally:\n            if popped:\n                os.environ.clear()\n                os.environ.update(old_env)\n"}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001", "GAL-EXFIL-002"},
+			wantScoreAtMost: 5,
+		},
+		{
 			name: "benign aws config loader defines where its files live",
 			setup: filesRepo(map[string]string{"index.js": `'use strict';
 const { join } = require('path');

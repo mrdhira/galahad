@@ -111,6 +111,11 @@ var (
 		`process\.env[ \t]*(?:[;\n]|$)`,
 	)
 
+	// copyRE ends at the end of the text before a copy of the environment and
+	// captures the name that the copy is given: "name = ", "name: ",
+	// "name = json.dumps(". A network call in between is not a wrapper.
+	copyRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*(?:[\w$.]+\s*\(\s*)*$`)
+
 	// assignRE ends at the end of a line prefix and captures the name in
 	// "name = ...".
 	assignRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*=(?:[^=>;\n][^=;\n]*)?$`)

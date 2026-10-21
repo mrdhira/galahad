@@ -264,12 +264,73 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 	if d.lang&langPy != 0 {
 		eachMatch(d, spawnsPy, base, minEnd, text, spawn)
 	}
-	eachMatch(d, bulkEnv, base, minEnd, text, func(off, _ int) { keep(s, &f.secrets, secretHit{off: off, kind: secretDump}) })
+	eachMatch(d, bulkEnv, base, minEnd, text, func(off, _ int) {
+		if name, ok := copyName(d.data, off); ok {
+			keep(s, &f.secrets, secretHit{off: off, kind: secretDump, name: name})
+		}
+	})
 	eachMatch(d, bulkEnvVar, base, minEnd, text, func(off, _ int) {
 		if g := assignRE.FindSubmatch(d.data[max(0, off-160):off]); g != nil && !bytes.ContainsRune(g[0], '\n') {
 			keep(s, &f.secrets, secretHit{off: off, kind: secretDump, name: string(g[1])})
 		}
 	})
+}
+
+// copyName returns the name that the copy of the environment at off is given
+// by an assignment ("old = dict(os.environ)"). It is "" for a copy that is not
+// assigned, or that is an argument of a network call. ok is false for a copy
+// that is an argument of a call that starts a process: the environment of a child.
+func copyName(data []byte, off int) (name string, ok bool) {
+	before := data[max(0, off-160):off]
+	if g := copyRE.FindSubmatchIndex(before); g != nil && !unclosed(before[:g[2]]) {
+		if hasNetwork(before[g[0]:]) {
+			return "", true
+		}
+		return string(before[g[2]:g[3]]), true
+	}
+	return "", !inProcessCall(before)
+}
+
+// unclosed reports whether text ends inside a bracket that it opens.
+func unclosed(text []byte) bool {
+	depth := 0
+	for _, c := range text {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		}
+	}
+	return depth > 0
+}
+
+// inProcessCall reports whether text ends inside the arguments of a call that
+// starts a process.
+func inProcessCall(text []byte) bool {
+	depth := 0
+	for i := len(text) - 1; i >= 0; i-- {
+		switch text[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			start := i
+			for start > 0 && (isWord(text[start-1]) || text[start-1] == '.') {
+				start--
+			}
+			call := string(text[start : i+1])
+			for _, re := range slices.Concat(spawnsJS, spawnsPy) {
+				if re.MatchString(call) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // definition reports whether the call-like text at off defines a function or

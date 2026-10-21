@@ -480,10 +480,14 @@ func assignsBefore(text []byte) bool {
 // pairNet picks the network use for a secret. Named variables pair with the
 // nearest one. Other secrets pair with the nearest one that is near enough,
 // or with any when far is set, and, for a copy of the environment in
-// variables, that uses one of them.
+// variables, that sends one of them (see sends).
 func pairNet(data []byte, nets []int, sec secretHit, names []string, far bool) (int, bool) {
 	if sec.kind == secretNamed {
 		return nearest(nets, sec.off), true
+	}
+	uses := usesAny
+	if sec.kind == secretDump {
+		uses = sendsAny
 	}
 	i := sort.SearchInts(nets, sec.off)
 	for lo, hi := i-1, i; (lo >= 0 || hi < len(nets)) && i-lo < 16 && hi-i < 16; {
@@ -498,7 +502,7 @@ func pairNet(data []byte, nets []int, sec secretHit, names []string, far bool) (
 		if !far && !near(data, sec.off, net) {
 			return 0, false
 		}
-		if names == nil || usesAny(data[net:min(len(data), net+400)], names) {
+		if names == nil || uses(data[net:min(len(data), net+400)], names) {
 			return net, true
 		}
 	}
@@ -512,6 +516,45 @@ func usesAny(text []byte, names []string) bool {
 		}
 	}
 	return false
+}
+
+// sendsAny reports whether text sends one of the copies of the environment.
+func sendsAny(text []byte, names []string) bool {
+	for _, n := range names {
+		if sends(text, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// notSentRE ends the text before a copy of the environment that is not sent:
+// the env or proxies option of a call, and the restore of the environment.
+var notSentRE = regexp.MustCompile(`(?:\b(?:env|proxies|proxy)\s*[:=]\s*(?:\{\s*\*\*\s*)?|\benviron\s*\.\s*update\(\s*|\bprocess\.env\s*,\s*)$`)
+
+// sends reports whether text has the copy of the environment name as a whole
+// word, and uses it as a whole: not as the target of an assignment or a keyword
+// ("old_env = ...", "data=..."), not to read one value ("env.get('http_proxy')"),
+// not as the environment of a child process or the proxies of a request, and
+// not to restore the environment.
+func sends(text []byte, name string) bool {
+	for from := 0; ; {
+		i := bytes.Index(text[from:], []byte(name))
+		if i < 0 {
+			return false
+		}
+		i += from
+		from = i + 1
+		end := i + len(name)
+		if i > 0 && isWord(text[i-1]) || end < len(text) && isWord(text[end]) {
+			continue
+		}
+		after := bytes.TrimLeft(text[end:min(len(text), end+16)], " \t")
+		if len(after) > 0 && (after[0] == '.' || after[0] == '[' || after[0] == '=' && !bytes.HasPrefix(after, []byte("=="))) || notSentRE.Match(text[max(0, i-40):i]) {
+			continue
+		}
+		return true
+	}
 }
 
 // usesName reports whether text has name as a whole word.
