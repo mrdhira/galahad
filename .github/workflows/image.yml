@@ -1,6 +1,6 @@
 name: image
 
-# Builds the guest kernel and the core root filesystem and compares them with internal/images/pins.json.
+# Builds the guest kernel and the core and re root filesystems and compares them with internal/images/pins.json.
 # A tag images-* also publishes them as a release. There is no KVM here; booting the images is
 # checked by vm.yml.
 
@@ -33,6 +33,17 @@ jobs:
       - name: Check the scripts
         run: shellcheck -x -P SCRIPTDIR images/linux/*.sh images/linux/kernel/build.sh images/linux/overlay/sbin/galahad-init
 
+      # Ghidra publishes the SHA-256 of each release zip in its release notes; the pin must match it.
+      - name: Check the Ghidra pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          eval "$(grep -E '^GHIDRA_(VERSION|SHA256)=' images/linux/build.sh)"
+          if ! gh api "repos/NationalSecurityAgency/ghidra/releases/tags/Ghidra_${GHIDRA_VERSION}_build" --jq .body | grep -qi "$GHIDRA_SHA256"; then
+            echo "::error::the Ghidra $GHIDRA_VERSION release notes do not list sha256 $GHIDRA_SHA256"
+            exit 1
+          fi
+
       - name: Check the tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -42,13 +53,13 @@ jobs:
             exit 1
           fi
 
-      # The debs and the kernel tarball are downloaded from snapshot.debian.org and kernel.org,
-      # which are slow. apt and sha256 checks make a cached file as safe as a fresh one.
+      # The debs, the kernel tarball and the capa and Ghidra zips are downloaded from snapshot.debian.org,
+      # kernel.org and GitHub, which are slow. apt and sha256 checks make a cached file as safe as a fresh one.
       - id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache
-          key: image-cache-${{ hashFiles('images/linux/common.sh', 'images/linux/packages-core.txt', 'images/linux/kernel/build.sh') }}
+          key: image-cache-${{ hashFiles('images/linux/common.sh', 'images/linux/build.sh', 'images/linux/packages-core.txt', 'images/linux/packages-re.txt', 'images/linux/kernel/build.sh') }}
           restore-keys: image-cache-
 
       - name: Build the core image
@@ -58,7 +69,17 @@ jobs:
           docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
             "$BUILD_IMAGE" bash images/linux/build.sh core 2>&1 | tee core.log && exit 0
           # GitHub keeps at most 10 annotations per step: error lines first, then the last lines.
-          { grep -E 'build.sh:|rror|curl: |No such|not found' core.log | tail -n 6; tail -n 4 core.log; } | sed 's/^/::error::/'
+          { grep -E 'build.sh:|rror|curl: |No such|not found' core.log | tail -n 6 || true; tail -n 4 core.log; } | sed 's/^/::error::/'
+          exit 1
+
+      - name: Build the re image
+        run: |
+          # The last lines also go to annotations, which can be read without the job log.
+          set -o pipefail
+          docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+            "$BUILD_IMAGE" bash images/linux/build.sh re 2>&1 | tee re.log && exit 0
+          # GitHub keeps at most 10 annotations per step: error lines first, then the last lines.
+          { grep -E 'build.sh:|rror|curl: |No such|not found' re.log | tail -n 6 || true; tail -n 4 re.log; } | sed 's/^/::error::/'
           exit 1
 
       - name: Build the kernel
@@ -68,10 +89,10 @@ jobs:
           docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
             "$BUILD_IMAGE" bash images/linux/kernel/build.sh 2>&1 | tee kernel.log && exit 0
           # GitHub keeps at most 10 annotations per step: error lines first, then the last lines.
-          { grep -E 'build.sh:|rror|curl: |No such|not found' kernel.log | tail -n 6; tail -n 4 kernel.log; } | sed 's/^/::error::/'
+          { grep -E 'build.sh:|rror|curl: |No such|not found' kernel.log | tail -n 6 || true; tail -n 4 kernel.log; } | sed 's/^/::error::/'
           exit 1
 
-      # Saved only after both builds worked, so a failed build cannot leave a half-filled cache behind.
+      # Saved only after all builds worked, so a failed build cannot leave a half-filled cache behind.
       - if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -93,9 +114,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           mkdir release
-          cp out/vmlinux.gz out/core.ext4.gz out/core.manifest out/core.gpl-sources out/vmlinux.config out/linux-*.tar.xz release/
-          tar -C out -cf release/core-sources.tar sources
-          (cd release && sha256sum vmlinux.gz core.ext4.gz > SHA256SUMS)
+          cp out/vmlinux.gz out/core.ext4.gz out/core.manifest out/core.gpl-sources \
+            out/re.ext4.gz out/re.manifest out/re.gpl-sources out/vmlinux.config out/linux-*.tar.xz release/
+          tar -C out -cf release/core-sources.tar sources-core
+          tar -C out -cf release/re-sources.tar sources-re
+          (cd release && sha256sum vmlinux.gz core.ext4.gz re.ext4.gz > SHA256SUMS)
 
       - name: Upload the release files
         if: startsWith(github.ref, 'refs/tags/')
@@ -125,6 +148,7 @@ jobs:
           subject-path: |
             release/vmlinux.gz
             release/core.ext4.gz
+            release/re.ext4.gz
             release/SHA256SUMS
 
       # The images are not the latest release of the repository: that is the galahad binary.
@@ -132,9 +156,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes="Guest kernel and core root filesystem for galahad setup.
-          For license compliance the release also holds the package manifest (core.manifest),
-          the GPL source packages (core-sources.tar, core.gpl-sources), and the kernel source
-          and config (linux-*.tar.xz, vmlinux.config)."
+          notes="Guest kernel, core root filesystem and re root filesystem for galahad setup.
+          The re image adds Java, capa and Ghidra; capa and Ghidra are Apache-2.0 and their
+          license files are in the image (/opt/capa, /opt/ghidra).
+          For license compliance the release also holds the package manifests (core.manifest,
+          re.manifest), the GPL source packages (core-sources.tar, core.gpl-sources,
+          re-sources.tar, re.gpl-sources), and the kernel source and config (linux-*.tar.xz,
+          vmlinux.config)."
           gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
             --title "$GITHUB_REF_NAME" --notes "$notes"
