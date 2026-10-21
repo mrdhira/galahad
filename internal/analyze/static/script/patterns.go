@@ -106,13 +106,15 @@ var (
 	assignRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*=(?:[^=>;\n][^=;\n]*)?$`)
 
 	// thenEval is .then(eval): the response text is handed to eval.
-	thenEval = compile(`then\s*\(\s*eval\s*\)`)
+	thenEval = compile(`then\s*\??\.?\s*\(\s*(?:(?:window|self|globalThis|global)\s*\.\s*)?eval\s*(?:\)|\.\s*(?:bind|call)\b)`)
 
 	// segmentRE is a quoted directory name that holds credentials, a segment of
-	// a path built with join, resolve or the / operator. joinRE ends a prefix of
-	// such a call.
-	segmentRE = regexp.MustCompile("['\"`](?:\\.ssh|\\.aws|\\.gnupg|\\.docker|\\.kube|\\.npmrc|\\.netrc|\\.env)['\"`]")
-	joinRE    = regexp.MustCompile(`\b(?:join|resolve)\s*\(`)
+	// a path built with join, joinpath, resolve or the / operator. These are
+	// the paths that signals.SecretRefs counts when they are written in one
+	// literal, so segmentNext names the file that must follow the directory
+	// in the others.
+	segmentRE   = regexp.MustCompile("['\"`](\\.ssh|\\.aws|\\.gnupg|\\.docker|\\.kube|\\.env)['\"`]")
+	segmentNext = map[string]string{".aws": "credentials", ".kube": "config", ".docker": "config.json"}
 
 	// Secret classification of a signals.SecretRefs match.
 	namedEnvRE = regexp.MustCompile(`^(?:\$|%|process\.env|os\.environ|os\.getenv|getenv|ENV\[)`)

@@ -266,30 +266,8 @@ func (s *scan) exfil(d *doc, f *found) {
 		line int
 	}
 	seen := map[key]bool{}
-	for i, sec := range f.secrets {
-		if i&255 == 255 && s.done() || s.full(ruleExfil) && s.full(ruleEnvNet) {
-			return
-		}
-		r := ruleExfil
-		if sec.kind == secretNamed {
-			r = ruleEnvNet
-		}
-		if s.full(r) {
-			continue
-		}
+	report := func(r protocol.Rule, sec secretHit, net int) {
 		line := lineKey(d.data, sec.off)
-		if seen[key{r.ID, line}] {
-			continue
-		}
-		names := s.carriers(d, sec)
-		net, ok := pairNet(d.data, f.nets, sec, names, false)
-		if !ok && sec.kind != secretNamed {
-			net, ok = s.farNet(d, f.nets, sec)
-			r = ruleExfilFar
-		}
-		if !ok {
-			continue
-		}
 		seen[key{r.ID, line}] = true
 		s.emit(r, func() []protocol.Evidence {
 			evs := []protocol.Evidence{s.ev(d, sec.off, -1)}
@@ -298,6 +276,40 @@ func (s *scan) exfil(d *doc, f *found) {
 			}
 			return evs
 		})
+	}
+	var apart []secretHit // not near any network use
+	for i, sec := range f.secrets {
+		if i&255 == 255 && s.done() || s.full(ruleExfil) && s.full(ruleEnvNet) {
+			return
+		}
+		r := ruleExfil
+		if sec.kind == secretNamed {
+			r = ruleEnvNet
+		}
+		if s.full(r) || seen[key{r.ID, lineKey(d.data, sec.off)}] {
+			continue
+		}
+		if sec.name != "" && s.done() {
+			return
+		}
+		if net, ok := pairNet(d.data, f.nets, sec, s.carriers(d, sec), false); ok {
+			report(r, sec, net)
+		} else if sec.kind != secretNamed {
+			apart = append(apart, sec)
+		}
+	}
+	// Pairs far apart come after all near pairs, so that they cannot use up
+	// the findings of the rule before a critical pair is reported.
+	for _, sec := range apart {
+		if s.done() || s.full(ruleExfilFar) {
+			return
+		}
+		if seen[key{ruleExfilFar.ID, lineKey(d.data, sec.off)}] {
+			continue
+		}
+		if net, ok := s.farNet(d, f.nets, sec); ok {
+			report(ruleExfilFar, sec, net)
+		}
 	}
 }
 
@@ -351,7 +363,10 @@ func (s *scan) farNet(d *doc, nets []int, sec secretHit) (int, bool) {
 // carriers returns the variables that hold a copy of the environment: the one
 // it is assigned to and the ones assigned from that, in the next maxFar bytes.
 // A variable counts when the right side uses it as a whole, not one property.
-// A hit that is not a copy has none.
+// A hit that is not a copy has none. The search is bounded: a window is charged
+// to the budget, a name is looked at in at most maxCarrierUses places, and
+// the regular expression runs at most maxCarrierRuns times per file. When one
+// of them runs out the result says so with s.limited.
 func (s *scan) carriers(d *doc, sec secretHit) []string {
 	if sec.name == "" {
 		return nil
@@ -363,6 +378,7 @@ func (s *scan) carriers(d *doc, sec secretHit) []string {
 		return names
 	}
 	for i := 0; i < len(names) && len(names) < maxCarriers; i++ {
+		uses := 0
 		for from := 0; ; {
 			k := bytes.Index(win[from:], []byte(names[i]))
 			if k < 0 {
@@ -374,7 +390,17 @@ func (s *scan) carriers(d *doc, sec secretHit) []string {
 			if at > 0 && (isWord(win[at-1]) || win[at-1] == '.') || end < len(win) && (isWord(win[end]) || win[end] == '.' || win[end] == '[') {
 				continue
 			}
-			g := assignRE.FindSubmatch(win[max(0, at-160):at])
+			if uses++; uses > maxCarrierUses || s.carrierRuns >= maxCarrierRuns {
+				s.limited = true
+				break
+			}
+			lo := max(0, at-160)
+			if !assignsBefore(win[lo:at]) {
+				continue
+			}
+			s.carrierRuns++
+			s.argBytes += at - lo
+			g := assignRE.FindSubmatch(win[lo:at])
 			if g == nil || bytes.IndexByte(g[0], '\n') >= 0 || slices.Contains(names, string(g[1])) {
 				continue
 			}
@@ -384,6 +410,20 @@ func (s *scan) carriers(d *doc, sec secretHit) []string {
 		}
 	}
 	return names
+}
+
+// assignsBefore reports whether an equals sign comes between the start of the
+// statement (a semicolon or a line break) and the end of text.
+func assignsBefore(text []byte) bool {
+	for i := len(text) - 1; i >= 0; i-- {
+		switch text[i] {
+		case '=':
+			return true
+		case ';', '\n':
+			return false
+		}
+	}
+	return false
 }
 
 // pairNet picks the network use for a secret. Named variables pair with the

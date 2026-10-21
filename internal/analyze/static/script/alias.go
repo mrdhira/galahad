@@ -47,6 +47,7 @@ var (
 	jsRequireRE  = regexp.MustCompile(`require\s*\(\s*['"](?:node:)?([\w@/.-]+)['"]\s*\)`)
 	jsImportRE   = regexp.MustCompile(`import\s+([^;'"]*?)\s*from\s*['"](?:node:)?([\w@/.-]+)['"]`)
 	jsAtobRE     = regexp.MustCompile(`atob[ \t\r]*(?:[;,\n]|$)`)
+	pyImportRE   = regexp.MustCompile(`import\s+([\w.]+)`)
 	pyImportAsRE = regexp.MustCompile(`import\s+([\w.]+)\s+as\s+(\w+)`)
 	pyFromRE     = regexp.MustCompile(`from\s+([\w.]+)\s+import\s+\(?([^\n#;)]*)`)
 
@@ -66,6 +67,7 @@ const (
 	maxAliases    = 32
 	maxWindowHits = 64   // network calls listed in a window
 	maxCopies     = 1024 // copies of a known name followed per round and window
+	maxPyImports  = 4096 // Python import statements examined per file
 )
 
 // nsCall follows the name of a network module: .request(, .default.request(
@@ -83,6 +85,7 @@ func quoteNames(names []string) string {
 // aliasSet holds the names found in a doc and the patterns built from them.
 type aliasSet struct {
 	ns, fn, dec []string // module names (name.request()), function names (name()), decoder names
+	seeds       []string // Python modules imported under their own name: not aliases, but a copy of one is
 
 	nsCalls, fnCalls []*regexp.Regexp // whole-file patterns, each starts with a name
 	argNet, argDec   *regexp.Regexp   // patterns for a short text; nil if there is no name
@@ -100,7 +103,7 @@ func (s *scan) aliasesOf(d *doc) *aliasSet {
 			a.scanJS(d, base, minEnd, text)
 		}
 		if d.lang&langPy != 0 {
-			a.scanPy(text)
+			a.scanPy(s, text)
 		}
 	})
 	a.copies(s, d)
@@ -112,12 +115,12 @@ func (s *scan) aliasesOf(d *doc) *aliasSet {
 // It takes at most three rounds.
 func (a *aliasSet) copies(s *scan, d *doc) {
 	for range 3 {
-		names := slices.Concat(a.ns, a.fn, a.dec)
+		names := slices.Concat(a.ns, a.fn, a.dec, a.seeds)
 		if len(names) == 0 {
 			return
 		}
 		re := regexp.MustCompile(`=\s*(` + quoteNames(names) + `)[ \t]*(?:[;,)\n]|$)`)
-		before := len(names)
+		before := len(a.ns) + len(a.fn) + len(a.dec)
 		s.pieces(d, 0, len(d.data), func(base, _ int, text string) {
 			for _, m := range re.FindAllStringSubmatchIndex(text, maxCopies) {
 				lhs, ok := assignedName(text, m[0])
@@ -129,6 +132,9 @@ func (a *aliasSet) copies(s *scan, d *doc) {
 					if slices.Contains(*l, from) {
 						a.add(l, lhs)
 					}
+				}
+				if slices.Contains(a.seeds, from) {
+					a.add(&a.ns, lhs)
 				}
 			}
 		})
@@ -161,8 +167,10 @@ func assignedName(text string, eq int) (string, bool) {
 	return text[start:end], true
 }
 
+func (a *aliasSet) full() bool { return len(a.ns)+len(a.fn)+len(a.dec) >= maxAliases }
+
 func (a *aliasSet) add(list *[]string, name string) {
-	if name == "" || len(a.ns)+len(a.fn)+len(a.dec) >= maxAliases {
+	if name == "" || a.full() {
 		return
 	}
 	for _, n := range *list {
@@ -233,15 +241,41 @@ func (a *aliasSet) scanJS(d *doc, base, minEnd int, text string) {
 	}
 }
 
-func (a *aliasSet) scanPy(text string) {
+// scanPy finds Python aliases in text. The searches for __import__,
+// import_module and plain imports are capped per file (maxPyImports matches),
+// and a match counts only in a statement of its own, after an equals sign.
+func (a *aliasSet) scanPy(s *scan, text string) {
 	for _, re := range pyDynREs {
-		for _, m := range re.FindAllStringSubmatchIndex(text, -1) {
+		for _, m := range re.FindAllStringSubmatchIndex(text, maxPyImports) {
+			if a.full() {
+				break
+			}
+			if s.pyImports++; s.pyImports > maxPyImports {
+				s.limited = true
+				return
+			}
 			if _, ok := pyNetNames[text[m[2]:m[3]]]; !ok {
+				continue
+			}
+			if t := strings.TrimRight(tailBefore(text, m[0]), " \t"); !strings.HasSuffix(t, "=") && !strings.HasSuffix(t, "= await") {
 				continue
 			}
 			if g := tailAssignRE.FindStringSubmatch(tailBefore(text, m[0])); g != nil {
 				a.add(&a.ns, g[1])
 			}
+		}
+	}
+	for _, m := range pyImportRE.FindAllStringSubmatchIndex(text, maxPyImports) {
+		if s.pyImports++; s.pyImports > maxPyImports {
+			s.limited = true
+			return
+		}
+		mod := text[m[2]:m[3]]
+		if _, ok := pyNetNames[mod]; !ok || len(a.seeds) >= len(pyNetNames) || !statementStart(text, m[0]) {
+			continue
+		}
+		if name, _, _ := strings.Cut(mod, "."); !slices.Contains(a.seeds, name) {
+			a.seeds = append(a.seeds, name)
 		}
 	}
 	for _, m := range pyImportAsRE.FindAllStringSubmatch(text, -1) {
@@ -288,6 +322,21 @@ func splitAs(item, sep string) (orig, local string) {
 		return strings.TrimSpace(item[:i]), strings.TrimSpace(item[i+len(sep):])
 	}
 	return item, item
+}
+
+// statementStart reports whether only white space separates off from the start
+// of a line or a semicolon.
+func statementStart(text string, off int) bool {
+	for i := off - 1; i >= 0; i-- {
+		switch text[i] {
+		case ' ', '\t':
+		case '\n', ';':
+			return true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // tailBefore returns the text before off, at most 160 bytes. The name that a
