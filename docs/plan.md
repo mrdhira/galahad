@@ -141,10 +141,10 @@ The fixtures in `testdata/corpus/` are **harmless imitations**: fake keys, a loc
 | T1.15 | QA: corpus v1 + acceptance tests for P1–P7 |
 
 **🎬 Demo:**
-- `galahad-agent analyze testdata/corpus/fake-interview-repo` → MALICIOUS, with `tasks.json:7` and `scripts/setup.js:3` as evidence. The HTML report opens in a browser.
+- `galahad-agent analyze --unsafe-host testdata/corpus/fake-interview-repo` → MALICIOUS, with `tasks.json:7` and `scripts/setup.js:3` as evidence. The HTML report opens in a browser.
 - The benign repo comes back clean.
 
-This is a dev-only command, used on fixtures only.
+This is a dev-only command, used on fixtures only. `--unsafe-host` is needed until M2 runs the agent inside a VM.
 
 ### M2 · Linux sandbox and the real `galahad scan` (4 wks, 9 tasks)
 | ID | Task |

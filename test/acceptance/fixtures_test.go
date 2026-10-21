@@ -145,3 +145,18 @@ func tarGz(t *testing.T, dest string, entries []tarEntry) {
 		t.Fatal(err)
 	}
 }
+
+// benignDocx writes a minimal docx with one internal and one external hyperlink to dest.
+func benignDocx(t *testing.T, dest string) {
+	t.Helper()
+	const relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+	zipEntries(t, dest, []zipEntry{
+		{name: "[Content_Types].xml", data: []byte(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`)},
+		{name: "word/document.xml", data: []byte(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Guide</w:t></w:r></w:p></w:body></w:document>`)},
+		{name: "word/_rels/document.xml.rels", data: []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n" +
+			`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` + "\n" +
+			`  <Relationship Id="rId1" Type="` + relType + `hyperlink" Target="#chapter2"/>` + "\n" +
+			`  <Relationship Id="rId2" Type="` + relType + `hyperlink" Target="https://docs.sinkhole.test/guide" TargetMode="External"/>` + "\n" +
+			`</Relationships>` + "\n")},
+	})
+}
