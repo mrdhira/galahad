@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -139,8 +140,10 @@ func (j Job) Validate() error {
 	if len(j.Name) > MaxPath {
 		return fmt.Errorf("name is %d bytes, max %d", len(j.Name), MaxPath)
 	}
-	if err := checkText("name", j.Name); err != nil {
-		return err
+	// The name of a local target is a file name. It may hold control or bidi characters, which
+	// the analyzers report as findings, so only what JSON and a path cannot carry is refused.
+	if !utf8.ValidString(j.Name) || strings.ContainsRune(j.Name, 0) {
+		return errors.New("name is not valid UTF-8 text without NUL")
 	}
 	if len(j.URL) > MaxURL {
 		return fmt.Errorf("url is %d bytes, max %d", len(j.URL), MaxURL)

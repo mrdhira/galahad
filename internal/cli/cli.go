@@ -32,6 +32,7 @@ var (
 const usage = `Usage: galahad <command> [flags]
 
 Commands:
+  scan      Scan a local file or folder in the sandbox: galahad scan <path>
   version   Print version information
   help      Show this help
 `
@@ -68,6 +69,8 @@ func RunWithEnv(args []string, stdout, stderr io.Writer, env Env) int {
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitClean
+	case "scan":
+		return runScan(args[1:], stdout, stderr, env)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:

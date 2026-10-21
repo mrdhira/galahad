@@ -187,6 +187,7 @@ func startGuest(t *testing.T, extraArgs ...string) (net.Conn, <-chan guestExit) 
 func TestGuest(t *testing.T) {
 	goMain := tarEntry{name: "proj/main.go", body: "package main\n\nfunc main() {}\n"}
 	tree := []tarEntry{{name: "proj/", typ: tar.TypeDir}, goMain, {name: "proj/README.md", body: "# proj\n"}}
+	deepDir := strings.Repeat("d/", 63) // with "proj/" in front, the name is 65 elements deep
 	tests := []struct {
 		name string
 		// inputs
@@ -201,7 +202,8 @@ func TestGuest(t *testing.T) {
 		wantErrCode    string // the Error frame code; empty means a Result
 		wantMessage    string // substring of the Error message
 		wantTargetKind string
-		wantTimeout    bool // the Result has a timeout skip
+		wantTimeout    bool   // the Result has a timeout skip
+		wantDepthSkip  string // the path of the depth skip the Result must have, and then a verdict that is not clean
 	}{
 		{name: "directory target", wantTargetKind: protocol.TargetDir},
 		{name: "file target", entries: []tarEntry{{name: "one.txt", body: "hello\n"}}, target: "one.txt", wantTargetKind: protocol.TargetFile},
@@ -240,6 +242,11 @@ func TestGuest(t *testing.T) {
 			wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "not a regular file",
 		},
 		{name: "timeout skip reaches the host", timeout: 1, wantTargetKind: protocol.TargetDir, wantTimeout: true},
+		{
+			name:           "entries too deep for the extractor become a depth skip",
+			entries:        append(slices.Clone(tree), tarEntry{name: "proj/" + deepDir + "f.txt", body: "x"}, tarEntry{name: "proj/a/" + deepDir + "f.txt", body: "x"}),
+			wantTargetKind: protocol.TargetDir, wantDepthSkip: deepDir + "f.txt",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,6 +327,11 @@ func TestGuest(t *testing.T) {
 			}
 			if res.Tool.Name != "galahad-agent" || res.Verdict == "" {
 				t.Errorf("tool %+v, verdict %q: want the agent, scored", res.Tool, res.Verdict)
+			}
+			if tt.wantDepthSkip != "" {
+				if want := []protocol.Skip{{Path: tt.wantDepthSkip, Reason: protocol.SkipDepth}}; !slices.Equal(res.Coverage.Skipped, want) || res.Verdict == protocol.VerdictClean {
+					t.Errorf("skips = %+v, verdict %q; want %+v and a verdict that is not clean", res.Coverage.Skipped, res.Verdict, want)
+				}
 			}
 			gotTimeout := slices.ContainsFunc(res.Coverage.Skipped, func(s protocol.Skip) bool { return s.Reason == protocol.SkipTimeout })
 			if gotTimeout != tt.wantTimeout || (tt.wantTimeout && !res.Coverage.Truncated) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -368,6 +369,36 @@ func TestDecodeStrict(t *testing.T) {
 			}
 			if err != nil || got != tt.want {
 				t.Errorf("DecodeStrict = %+v, %v, want %+v", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestOrderAllowed(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		order  *protocol.Order
+		frames []protocol.FrameType
+		// expectations
+		wantAllowed []protocol.FrameType
+	}{
+		{name: "guest start", order: protocol.NewGuestOrder(), wantAllowed: []protocol.FrameType{protocol.FrameHello}},
+		{
+			name: "guest after hello", order: protocol.NewGuestOrder(), frames: []protocol.FrameType{protocol.FrameHello},
+			wantAllowed: []protocol.FrameType{protocol.FrameProgress, protocol.FrameArtifact, protocol.FrameResult, protocol.FrameError},
+		},
+		{name: "guest after result", order: protocol.NewGuestOrder(), frames: []protocol.FrameType{protocol.FrameHello, protocol.FrameResult}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, f := range tt.frames {
+				if err := tt.order.Accept(f); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := tt.order.Allowed(); !slices.Equal(got, tt.wantAllowed) {
+				t.Errorf("Allowed() = %v, want %v", got, tt.wantAllowed)
 			}
 		})
 	}
