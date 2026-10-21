@@ -41,6 +41,21 @@ const (
 	MaxIOCs                   = 1000
 	MaxSnippet                = 200  // runes
 	MaxPath                   = 1024 // bytes
+	MaxIOCValue               = 2048 // bytes; the PDF analyzer keeps link targets up to this length
+	MaxName                   = 64   // bytes: tool, analyzer, file kind, sha256
+	MaxTitle                  = 200  // runes
+	MaxEvidence               = 8    // entries per finding; the producers emit at most 3
+
+	// The caps below bound the size of a Result. EncodeResult guarantees the 64 MiB
+	// Result frame by cutting the files and skips of a Result that is still too big
+	// (TestEncodeResult); the findings, which decide the verdict, always fit.
+	// MaxFiles is analyze.MaxFiles + analyze.MaxExtraFiles (20 000 + 2 000); protocol
+	// must not import analyze, so the sum is repeated here. MaxSkipped is lower
+	// because the engine ends a longer list with one budget skip.
+	MaxFiles       = 22000
+	MaxSkipped     = 13000
+	MaxAnalyzers   = 32  // the engine has about a dozen, plus the guest tools
+	MaxReasonCount = 128 // one per critical rule, plus a few fixed lines
 )
 
 // Severity is the impact level of a rule.

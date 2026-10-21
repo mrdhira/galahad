@@ -3,13 +3,14 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 )
 
 var (
-	ruleIDRe = regexp.MustCompile(`^GAL-[A-Z]+-\d{3}$`)
+	ruleIDRe = regexp.MustCompile(`^GAL-[A-Z]{1,16}-\d{3}$`)
 	attackRe = regexp.MustCompile(`^T\d{4}(\.\d{3})?$`)
 )
 
@@ -20,16 +21,19 @@ func (r *Result) Validate() error {
 	if r.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schema_version %d, want %d", r.SchemaVersion, SchemaVersion)
 	}
-	if err := checkText("tool.name", r.Tool.Name); err != nil {
+	if err := checkName("tool.name", r.Tool.Name); err != nil {
 		return err
 	}
-	if err := checkText("tool.version", r.Tool.Version); err != nil {
+	if err := checkName("tool.version", r.Tool.Version); err != nil {
 		return err
 	}
 	if len(r.Target.Name) > MaxPath {
 		return fmt.Errorf("target.name is %d bytes, max %d", len(r.Target.Name), MaxPath)
 	}
 	if err := checkText("target.name", r.Target.Name); err != nil {
+		return err
+	}
+	if err := checkName("target.sha256", r.Target.SHA256); err != nil {
 		return err
 	}
 	if r.Target.Kind != TargetFile && r.Target.Kind != TargetDir {
@@ -57,12 +61,31 @@ func (r *Result) Validate() error {
 	if len(r.IOCs) > MaxIOCs {
 		return fmt.Errorf("%d iocs, max %d", len(r.IOCs), MaxIOCs)
 	}
+	if len(r.Files) > MaxFiles {
+		return fmt.Errorf("%d files, max %d", len(r.Files), MaxFiles)
+	}
+	if len(r.Coverage.Skipped) > MaxSkipped {
+		return fmt.Errorf("%d skipped, max %d", len(r.Coverage.Skipped), MaxSkipped)
+	}
+	if len(r.Coverage.Analyzers) > MaxAnalyzers {
+		return fmt.Errorf("%d analyzers, max %d", len(r.Coverage.Analyzers), MaxAnalyzers)
+	}
+	if len(r.Reasons) > MaxReasonCount {
+		return fmt.Errorf("%d reasons, max %d", len(r.Reasons), MaxReasonCount)
+	}
 	for i, f := range r.Files {
 		if err := checkPath(f.Path); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
 		}
-		if err := checkText("kind", f.Kind); err != nil {
+		if err := checkName("kind", f.Kind); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
+		}
+		if err := checkName("sha256", f.SHA256); err != nil {
+			return fmt.Errorf("files[%d]: %w", i, err)
+		}
+		// JSON has no NaN or infinity, so such an entropy could not be encoded.
+		if math.IsNaN(f.Entropy) || math.IsInf(f.Entropy, 0) {
+			return fmt.Errorf("files[%d]: entropy is not a finite number", i)
 		}
 	}
 	perRuleFile := map[string]int{}
@@ -91,7 +114,7 @@ func (r *Result) Validate() error {
 		}
 	}
 	for i, a := range r.Coverage.Analyzers {
-		if err := checkText("name", a); err != nil {
+		if err := checkName("name", a); err != nil {
 			return fmt.Errorf("coverage.analyzers[%d]: %w", i, err)
 		}
 	}
@@ -118,14 +141,20 @@ func (f Finding) validate() error {
 	if f.Attack != "" && !attackRe.MatchString(f.Attack) {
 		return fmt.Errorf("attack %q does not match %s", f.Attack, attackRe)
 	}
-	if err := checkText("analyzer", f.Analyzer); err != nil {
+	if err := checkName("analyzer", f.Analyzer); err != nil {
 		return err
+	}
+	if n := utf8.RuneCountInString(f.Title); n > MaxTitle {
+		return fmt.Errorf("title has %d runes, max %d", n, MaxTitle)
 	}
 	if hasUnsafe(f.Title) {
 		return errors.New("title has control or bidi characters")
 	}
 	if len(f.Evidence) == 0 {
 		return errors.New("no evidence")
+	}
+	if len(f.Evidence) > MaxEvidence {
+		return fmt.Errorf("%d evidence entries, max %d", len(f.Evidence), MaxEvidence)
 	}
 	for i, e := range f.Evidence {
 		if err := checkPath(e.Path); err != nil {
@@ -147,6 +176,9 @@ func (i IOC) validate() error {
 	default:
 		return fmt.Errorf("type %q not allowed", i.Type)
 	}
+	if len(i.Value) > MaxIOCValue {
+		return fmt.Errorf("value is %d bytes, max %d", len(i.Value), MaxIOCValue)
+	}
 	if hasUnsafe(i.Value) {
 		return errors.New("value has control or bidi characters")
 	}
@@ -167,6 +199,14 @@ func checkPath(p string) error {
 		return errors.New("path has control or bidi characters")
 	}
 	return nil
+}
+
+// checkName checks a short identifier: at most MaxName bytes of safe text.
+func checkName(field, s string) error {
+	if len(s) > MaxName {
+		return fmt.Errorf("%s is %d bytes, max %d", field, len(s), MaxName)
+	}
+	return checkText(field, s)
 }
 
 func checkText(field, s string) error {
