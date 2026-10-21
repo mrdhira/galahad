@@ -7,7 +7,10 @@
 // and reasons are bounded in runes.
 package protocol
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Target kinds.
 const (
@@ -132,17 +135,27 @@ type Skip struct {
 }
 
 // Unread reports a skip that leaves a file or member unread: too large, over a
-// budget, too deep or encrypted. Such a member counts as seen but not analyzed.
+// budget, too deep, encrypted, cut short by a timeout or a panic, or a container
+// member that cannot be read. Such a member counts as seen but not analyzed.
 func (s Skip) Unread() bool {
 	return s.Reason == SkipTooLarge || s.HidesContent()
 }
 
 // HidesContent reports a skip behind which a payload could be hidden on purpose:
-// a container that is too deep, encrypted or over its member budget. A file that
-// is only too large, such as a data file or a media file, is not one: benign
-// inputs have those, so they lower confidence but never decide the verdict.
+// a container that is too deep, encrypted or over its member budget, input that
+// makes an analyzer run out of time or panic, or a container member (its path holds "!/") that is unsupported or fails to parse,
+// such as a zip member with an unsupported compression method. A file that is
+// only too large, such as a data file or a media file, is not one, and neither is
+// a top-level file that is unsupported or fails to parse: benign inputs have
+// those, so they lower confidence but never decide the verdict.
 func (s Skip) HidesContent() bool {
-	return s.Reason == SkipBudget || s.Reason == SkipDepth || s.Reason == SkipEncrypted
+	switch s.Reason {
+	case SkipBudget, SkipDepth, SkipEncrypted, SkipTimeout, SkipPanic:
+		return true
+	case SkipParseError, SkipUnsupported:
+		return strings.Contains(s.Path, "!/")
+	}
+	return false
 }
 
 // Coverage says how much of the target was analyzed.

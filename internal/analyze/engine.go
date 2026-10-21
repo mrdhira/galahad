@@ -91,6 +91,7 @@ type job struct {
 	queue     []File
 	perRule   map[string]int
 	iocs      map[string]bool
+	unread    map[string]bool // paths of skipped members already counted as seen
 
 	extraFiles int   // files read past the file cap or byte budget
 	extraBytes int64 // their size
@@ -108,6 +109,7 @@ func newJob(analyzers []Analyzer) *job {
 		analyzers: as,
 		perRule:   map[string]int{},
 		iocs:      map[string]bool{},
+		unread:    map[string]bool{},
 		res: protocol.Result{
 			SchemaVersion: protocol.SchemaVersion,
 			Files:         []protocol.FileInfo{},
@@ -143,7 +145,9 @@ func (j *job) walkDir(ctx context.Context, path string) error {
 			return nil
 		}
 		if ctx.Err() != nil {
+			// The files after this one were never read.
 			j.res.Coverage.Truncated = true
+			j.skip(cp, protocol.SkipTimeout)
 			return fs.SkipAll
 		}
 		ok, more := j.admit()
@@ -304,7 +308,10 @@ func (j *job) dispatch(ctx context.Context, f File) {
 				j.skip(f.Path, reason)
 			}
 			failed = true
-			continue
+			if reason != protocol.SkipTimeout {
+				continue
+			}
+			// What the analyzer found before the time ran out still counts.
 		}
 		j.merge(a.Name(), f, out)
 	}
@@ -326,7 +333,7 @@ func call(ctx context.Context, a Analyzer, f File) (out Output, reason string) {
 	out, err := a.Analyze(ctx, f)
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return Output{}, protocol.SkipTimeout
+		return out, protocol.SkipTimeout
 	case err != nil:
 		return Output{}, protocol.SkipParseError
 	}
@@ -386,8 +393,10 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 		j.res.IOCs = append(j.res.IOCs, ioc)
 	}
 	for _, s := range out.Skips {
-		if s.Unread() {
-			// The skipped member was seen but never analyzed.
+		if s.Unread() && s.Path != parent.Path && !j.unread[s.Path] {
+			// The skipped member was seen but never analyzed. A skip of the file the
+			// analyzer was given, or one already counted, is not another file.
+			j.unread[s.Path] = true
 			j.admit()
 		}
 	}
@@ -418,7 +427,9 @@ func (j *job) drain(ctx context.Context) {
 		j.queue[0] = File{} // let the member's bytes go once it is analyzed
 		j.queue = j.queue[1:]
 		if ctx.Err() != nil {
+			// This member and the ones queued after it were never analyzed.
 			j.res.Coverage.Truncated = true
+			j.skip(c.Path, protocol.SkipTimeout)
 			j.queue = nil
 			return
 		}

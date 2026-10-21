@@ -233,6 +233,7 @@ func TestRun(t *testing.T) {
 			analyzers:      []analyze.Analyzer{nothing},
 			cancelled:      true,
 			wantTargetKind: protocol.TargetDir,
+			wantSkips:      []protocol.Skip{{Path: "a.txt", Reason: protocol.SkipTimeout}},
 			wantTruncated:  true,
 		},
 		{
@@ -323,6 +324,24 @@ func TestRun(t *testing.T) {
 			wantSkips:      []protocol.Skip{{Path: "slow.txt", Reason: protocol.SkipTimeout}},
 		},
 		{
+			name: "findings made before the timeout are kept",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "slow.txt", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "slow", fn: func(ctx context.Context, f analyze.File) (analyze.Output, error) {
+				<-ctx.Done()
+				return analyze.Output{Findings: []protocol.Finding{finding("GAL-T-008", protocol.SeverityHigh, f.Path, 1, "early")}}, ctx.Err()
+			}}},
+			timeout:        50 * time.Millisecond,
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantFiles:      []string{"slow.txt"},
+			wantSeen:       1,
+			wantSkips:      []protocol.Skip{{Path: "slow.txt", Reason: protocol.SkipTimeout}},
+			wantRules:      []string{"GAL-T-008"},
+		},
+		{
 			name: "children are dispatched with !/ paths in FIFO order",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a.zip", []byte("x"))
@@ -355,13 +374,50 @@ func TestRun(t *testing.T) {
 				return dir
 			},
 			analyzers: []analyze.Analyzer{fake{name: "skips", fn: func(context.Context, analyze.File) (analyze.Output, error) {
-				return analyze.Output{Skips: []protocol.Skip{{Path: "a.txt!/m", Reason: protocol.SkipUnsupported}}}, nil
+				return analyze.Output{Skips: []protocol.Skip{{Path: "a.txt", Reason: protocol.SkipParseError}}}, nil
 			}}},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
 			wantFiles:      []string{"a.txt"},
 			wantSeen:       1, wantAnalyzed: 1,
-			wantSkips: []protocol.Skip{{Path: "a.txt!/m", Reason: protocol.SkipUnsupported}},
+			wantSkips: []protocol.Skip{{Path: "a.txt", Reason: protocol.SkipParseError}},
+		},
+		{
+			name: "a member that cannot be read counts as seen and not analyzed",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.zip", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "skips", fn: func(context.Context, analyze.File) (analyze.Output, error) {
+				return analyze.Output{Skips: []protocol.Skip{{Path: "a.zip!/m", Reason: protocol.SkipUnsupported}}}, nil
+			}}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantFiles:      []string{"a.zip"},
+			wantSeen:       2, wantAnalyzed: 1,
+			wantSkips: []protocol.Skip{{Path: "a.zip!/m", Reason: protocol.SkipUnsupported}},
+		},
+		{
+			name: "a member skipped twice or a skip of the file itself is not another file",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.pdf", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{
+				fake{name: "one", fn: func(context.Context, analyze.File) (analyze.Output, error) {
+					return analyze.Output{Skips: []protocol.Skip{{Path: "a.pdf", Reason: protocol.SkipEncrypted}, {Path: "a.pdf!/m", Reason: protocol.SkipEncrypted}}}, nil
+				}},
+				fake{name: "two", fn: func(context.Context, analyze.File) (analyze.Output, error) {
+					return analyze.Output{Skips: []protocol.Skip{{Path: "a.pdf!/m", Reason: protocol.SkipEncrypted}}}, nil
+				}},
+			},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantFiles:      []string{"a.pdf"},
+			wantSeen:       2, wantAnalyzed: 1,
+			wantSkips: []protocol.Skip{
+				{Path: "a.pdf", Reason: protocol.SkipEncrypted}, {Path: "a.pdf!/m", Reason: protocol.SkipEncrypted}, {Path: "a.pdf!/m", Reason: protocol.SkipEncrypted},
+			},
 		},
 		{
 			name: "backslashes in member names separate path segments",
@@ -425,6 +481,7 @@ func TestRun(t *testing.T) {
 			wantFileCount:  1,
 			wantFiles:      []string{"a.zip"},
 			wantSeen:       1, wantAnalyzed: 1,
+			wantSkips:     []protocol.Skip{{Path: "a.zip!/m", Reason: protocol.SkipTimeout}},
 			wantTruncated: true,
 		},
 		{
