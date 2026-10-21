@@ -131,6 +131,7 @@ func TestAnalyze(t *testing.T) {
 		},
 		{name: "multipart nested too deep", file: "a.eml", data: deep, wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"depth"}},
 		{name: "too many parts", file: "a.eml", data: multi(many...), wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"budget"}},
+		{name: "part with a malformed header leaves the rest unreadable", file: "a.eml", data: multi("Content-Type: text/plain\n\nhi", "no colon in this header\n\nx"), wantFindings: []string{"GAL-EML-001 a.eml:1 "}, wantSkips: []string{"unreadable"}},
 		{
 			name: "base64 attachment keeps the raw decoded name with RTLO",
 			file: "a.eml",
@@ -249,6 +250,45 @@ func TestAnalyzeChildData(t *testing.T) {
 			}
 			if len(out.Children) == 0 || string(out.Children[len(out.Children)-1].Data) != tt.wantData {
 				t.Errorf("children = %+v, want last data %q", out.Children, tt.wantData)
+			}
+		})
+	}
+}
+
+func TestAnalyzeBudget(t *testing.T) {
+	data := multi("Content-Disposition: attachment; filename=a\n\n" + strings.Repeat("a", 100))
+	tests := []struct {
+		name string
+		// inputs
+		budget int64 // negative means the context carries none
+		// expectations
+		wantChildren int
+		wantSkips    []string // reasons
+	}{
+		{name: "a part within the job budget becomes a child", budget: 1000, wantChildren: 1},
+		{name: "no budget leaves the message limit alone", budget: -1, wantChildren: 1},
+		{name: "a part over the job budget is a budget skip", budget: 50, wantSkips: []string{protocol.SkipBudget}},
+		{name: "a spent job budget keeps every non-empty part out", budget: 0, wantSkips: []string{protocol.SkipBudget}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.budget >= 0 {
+				ctx = analyze.WithBudget(ctx, tt.budget)
+			}
+			f := analyze.File{Path: "a.eml", Name: "a.eml", Kind: ident.Text, Data: []byte(data)}
+
+			out, err := eml.New().Analyze(ctx, f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			var skips []string
+			for _, s := range out.Skips {
+				skips = append(skips, s.Reason)
+			}
+			if len(out.Children) != tt.wantChildren || !slices.Equal(skips, tt.wantSkips) {
+				t.Errorf("children = %d, skips = %v, want %d and %v", len(out.Children), skips, tt.wantChildren, tt.wantSkips)
 			}
 		})
 	}

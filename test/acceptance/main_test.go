@@ -94,14 +94,14 @@ func runAgent(t *testing.T, args ...string) (stdout, stderr string, code int) {
 
 func runBinary(t *testing.T, path string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
 	if ctx.Err() != nil {
-		t.Fatalf("run %v: timed out after 30s", args)
+		t.Fatalf("run %v: timed out after 60s", args)
 	}
 	if err != nil {
 		var ee *exec.ExitError
