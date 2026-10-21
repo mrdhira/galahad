@@ -22,10 +22,10 @@ func TestPDF(t *testing.T) {
 			wantCode:    20,
 			wantVerdict: "malicious",
 			wantFindings: []string{
-				"GAL-PDF-001 invoice.pdf:11",
-				"GAL-PDF-002 invoice.pdf:2",
-				"GAL-PDF-003 invoice.pdf:14",
-				"GAL-PDF-005 invoice.pdf:20",
+				"GAL-PDF-001 invoice.pdf:12",
+				"GAL-PDF-002 invoice.pdf:3",
+				"GAL-PDF-003 invoice.pdf:15",
+				"GAL-PDF-005 invoice.pdf:21",
 			},
 		},
 		{
@@ -33,7 +33,7 @@ func TestPDF(t *testing.T) {
 			fixture:      "p4-pdf-openaction-uri",
 			wantCode:     10,
 			wantVerdict:  "suspicious",
-			wantFindings: []string{"GAL-PDF-002 statement.pdf:2", "GAL-PDF-005 statement.pdf:11"},
+			wantFindings: []string{"GAL-PDF-002 statement.pdf:3", "GAL-PDF-005 statement.pdf:12"},
 			wantAbsent:   []string{"GAL-PDF-001", "GAL-PDF-003"},
 		},
 		{
@@ -41,7 +41,7 @@ func TestPDF(t *testing.T) {
 			fixture:      "benign-pdf",
 			wantCode:     0,
 			wantVerdict:  "clean",
-			wantFindings: []string{"GAL-PDF-005 report.pdf:11"},
+			wantFindings: []string{"GAL-PDF-005 report.pdf:12"},
 			wantAbsent:   []string{"GAL-PDF-001", "GAL-PDF-002", "GAL-PDF-003", "GAL-PDF-004", "GAL-PDF-006", "GAL-PDF-007"},
 		},
 	}
