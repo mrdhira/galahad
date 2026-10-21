@@ -19,12 +19,16 @@ import (
 // A. A plain install: npm, yarn, pnpm or bun with install, ci or i, a few flags
 // that change nothing, and an optional "cd <dir> &&" in front. The package.json
 // in <dir> must exist, declare none of the scripts an install runs (unless
-// --ignore-scripts is given) and no workspaces, and no .npmrc, .yarnrc,
-// .yarnrc.yml or .pnpmfile.cjs may sit in <dir> or a parent.
+// --ignore-scripts is given), nothing that redirects a dependency and no package
+// manager other than a plain version, and <dir> has no binding.gyp. No package
+// in <dir> or a parent declares workspaces, and no package manager config file
+// sits there.
 //
 // B. Only for an npm script: exactly one known tool with no arguments. The tool
 // must be declared as a dependency with a registry version, must not be
-// committed under node_modules/.bin, and the package.json has no workspaces.
+// committed under node_modules/.bin, and nothing may redirect it: no workspaces
+// in the package or a parent, no override, resolution or patch that names it,
+// no pnpmfile and no bunfig.toml.
 //
 // The command is attacker-controlled text, so only a small alphabet is parsed.
 // The neighbor files are read through File.Open; without it nothing is benign.
@@ -52,7 +56,13 @@ var (
 	// installScripts are the scripts an install runs on its own.
 	installScripts = []string{"preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare", "dependencies", "pnpm:devPreinstall"}
 	// installConfigs change what an install runs or fetches.
-	installConfigs = []string{".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs"}
+	installConfigs = []string{".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", "pnpm-workspace.yaml", "bunfig.toml"}
+	// redirects are the package.json members that can replace a dependency with
+	// other code. The pnpm member holds overrides and patchedDependencies.
+	redirects = []string{"overrides", "resolutions", "pnpm", "patchedDependencies"}
+	// managerRE is a packageManager value that names a released version. A URL
+	// makes corepack download and run that file.
+	managerRE = regexp.MustCompile(`^(npm|yarn|pnpm|bun)@[0-9][0-9A-Za-z.+-]*$`)
 
 	// tools maps a whole command to the package that provides it and its
 	// name under node_modules/.bin.
@@ -117,8 +127,80 @@ func (g *grader) absentUp(dir string, names ...string) bool {
 		if dir == "" {
 			return true
 		}
-		if dir = path.Dir(dir); dir == "." {
-			dir = ""
+		dir = parentDir(dir)
+	}
+}
+
+// parentDir returns the folder that holds dir. The root is "".
+func parentDir(dir string) string {
+	if dir = path.Dir(dir); dir == "." {
+		return ""
+	}
+	return dir
+}
+
+// inWorkspace reports whether the package.json in dir or a parent folder
+// declares workspaces, so that the package manager may link a sibling package
+// in place of a registry one. A package.json that cannot be read counts.
+func (g *grader) inWorkspace(dir string) bool {
+	for d := dir; ; d = parentDir(d) {
+		p, _ := within(d, "package.json")
+		if g.own != nil && d == g.dir || !g.absent(p) {
+			if pkg := g.packageAt(d); pkg == nil || pkg.get("workspaces") != nil {
+				return true
+			}
+		}
+		if d == "" {
+			return false
+		}
+	}
+}
+
+// alias reports whether a YAML line holds an alias (*name), which starts a
+// value after a blank. A star inside a scalar such as workspace:* is not one.
+func alias(line string) bool {
+	return strings.Contains(line, " *") || strings.Contains(line, "\t*")
+}
+
+// mentions reports whether a key anywhere under n contains name.
+func mentions(n *node, name string) bool {
+	if n == nil || n.kind != 'o' {
+		return false
+	}
+	for i, k := range n.keys {
+		if strings.Contains(k, name) || mentions(n.vals[i], name) {
+			return true
+		}
+	}
+	return false
+}
+
+// pnpmClean reports whether no pnpm-workspace.yaml in dir or a parent folder
+// sets a pnpmfile, or names the package name in its overrides or
+// patchedDependencies. Only top-level block keys are read; anything that could
+// hide a key (flow style, anchors, escapes) counts as naming it.
+func (g *grader) pnpmClean(dir, name string) bool {
+	for d := dir; ; d = parentDir(d) {
+		p, _ := within(d, "pnpm-workspace.yaml")
+		data, err := g.read(p)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		block := ""
+		for _, line := range strings.Split(strings.TrimPrefix(string(data), "\ufeff"), "\n") {
+			if line != "" && !strings.ContainsAny(line[:1], " \t#-") {
+				key, _, _ := strings.Cut(line, ":")
+				block = strings.Trim(strings.TrimSpace(key), `"'`)
+				if strings.ContainsAny(line[:1], "{[?&*!|>%@`\\") || strings.Contains(block, "\\") || strings.Contains(block, "npmfile") {
+					return false
+				}
+			}
+			if (block == "overrides" || block == "patchedDependencies") && (strings.Contains(line, name) || strings.ContainsAny(line, "\\&<{[?") || alias(line)) {
+				return false
+			}
+		}
+		if d == "" {
+			return true
 		}
 	}
 }
@@ -195,7 +277,13 @@ func (g *grader) install(words []string, dir string) bool {
 		ignoreScripts = ignoreScripts || w == "--ignore-scripts"
 	}
 	pkg := g.packageAt(dir)
-	if pkg == nil || pkg.get("workspaces") != nil {
+	if pkg == nil || g.inWorkspace(dir) || slices.ContainsFunc(redirects, func(k string) bool { return pkg.get(k) != nil }) {
+		return false
+	}
+	if m := pkg.get("packageManager"); pkg.get("devEngines") != nil || m != nil && (m.kind != 's' || !managerRE.MatchString(m.str)) {
+		return false
+	}
+	if p, _ := within(dir, "binding.gyp"); !g.absent(p) {
 		return false
 	}
 	if scripts := pkg.get("scripts"); !ignoreScripts && scripts != nil && scripts.kind == 'o' {
@@ -211,7 +299,13 @@ func (g *grader) install(words []string, dir string) bool {
 func (g *grader) tool(cmd, dir string) bool {
 	t, ok := tools[cmd]
 	pkg := g.packageAt(dir)
-	if !ok || pkg == nil || pkg.get("workspaces") != nil || !g.declared(pkg, t.pkg) || !g.absentUp(dir, path.Join("node_modules", ".bin", t.bin)) {
+	if !ok || pkg == nil || !g.declared(pkg, t.pkg) || g.inWorkspace(dir) {
+		return false
+	}
+	if slices.ContainsFunc(redirects, func(k string) bool { return mentions(pkg.get(k), t.pkg) }) || !g.pnpmClean(dir, t.pkg) {
+		return false
+	}
+	if !g.absentUp(dir, path.Join("node_modules", ".bin", t.bin), "bunfig.toml") {
 		return false
 	}
 	if t.pkg == "prisma" {
