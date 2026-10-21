@@ -71,14 +71,14 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if f.Kind != ident.PDF {
 		return analyze.Output{}, nil
 	}
-	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}}
+	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, lineNo: 1}
 	return s.run()
 }
 
 // object is one indirect object: where its dictionary is and what its stream holds.
 type object struct {
 	num      int
-	hdr      int    // offset of "N G obj" in the file; evidence line
+	hdr      int    // offset of "N G obj" in the file; evidence line of its decoded content
 	buf      []byte // buffer holding the dictionary
 	ds, de   int    // dictionary region in buf
 	content  []byte // raw or decoded stream; nil without a stream
@@ -89,13 +89,26 @@ type object struct {
 	skipScan bool     // image or font data
 }
 
-// evidence is one place a rule fired: the file offset, the span of its line
-// and, for decoded content, the snippet to show instead of the line.
+// evidence is one place a rule fired: the file offset, the span of its line,
+// the snippet to show instead of the line (decoded content, script text) and
+// the key of the region or script object it came from.
 type evidence struct {
 	off        int
 	start, end int
 	snip       string
+	key        int
 }
+
+// Evidence keys keep one hit per region (or per script object) of a rule, so a
+// multi-line action does not use up the evidence slots.
+const (
+	keyFile   = iota // region in the file, by offset
+	keyStream        // decoded content, by stream header offset
+	keyObject        // script held by an object, by header offset
+	keyToken         // script in an inline hex string, by offset
+)
+
+func evidenceKey(kind, off int) int { return off*4 + kind }
 
 // region is a piece of PDF syntax to scan. at is the file offset of buf, or -1
 // when buf is decoded data that is not in the file; hdr is then the offset of
@@ -104,6 +117,14 @@ type region struct {
 	buf []byte
 	at  int
 	hdr int
+}
+
+// key returns the evidence key of the region.
+func (r region) key() int {
+	if r.at >= 0 {
+		return evidenceKey(keyFile, r.at)
+	}
+	return evidenceKey(keyStream, r.hdr)
 }
 
 // where returns the file offset and the snippet override for the token at
@@ -129,6 +150,8 @@ type scanner struct {
 	memo      map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
 	iocs      []protocol.IOC
 	decoded   int
+	lineOff   int // lineAt cursor: offset in the file and its line number
+	lineNo    int
 	encrypted bool
 	undecoded bool
 	truncated bool
@@ -224,12 +247,12 @@ func (s *scanner) add(r protocol.Rule, reg region, off int) {
 		return
 	}
 	at, snip := reg.where(off)
-	s.addAt(r, at, snip)
+	s.addAt(r, at, snip, reg.key())
 }
 
-// addAt records a hit for the rule at a file offset. A hit on a line that
-// already has one is not repeated.
-func (s *scanner) addAt(r protocol.Rule, off int, snip string) {
+// addAt records a hit for the rule at a file offset. A hit is not repeated when
+// the rule already has one with the same key, or when both show the same line.
+func (s *scanner) addAt(r protocol.Rule, off int, snip string, key int) {
 	if s.full(r) {
 		return
 	}
@@ -239,7 +262,7 @@ func (s *scanner) addAt(r protocol.Rule, off int, snip string) {
 		s.hits[r.ID] = h
 	}
 	for _, e := range h.evs {
-		if off >= e.start && off < e.end {
+		if key == e.key || snip == "" && e.snip == "" && off >= e.start && off < e.end {
 			return
 		}
 	}
@@ -250,7 +273,7 @@ func (s *scanner) addAt(r protocol.Rule, off int, snip string) {
 	if i := bytes.IndexByte(data[off:], '\n'); i >= 0 {
 		end = off + i
 	}
-	h.evs = append(h.evs, evidence{off: off, start: start, end: end + 1, snip: snip})
+	h.evs = append(h.evs, evidence{off: off, start: start, end: end + 1, snip: snip, key: key})
 }
 
 // locate finds every "N G obj" and decodes its stream.
@@ -464,7 +487,7 @@ func (s *scanner) prepareStream(o *object, raw []byte, rawAt int) {
 		out, err := s.decode(f, data)
 		data = out
 		if err != "" {
-			s.addAt(ruleOpaque, o.hdr, err)
+			s.addAt(ruleOpaque, o.hdr, err, evidenceKey(keyStream, o.hdr))
 			s.undecoded = true
 			break
 		}
@@ -572,6 +595,16 @@ func (s *scanner) registerMembers(o *object) error {
 	return nil
 }
 
-func (s *scanner) evidenceLine(off int) int {
-	return 1 + bytes.Count(s.f.Data[:min(off, len(s.f.Data))], []byte{'\n'})
+// lineAt returns the line of a file offset. It counts from the line of the
+// previous call, so scanning in file order costs one pass over the file.
+func (s *scanner) lineAt(off int) int {
+	data := s.f.Data
+	off = max(0, min(off, len(data)))
+	if off >= s.lineOff {
+		s.lineNo += bytes.Count(data[s.lineOff:off], []byte{'\n'})
+	} else {
+		s.lineNo -= bytes.Count(data[off:s.lineOff], []byte{'\n'})
+	}
+	s.lineOff = off
+	return s.lineNo
 }

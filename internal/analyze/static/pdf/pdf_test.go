@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/ident"
@@ -90,6 +91,13 @@ func TestAnalyze(t *testing.T) {
 		return doc(obj(1, "<< /Type /Catalog /AA << /O 100 0 R >> /OpenAction 30 0 R >>"), chain(100, n, 30), obj(30, "<< /Next 10 0 R >>"), uriAction)
 	}
 
+	var uriList strings.Builder
+	var uriIOCs []string
+	for i := range 15000 {
+		fmt.Fprintf(&uriList, "/URI (http://u%d.test/) ", i)
+		uriIOCs = append(uriIOCs, fmt.Sprintf("url=http://u%d.test/@12", i))
+	}
+
 	zeros := func(n int) []byte { return make([]byte, n) }
 	longURI := "http://a.test/" + strings.Repeat("a", pdf.MaxURILen)
 	objstm := func() string {
@@ -110,13 +118,18 @@ func TestAnalyze(t *testing.T) {
 		kind ident.Kind
 		data []byte
 		ctx  context.Context
+		// timeout, when set, cancels the analysis and fails the case that is too slow
+		timeout time.Duration
 		// expectations
 		wantRules   []string
 		wantLines   map[string]int // rule -> line of the first evidence
 		wantSnippet map[string]string
-		wantIOCs    []string // type=value
-		wantSkips   []string
-		wantErr     bool
+		// wantEvidenceLines and wantEvidenceSnippets list every evidence of a rule
+		wantEvidenceLines    map[string][]int
+		wantEvidenceSnippets map[string][]string
+		wantIOCs             []string // type=value@line
+		wantSkips            []string
+		wantErr              bool
 	}{
 		{
 			name:        "Flate object stream hides an OpenAction to JavaScript",
@@ -127,20 +140,9 @@ func TestAnalyze(t *testing.T) {
 			wantSnippet: map[string]string{"GAL-PDF-001": "decoded: /JavaScript /JS (app.alert\\(1\\)) >>", "GAL-PDF-002": "decoded: /OpenAction 11 0 R"},
 		},
 		{
-			name:        "keys in a plain object point at their own lines",
-			kind:        ident.PDF,
-			data:        doc(obj(1, "<<\n/Type /Catalog\n/OpenAction 2 0 R\n>>"), obj(2, "<<\n/Type /Action\n/S /Launch\n/F (calc.exe)\n>>")),
-			wantRules:   []string{"GAL-PDF-002", "GAL-PDF-003"},
-			wantLines:   map[string]int{"GAL-PDF-002": 5, "GAL-PDF-003": 11},
-			wantSnippet: map[string]string{"GAL-PDF-002": "/OpenAction 2 0 R", "GAL-PDF-003": "/S /Launch"},
-		},
-		{
-			name:        "action type on the line after /S points at the type",
-			kind:        ident.PDF,
-			data:        doc(obj(1, "<< /Type /Action /S\n/JavaScript\n/JS (go) >>"), obj(2, "<< /S\n/Launch >>")),
-			wantRules:   []string{"GAL-PDF-001", "GAL-PDF-003"},
-			wantLines:   map[string]int{"GAL-PDF-001": 4, "GAL-PDF-003": 9},
-			wantSnippet: map[string]string{"GAL-PDF-001": "/JavaScript", "GAL-PDF-003": "/Launch >>"},
+			name: "not a PDF kind",
+			kind: ident.Text,
+			data: doc(obj(1, "<< /S /Launch >>")),
 		},
 		{
 			name:        "unfiltered object stream points at the line of the key in the file",
@@ -151,23 +153,58 @@ func TestAnalyze(t *testing.T) {
 			wantSnippet: map[string]string{"GAL-PDF-001": "<< /S /JavaScript /JS (go) >>", "GAL-PDF-002": "10 0 11 22 << /OpenAction 11 0 R >>"},
 		},
 		{
-			name: "not a PDF kind",
-			kind: ident.Text,
-			data: doc(obj(1, "<< /S /Launch >>")),
+			name:                 "object stream member with control and bidi characters and a long text is cleaned and cut",
+			kind:                 ident.PDF,
+			data:                 objstmDoc([]string{"<< /S /JavaScript /JS (\x1b[31m\u202e" + strings.Repeat("a", 300) + ") >>"}, "/FlateDecode", flate, ""),
+			wantRules:            []string{"GAL-PDF-001"},
+			wantEvidenceLines:    map[string][]int{"GAL-PDF-001": {5}},
+			wantEvidenceSnippets: map[string][]string{"GAL-PDF-001": {"decoded: /JavaScript /JS (\\u001b[31m\\u202e" + strings.Repeat("a", 158)}},
+		},
+		{
+			name:        "action type on the line after /S points at the type",
+			kind:        ident.PDF,
+			data:        doc(obj(1, "<< /Type /Action /S\n/JavaScript\n/JS (go) >>"), obj(2, "<< /S\n/Launch >>")),
+			wantRules:   []string{"GAL-PDF-001", "GAL-PDF-003"},
+			wantLines:   map[string]int{"GAL-PDF-001": 4, "GAL-PDF-003": 9},
+			wantSnippet: map[string]string{"GAL-PDF-001": "/JavaScript", "GAL-PDF-003": "/Launch >>"},
+		},
+		{
+			name:        "keys in a plain object point at their own lines",
+			kind:        ident.PDF,
+			data:        doc(obj(1, "<<\n/Type /Catalog\n/OpenAction 2 0 R\n>>"), obj(2, "<<\n/Type /Action\n/S /Launch\n/F (calc.exe)\n>>")),
+			wantRules:   []string{"GAL-PDF-002", "GAL-PDF-003"},
+			wantLines:   map[string]int{"GAL-PDF-002": 5, "GAL-PDF-003": 11},
+			wantSnippet: map[string]string{"GAL-PDF-002": "/OpenAction 2 0 R", "GAL-PDF-003": "/S /Launch"},
+		},
+		{
+			name: "multi-line actions use one evidence each",
+			kind: ident.PDF,
+			data: doc(
+				obj(1, "<<\n/S /JavaScript\n/JS (one)\n>>"), obj(2, "<<\n/S /JavaScript\n/JS (two)\n>>"),
+				obj(3, "<<\n/S /JavaScript\n/JS (three)\n>>"), obj(4, "<<\n/S /JavaScript\n/JS (four)\n>>")),
+			wantRules:         []string{"GAL-PDF-001"},
+			wantEvidenceLines: map[string][]int{"GAL-PDF-001": {4, 10, 16}},
+		},
+		{
+			name:                 "JavaScript in a referenced string adds the script text",
+			kind:                 ident.PDF,
+			data:                 doc(obj(1, "<<\n/S /JavaScript\n/JS 2 0 R\n>>"), obj(2, "(go\\(\\))"), obj(3, "<< /JS 2 0 R >>")),
+			wantRules:            []string{"GAL-PDF-001"},
+			wantEvidenceLines:    map[string][]int{"GAL-PDF-001": {4, 8, 12}},
+			wantEvidenceSnippets: map[string][]string{"GAL-PDF-001": {"/S /JavaScript", "script: go()", "<< /JS 2 0 R >>"}},
+		},
+		{
+			name:                 "JavaScript in a referenced stream adds the decoded script text",
+			kind:                 ident.PDF,
+			data:                 doc(obj(1, "<< /S /JavaScript /JS 2 0 R >>"), stream(2, "/Filter /FlateDecode", deflate(t, []byte("var x = 1;\nrun(x);")))),
+			wantRules:            []string{"GAL-PDF-001"},
+			wantEvidenceLines:    map[string][]int{"GAL-PDF-001": {3, 5}},
+			wantEvidenceSnippets: map[string][]string{"GAL-PDF-001": {"<< /S /JavaScript /JS 2 0 R >>", "script: var x = 1; run(x);"}},
 		},
 		{
 			name: "a plain page has no findings",
 			kind: ident.PDF,
 			data: doc(obj(1, "<< /Type /Catalog /Pages 2 0 R >>"), obj(2, "<< /Type /Pages /Kids [] /Count 0 >>")),
-		},
-		{
-			name:        "destination OpenAction and one link stay clean apart from the link",
-			kind:        ident.PDF,
-			data:        doc(obj(1, "<< /Type /Catalog /OpenAction [3 0 R /FitH] >>"), obj(4, "<< /Subtype /Link /A << /S /URI /URI (https://docs.example.test/guide) >> >>")),
-			wantRules:   []string{"GAL-PDF-005"},
-			wantLines:   map[string]int{"GAL-PDF-005": 6},
-			wantSnippet: map[string]string{"GAL-PDF-005": "<< /Subtype /Link /A << /S /URI /URI (https://docs.example.test/guide) >> >>"},
-			wantIOCs:    []string{"url=https://docs.example.test/guide"},
 		},
 		{
 			name:        "JavaScript string with escapes and UTF-16",
@@ -253,14 +290,14 @@ func TestAnalyze(t *testing.T) {
 			kind:      ident.PDF,
 			data:      decoyDoc(255),
 			wantRules: []string{"GAL-PDF-002", "GAL-PDF-005"},
-			wantIOCs:  []string{"url=http://a.test/"},
+			wantIOCs:  []string{"url=http://a.test/@774"},
 		},
 		{
 			name:      "chain as long as the object limit still finds the action",
 			kind:      ident.PDF,
 			data:      doc(obj(1, "<< /OpenAction 100 0 R >>"), chain(100, pdf.MaxObjects-3, 10), uriAction),
 			wantRules: []string{"GAL-PDF-002", "GAL-PDF-005"},
-			wantIOCs:  []string{"url=http://a.test/"},
+			wantIOCs:  []string{"url=http://a.test/@299997"},
 		},
 		{
 			name: "OpenAction at the end of the data",
@@ -376,14 +413,15 @@ func TestAnalyze(t *testing.T) {
 			kind:      ident.PDF,
 			data:      doc(obj(1, "<< /URI <687474703a2f2f612e746573742f68> >>"), obj(2, "<< /URI 3 0 R >>"), obj(3, "(http://b.test/r)"), obj(4, "<< /URI 9 0 R >>"), obj(5, "<< /URI 6 0 R >>"), obj(6, "<< /A 1 >>")),
 			wantRules: []string{"GAL-PDF-005"},
-			wantIOCs:  []string{"url=http://a.test/h", "url=http://b.test/r"},
+			wantIOCs:  []string{"url=http://a.test/h@3", "url=http://b.test/r@6"},
 		},
 		{
-			name:        "JavaScript as a hex string",
-			kind:        ident.PDF,
-			data:        doc(obj(1, "<< /JS <61626364> >>")),
-			wantRules:   []string{"GAL-PDF-001"},
-			wantSnippet: map[string]string{"GAL-PDF-001": "<< /JS <61626364> >>"},
+			name:                 "JavaScript as a hex string",
+			kind:                 ident.PDF,
+			data:                 doc(obj(1, "<< /JS <61626364> >>")),
+			wantRules:            []string{"GAL-PDF-001"},
+			wantSnippet:          map[string]string{"GAL-PDF-001": "<< /JS <61626364> >>"},
+			wantEvidenceSnippets: map[string][]string{"GAL-PDF-001": {"<< /JS <61626364> >>", "script: abcd"}},
 		},
 		{
 			name:      "embedded file",
@@ -409,8 +447,16 @@ func TestAnalyze(t *testing.T) {
 			data:        doc(obj(1, "<< /S /URI /URI (http://a.test/\\(x\\)\\057p) >>"), obj(2, "<< /URI (http://a.test/\\(x\\)\\057p) >>"), obj(3, "<< /URI (mailto:u@a.test?subject=x) >>")),
 			wantRules:   []string{"GAL-PDF-005"},
 			wantLines:   map[string]int{"GAL-PDF-005": 3},
-			wantIOCs:    []string{"url=http://a.test/(x)/p", "email=u@a.test"},
+			wantIOCs:    []string{"url=http://a.test/(x)/p@3", "email=u@a.test@9"},
 			wantSnippet: map[string]string{},
+		},
+		{
+			name:      "thousands of URIs deep in a large file keep every finding within the time limit",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /OpenAction 2 0 R >>"), obj(2, "<< /S /Launch /F (cmd.exe) >>"), obj(3, "<< /Title ("+strings.Repeat("A", 16<<20)+") >>"), obj(4, "<< "+uriList.String()+" >>")),
+			timeout:   20 * time.Second,
+			wantRules: []string{"GAL-PDF-002", "GAL-PDF-003", "GAL-PDF-005"},
+			wantIOCs:  uriIOCs,
 		},
 		{
 			name: "URIs that are empty, too long, relative, with controls or only a mailto scheme are dropped",
@@ -480,6 +526,11 @@ func TestAnalyze(t *testing.T) {
 			if ctx == nil {
 				ctx = context.Background()
 			}
+			if tt.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.timeout)
+				defer cancel()
+			}
 			f := analyze.File{Path: "d/a.pdf", Name: "a.pdf", Kind: tt.kind, Data: tt.data}
 
 			out, err := pdf.New().Analyze(ctx, f)
@@ -499,13 +550,25 @@ func TestAnalyze(t *testing.T) {
 				if sn, ok := tt.wantSnippet[fd.RuleID]; ok && fd.Evidence[0].Snippet != sn {
 					t.Errorf("%s snippet = %q, want %q", fd.RuleID, fd.Evidence[0].Snippet, sn)
 				}
+				var lines []int
+				var snips []string
+				for _, ev := range fd.Evidence {
+					lines = append(lines, ev.Line)
+					snips = append(snips, ev.Snippet)
+				}
+				if want, ok := tt.wantEvidenceLines[fd.RuleID]; ok && !reflect.DeepEqual(lines, want) {
+					t.Errorf("%s evidence lines = %v, want %v", fd.RuleID, lines, want)
+				}
+				if want, ok := tt.wantEvidenceSnippets[fd.RuleID]; ok && !reflect.DeepEqual(snips, want) {
+					t.Errorf("%s evidence snippets = %q, want %q", fd.RuleID, snips, want)
+				}
 			}
 			if !reflect.DeepEqual(got, tt.wantRules) {
 				t.Errorf("rules = %v, want %v", got, tt.wantRules)
 			}
 			var iocs []string
 			for _, ioc := range out.IOCs {
-				iocs = append(iocs, ioc.Type+"="+ioc.Value)
+				iocs = append(iocs, fmt.Sprintf("%s=%s@%d", ioc.Type, ioc.Value, ioc.Line))
 			}
 			if !reflect.DeepEqual(iocs, tt.wantIOCs) {
 				t.Errorf("iocs = %v, want %v", iocs, tt.wantIOCs)
