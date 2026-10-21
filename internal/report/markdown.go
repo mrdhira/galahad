@@ -162,7 +162,7 @@ func mdFindings(b *strings.Builder, hosts map[string]bool, rs []group, limit int
 	b.WriteString("| Severity | Rule | Title | ATT&CK | Location | Snippet |\n|---|---|---|---|---|---|\n")
 	for i, r := range rs {
 		if i == limit {
-			fmt.Fprintf(b, "\nShowing %d of %d. See report.json for the rest.\n", limit, len(rs))
+			fmt.Fprintf(b, "\nShowing %d of %d locations. See report.json for the rest.\n", limit, len(rs))
 			break
 		}
 		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(string(r.severity())), mdEscape(r.rules()), mdText(hosts, r.titles()), mdEscape(r.attacks()), mdEscape(r.Location), mdText(hosts, r.Snippet))

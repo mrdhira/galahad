@@ -199,14 +199,15 @@ func findingsHeading(res *protocol.Result, gs []group) string {
 const maxWhy = 3
 
 // why returns the first maxWhy groups whose most severe finding is critical or high. Without
-// any, a suspicious verdict falls back to the medium ones; a malicious one always has some. A title that repeats at another
-// location is listed once, so the reasons differ. A clean verdict has no reasons.
+// any, it falls back to the medium ones: a score of 70 or more is malicious even when every
+// finding is medium. A title that repeats at another location is listed once, so the reasons
+// differ. A clean verdict has no reasons.
 func why(v protocol.Verdict, gs []group) []group {
 	if v == protocol.VerdictClean {
 		return nil
 	}
 	top := pick(gs, protocol.SeverityCritical, protocol.SeverityHigh)
-	if len(top) == 0 && v == protocol.VerdictSuspicious {
+	if len(top) == 0 {
 		top = pick(gs, protocol.SeverityMedium)
 	}
 	return top

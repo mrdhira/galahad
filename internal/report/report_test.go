@@ -278,6 +278,17 @@ func TestWriteContent(t *testing.T) {
 			wantHTML:     []string{`<ul class="why">`},
 		},
 		{
+			name: "why falls back to medium findings for a malicious verdict reached by score",
+			mutate: func(r *protocol.Result) {
+				r.Verdict, r.Findings = protocol.VerdictMalicious, nil
+				for i := 0; i < 5; i++ {
+					r.Findings = append(r.Findings, protocol.Finding{RuleID: fmt.Sprintf("GAL-M-00%d", i), Severity: protocol.SeverityMedium, Title: fmt.Sprintf("Medium %d", i), Evidence: []protocol.Evidence{{Path: fmt.Sprintf("m%d.js", i), Line: 1, Snippet: fmt.Sprintf("s%d", i)}}})
+				}
+			},
+			wantMD:   []string{"## Why\n\n- medium: Medium 0 in m0.js:1\n- medium: Medium 1 in m1.js:1\n- medium: Medium 2 in m2.js:1\n\n"},
+			wantHTML: []string{`<ul class="why">`},
+		},
+		{
 			name: "no why section for a clean verdict",
 			mutate: func(r *protocol.Result) {
 				r.Verdict, r.Findings = protocol.VerdictClean, r.Findings[1:]
@@ -310,7 +321,7 @@ func TestWriteContent(t *testing.T) {
 					r.Findings = append(r.Findings, protocol.Finding{RuleID: rule, Severity: protocol.SeverityLow, Title: "t", Evidence: []protocol.Evidence{{Path: "a", Line: i + 1}}})
 				}
 			},
-			wantMD: []string{"## Runs automatically (12)", "Showing 10 of 12. See report.json for the rest.", "## Findings (15)", "Showing 10 of 15. See report.json for the rest."},
+			wantMD: []string{"## Runs automatically (12)", "Showing 10 of 12. See report.json for the rest.", "## Findings (15)", "Showing 10 of 15 locations. See report.json for the rest."},
 		},
 		{
 			name: "no runs automatically section without auto-run findings",
