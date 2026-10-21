@@ -32,6 +32,8 @@ type htmlData struct {
 	CoverageWarning       string
 	Truncated             bool
 	Skips                 []protocol.Skip
+	HasNetwork            bool
+	Network               []netRow
 }
 
 // htmlLine is one line of the Why and Runs automatically lists.
@@ -94,6 +96,7 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 	for _, s := range res.Coverage.Skipped {
 		d.Skips = append(d.Skips, protocol.Skip{Path: clean(s.Path), Reason: clean(s.Reason)})
 	}
+	d.HasNetwork, d.Network = res.Network != nil, netRows(res)
 	var b bytes.Buffer
 	if err := htmlTemplate.Execute(&b, d); err != nil {
 		return nil, err

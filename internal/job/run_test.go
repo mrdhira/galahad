@@ -55,7 +55,11 @@ type fakeBackend struct {
 	startErr error
 	onStart  func() // runs when the machine starts, after the host has walked the target
 
+	noProxyListener bool // the machine has no listener for the proxy port
+
 	mu      sync.Mutex
+	ports   []uint32      // the ports of the last Start
+	proxyL  *pipeListener // the proxy listener of the last Start
 	starts  int
 	kills   int
 	done    chan struct{} // closed when the guest script has ended
@@ -83,7 +87,10 @@ func (b *fakeBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine,
 		return nil, b.startErr
 	}
 	l := &pipeListener{conns: make(chan net.Conn, 1), closed: make(chan struct{})}
-	m := &fakeMachine{b: b, l: l, killed: make(chan struct{})}
+	pl := &pipeListener{conns: make(chan net.Conn, 1), closed: make(chan struct{})}
+	b.proxyL = pl
+	m := &fakeMachine{b: b, l: l, pl: pl, killed: make(chan struct{})}
+	b.ports = s.Ports
 	b.done = make(chan struct{})
 	go func() {
 		defer close(b.done)
@@ -98,15 +105,22 @@ func (b *fakeBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine,
 
 type fakeMachine struct {
 	b      *fakeBackend
-	l      *pipeListener
+	l      *pipeListener // control
+	pl     *pipeListener // proxy
 	killed chan struct{}
 }
 
 func (m *fakeMachine) Listener(port uint32) net.Listener {
-	if port != 1024 {
-		return nil
+	switch port {
+	case 1024:
+		return m.l
+	case 1025:
+		if m.b.noProxyListener {
+			return nil
+		}
+		return m.pl
 	}
-	return m.l
+	return nil
 }
 
 func (m *fakeMachine) Wait() error {
@@ -526,8 +540,8 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:      "result with a field the schema does not have",
-			script:    serveRaw(hostVersion, func(data []byte) []byte { return bytes.Replace(data, []byte("{"), []byte(`{"network":{},`), 1) }),
-			wantState: job.StateFailed, wantErr: `result frame: json: unknown field "network"`, wantExit: 1, wantStarts: 1,
+			script:    serveRaw(hostVersion, func(data []byte) []byte { return bytes.Replace(data, []byte("{"), []byte(`{"bogus":{},`), 1) }),
+			wantState: job.StateFailed, wantErr: `result frame: json: unknown field "bogus"`, wantExit: 1, wantStarts: 1,
 		},
 		{
 			name:      "result that is not valid",

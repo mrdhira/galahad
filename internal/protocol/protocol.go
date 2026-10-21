@@ -212,4 +212,6 @@ type Result struct {
 	Confidence      int        `json:"confidence"`
 	ConfidenceLevel string     `json:"confidence_level"`
 	Reasons         []string   `json:"reasons"`
+	// Network is set by the host from its proxy. A guest never sends it.
+	Network *Network `json:"network,omitempty"`
 }

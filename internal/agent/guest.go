@@ -27,8 +27,8 @@ const (
 )
 
 // runGuest is the guest side of one job: dial the host, take the job and its tar stream,
-// analyze the input and send back a Result, or an Error. T2.4b adds the proxy relay and
-// T2.6b the update kinds; until then --proxy is parsed and not used.
+// analyze the input and send back a Result, or an Error. With --proxy it also runs the relay
+// that guest tools reach the network through. T2.6b adds the update kinds.
 func runGuest(args []string, _, stderr io.Writer, env Env) int {
 	fs := flag.NewFlagSet("guest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -57,8 +57,9 @@ func runGuest(args []string, _, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "galahad-agent guest: --control: %v\n", err)
 		return ExitUsage
 	}
+	var dialProxy Dialer // nil without --proxy: the guest has no network then
 	if *proxy != "" {
-		if _, err := ParseTransport(*proxy, *unsafeHost); err != nil {
+		if dialProxy, err = ParseTransport(*proxy, *unsafeHost); err != nil {
 			fmt.Fprintf(stderr, "galahad-agent guest: --proxy: %v\n", err)
 			return ExitUsage
 		}
@@ -84,7 +85,7 @@ func runGuest(args []string, _, stderr io.Writer, env Env) int {
 
 	host := newHostConn(conn)
 	defer host.close()
-	if err := guestJob(host, *unsafeHost); err != nil {
+	if err := guestJob(host, *unsafeHost, dialProxy, env); err != nil {
 		code, msg := errorCode(err)
 		fmt.Fprintf(stderr, "galahad-agent guest: %s: %v\n", code, err)
 		// Best effort: the connection may be the thing that failed.
@@ -110,7 +111,7 @@ func errorCode(err error) (code, msg string) {
 
 // guestJob runs one job on an open control connection. The input is the tar stream of one
 // target, whose top-level entry is named Job.Name: a file, or a directory with the files in it.
-func guestJob(host *hostConn, unsafeHost bool) error {
+func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error {
 	hello := protocol.Hello{Protocol: protocol.ProtocolVersion, AgentVersion: version}
 	if err := host.sendJSON(protocol.FrameHello, hello); err != nil {
 		return fmt.Errorf("send hello: %w", err)
@@ -127,12 +128,20 @@ func guestJob(host *hostConn, unsafeHost bool) error {
 	if err := job.Validate(); err != nil {
 		return fail(protocol.CodeProtocol, "job frame: %v", err)
 	}
-	if job.Kind != protocol.KindScan || job.Source != protocol.SourceLocal {
+	// A net-probe job takes its input like a local scan, and also asks the proxy for job.URL.
+	local := job.Kind == protocol.KindScan && job.Source == protocol.SourceLocal
+	probe := job.Kind == protocol.KindNetProbe && netProbeEnabled
+	if !local && !probe {
 		return fail(protocol.CodeProtocol, "job kind %q with source %q is not supported", job.Kind, job.Source)
 	}
 	if job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name {
 		return fail(protocol.CodeProtocol, "job name %q is not a single path element", protocol.CleanPath(job.Name))
 	}
+	relay, err := startRelay(dialProxy, unsafeHost, env.Setenv)
+	if err != nil {
+		return fmt.Errorf("start the relay: %w", err)
+	}
+	defer relay.close()
 	start := time.Now()
 	jobTime := time.Duration(job.Timeouts.Job) * time.Second
 	host.deadline = start.Add(jobTime)
@@ -163,6 +172,11 @@ func guestJob(host *hostConn, unsafeHost bool) error {
 		return fail(protocol.CodeIngest, "ingest: %w", err)
 	}
 
+	if probe {
+		if err := runNetProbe(host, relay, job.URL); err != nil {
+			return err
+		}
+	}
 	if err := host.sendJSON(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageAnalyze}); err != nil {
 		return fmt.Errorf("send progress: %w", err)
 	}

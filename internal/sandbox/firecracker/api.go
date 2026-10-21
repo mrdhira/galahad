@@ -83,6 +83,10 @@ func (c *apiClient) put(ctx context.Context, path string, body any) error {
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			// A canceled start also kills the process, so the request may fail with EOF first; say why.
+			err = ctx.Err()
+		}
 		return fmt.Errorf("PUT %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }() // everything wanted is read

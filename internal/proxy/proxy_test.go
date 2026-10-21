@@ -812,12 +812,18 @@ func TestLog(t *testing.T) {
 		// inputs
 		maxLines int
 		requests int
+		metadata int // requests for the metadata address, after the others
 		// expectations
-		wantLines   int
-		wantDropped int
+		wantLines    int
+		wantDropped  int
+		wantMetadata int // log lines with the reason "metadata"
 	}{
 		{name: "one line per decision", maxLines: 10, requests: 3, wantLines: 3, wantDropped: 0},
 		{name: "lines over the limit are dropped and counted", maxLines: 3, requests: 5, wantLines: 3, wantDropped: 2},
+		{
+			name: "a tenth of the lines is kept for blocked decisions", maxLines: 10, requests: 15, metadata: 3,
+			wantLines: 10, wantDropped: 8, wantMetadata: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -832,13 +838,27 @@ func TestLog(t *testing.T) {
 				}
 				_ = c.Close()
 			}
+			for range tt.metadata {
+				c, _, err := open(t, addr, "169.254.169.254", 443)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = c.Close()
+			}
 			lines := log.lines(t, tt.wantLines)
+			metadata := 0
 			for _, l := range lines {
 				for _, k := range []string{"time", "host", "port", "ip", "decision", "reason", "up", "down"} {
 					if _, ok := l[k]; !ok {
 						t.Errorf("log line %v lacks %q", l, k)
 					}
 				}
+				if l["reason"] == "metadata" {
+					metadata++
+				}
+			}
+			if metadata != tt.wantMetadata {
+				t.Errorf("log has %d metadata lines, want %d", metadata, tt.wantMetadata)
 			}
 			if got := p.Dropped(); got != tt.wantDropped {
 				t.Errorf("Dropped() = %d, want %d", got, tt.wantDropped)
@@ -855,8 +875,9 @@ func TestEvents(t *testing.T) {
 		allow   []string // --allow-host values
 		answers []string // DNS answer per request: an IP, or "" for a failure
 		// expectations
-		wantEvents int
-		wantFirst  proxy.Event
+		wantEvents  int
+		wantBlocked int // events with Blocked set
+		wantFirst   proxy.Event
 	}{
 		{
 			name:  "same host, port and decision are counted together",
@@ -864,14 +885,24 @@ func TestEvents(t *testing.T) {
 			wantFirst: proxy.Event{Host: "a.example.com", Port: 443, Decision: proxy.Denied, Reason: "host not allowed", Count: 2},
 		},
 		{
-			name:  "at most 200 events",
-			hosts: manyHosts(205), wantEvents: 200,
+			name:  "at most 150 events that are not blocked",
+			hosts: manyHosts(205), wantEvents: 150,
 			wantFirst: proxy.Event{Host: "h0.example.com", Port: 443, Decision: proxy.Denied, Reason: "host not allowed", Count: 1},
+		},
+		{
+			name:  "a blocked address is listed after the other events are full",
+			hosts: append(manyHosts(205), "169.254.169.254"), wantEvents: 151, wantBlocked: 1,
+			wantFirst: proxy.Event{Host: "h0.example.com", Port: 443, Decision: proxy.Denied, Reason: "host not allowed", Count: 1},
+		},
+		{
+			name:  "blocked events use every place, at most 200",
+			hosts: blockedHosts(205), wantEvents: 200, wantBlocked: 200,
+			wantFirst: proxy.Event{Host: "10.0.0.0", Port: 443, Decision: proxy.Denied, Reason: "private", Blocked: true, Count: 1},
 		},
 		{
 			name:  "a later blocked address is not hidden by an earlier DNS failure",
 			hosts: []string{"rebind.example.com", "rebind.example.com"}, allow: []string{"rebind.example.com"},
-			answers: []string{"", "10.0.0.1"}, wantEvents: 1,
+			answers: []string{"", "10.0.0.1"}, wantEvents: 1, wantBlocked: 1,
 			wantFirst: proxy.Event{Host: "rebind.example.com", Port: 443, Decision: proxy.Denied, Reason: "private", Blocked: true, Count: 2},
 		},
 	}
@@ -907,6 +938,15 @@ func TestEvents(t *testing.T) {
 			if events[0] != tt.wantFirst {
 				t.Errorf("first event = %+v, want %+v", events[0], tt.wantFirst)
 			}
+			blocked := 0
+			for _, e := range events {
+				if e.Blocked {
+					blocked++
+				}
+			}
+			if blocked != tt.wantBlocked {
+				t.Errorf("%d blocked events, want %d", blocked, tt.wantBlocked)
+			}
 		})
 	}
 }
@@ -915,6 +955,14 @@ func manyHosts(n int) []string {
 	out := make([]string, n)
 	for i := range out {
 		out[i] = fmt.Sprintf("h%d.example.com", i)
+	}
+	return out
+}
+
+func blockedHosts(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("10.0.0.%d", i)
 	}
 	return out
 }

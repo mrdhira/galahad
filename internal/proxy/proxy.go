@@ -22,8 +22,8 @@ import (
 
 // Decisions in the log and in Event.
 const (
-	Allowed = "allowed"
-	Denied  = "denied"
+	Allowed = protocol.DecisionAllowed
+	Denied  = protocol.DecisionDenied
 )
 
 // Fixed timeouts: reading the Connect frame and writing the reply, resolving a name and dialing.
@@ -32,7 +32,17 @@ const (
 	resolveTimeout   = 5 * time.Second
 	addrTimeout      = 5 * time.Second  // one dial
 	dialTimeout      = 15 * time.Second // all dials of one request
-	maxEvents        = 200
+)
+
+// A guest can fill the log and the event list with requests that do not matter before it asks for
+// a blocked address, so part of both is kept for the blocked decisions. Other decisions stop
+// short of the whole size; a blocked decision may use the whole of it, which leaves at least the
+// reserve for blocked decisions.
+const (
+	maxEvents     = 200 // the most events, as in protocol.MaxNetEvents
+	blockedEvents = 50  // of them, the last ones, which only a blocked decision may fill
+	// A tenth of the log lines is kept for blocked decisions.
+	logReserveDiv = 10
 )
 
 // Test hooks. They stay nil in a build without the galahadtest tag.
@@ -112,15 +122,17 @@ func defaultDial(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", addr.String())
 }
 
-// Events returns the aggregated decisions so far, at most 200 entries. A decision
-// for a new host, port and decision beyond that is not listed.
+// Events returns the aggregated decisions so far, at most 200 entries. A decision for a new
+// host, port and decision beyond that is not listed, except that the last 50 entries are kept
+// for blocked decisions: once 150 are full, a blocked one is still listed.
 func (p *Proxy) Events() []Event {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]Event(nil), p.events...)
 }
 
-// Dropped returns the number of log lines left out because of Limits.LogLines.
+// Dropped returns the number of log lines left out because of Limits.LogLines. A tenth of the
+// lines is kept for blocked decisions, so those are written after the others are dropped.
 func (p *Proxy) Dropped() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -448,9 +460,15 @@ func (p *Proxy) addEvent(d decision, verdict string) {
 			return
 		}
 	}
-	if len(p.events) < maxEvents {
-		p.events = append(p.events, Event{Host: d.host, Port: d.port, Decision: verdict, Reason: d.reason, Blocked: d.blocked, Count: 1})
+	// Only a blocked decision may take one of the last blockedEvents places.
+	limit := maxEvents - blockedEvents
+	if d.blocked {
+		limit = maxEvents
 	}
+	if len(p.events) >= limit {
+		return
+	}
+	p.events = append(p.events, Event{Host: d.host, Port: d.port, Decision: verdict, Reason: d.reason, Blocked: d.blocked, Count: 1})
 }
 
 type logEntry struct {
@@ -475,7 +493,11 @@ func (p *Proxy) logLine(d decision, verdict string, up, down int64) {
 	b, _ := json.Marshal(e)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.lines >= p.Limits.LogLines {
+	limit := p.Limits.LogLines
+	if !d.blocked {
+		limit -= limit / logReserveDiv
+	}
+	if p.lines >= limit {
 		p.dropped++
 		return
 	}

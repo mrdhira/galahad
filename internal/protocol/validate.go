@@ -126,6 +126,11 @@ func (r *Result) Validate() error {
 			return fmt.Errorf("reasons[%d]: %w", i, err)
 		}
 	}
+	if r.Network != nil {
+		if err := r.Network.Validate(); err != nil {
+			return fmt.Errorf("network: %w", err)
+		}
+	}
 	return nil
 }
 

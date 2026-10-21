@@ -80,6 +80,19 @@ if go list -f '{{join .GoFiles " "}}' ./internal/proxy | grep -F -q testhooks_fa
   echo "a build without tags must not contain the proxy test hooks" >&2
   exit 1
 fi
+# The net-probe job and the bad-result hooks of the fake guest exist only in galahadtest builds.
+for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galahadtest.go internal/job/netprobe_galahadtest.go; do
+  pkg="./$(dirname "$f")"
+  name="$(basename "$f")"
+  if ! go list -tags galahadtest -f '{{join .GoFiles " "}}' "$pkg" | grep -F -q "$name"; then
+    echo "$f is not part of a galahadtest build" >&2
+    exit 1
+  fi
+  if go list -f '{{join .GoFiles " "}}' "$pkg" | grep -F -q "$name"; then
+    echo "a build without tags must not contain $f" >&2
+    exit 1
+  fi
+done
 # The P8 probe flag exists only in galahadtest builds.
 probe_dir="$(mktemp -d)"
 exe=""
