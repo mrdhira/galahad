@@ -320,7 +320,11 @@ func receiver(data []byte, dot int) bool {
 
 // scanNet finds network calls, including calls through an alias.
 func (s *scan) scanNet(d *doc, f *found, base, minEnd int, text string) {
-	eachMatch(d, networkCalls, base, minEnd, text, func(off, _ int) {
+	calls := networkCalls
+	if anyIn(d.data[base:base+len(text)], pyNetWords) {
+		calls = allNetworkCalls
+	}
+	eachMatch(d, calls, base, minEnd, text, func(off, _ int) {
 		if !definition(d.data, off) && (!bytes.HasPrefix(d.data[off:], []byte("fetch")) || off == 0 || d.data[off-1] != '.' || globalObject(d.data, off-1)) {
 			keep(s, &f.nets, off)
 		}

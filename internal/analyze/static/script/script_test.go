@@ -774,10 +774,11 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		path  string
-		build func(n int) string
-		small int
-		large int
+		path    string
+		build   func(n int) string
+		small   int
+		large   int
+		control func(n int) string // when set, the small input is control(large): the same size without the flood
 		// expectations
 		wantMaxRatio float64
 	}{
@@ -791,6 +792,16 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 		{name: "16x more dynamic imports", path: "imports.py", build: func(n int) string {
 			return strings.Repeat("__import__('requests')\n", n/23) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
 		}, small: 4 << 10, large: 64 << 10, wantMaxRatio: 100},
+		{
+			name: "a flood of imports of other modules costs about the same as other calls", path: "imports.py",
+			build: func(n int) string {
+				return strings.Repeat("__import__('a')\n", n/16) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
+			},
+			control: func(n int) string {
+				return strings.Repeat("__imput__('a')\n", n/16) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
+			},
+			large: 8 << 20, wantMaxRatio: 3,
+		},
 		{name: "16x more copies of an alias", path: "copies.js", build: func(n int) string {
 			return strings.Repeat("b=h;", n/4) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n"
 		}, small: 64 << 10, large: 1 << 20, wantMaxRatio: 100},
@@ -798,6 +809,9 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			small := analyze.File{Path: tt.path, Name: tt.path, Data: []byte(tt.build(tt.small))}
+			if tt.control != nil {
+				small.Data = []byte(tt.control(tt.large))
+			}
 			large := analyze.File{Path: tt.path, Name: tt.path, Data: []byte(tt.build(tt.large))}
 
 			ratio := float64(fastest(t, large)) / float64(fastest(t, small))

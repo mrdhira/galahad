@@ -3,6 +3,7 @@ package script
 import (
 	"bytes"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -44,6 +45,12 @@ var networkParts = []string{
 	`httpx\s*\.\s*(?:get|post|put|request|Client|AsyncClient)\b`,
 	`aiohttp\s*\.\s*ClientSession\b`,
 	`smtplib\s*\.\s*SMTP`,
+}
+
+// dynNetworkParts are the Python network calls on a module that is imported by
+// name at run time. Every match contains the name of a network module, so they
+// are searched only in text that has one.
+var dynNetworkParts = []string{
 	`__import__\s*\(\s*['"]` + pyNetModule + `['"]\s*\)` + nsCall,
 	`importlib\s*\.\s*import_module\s*\(\s*['"]` + pyNetModule + `['"]\s*\)` + nsCall,
 }
@@ -53,10 +60,13 @@ const pyNetModule = `(?:requests|urllib(?:\.request)?|urllib2|socket|http\.clien
 
 var (
 	decoderRE = regexp.MustCompile(decoderSrc)
-	networkRE = regexp.MustCompile(`\b(?:` + strings.Join(networkParts, "|") + `)`)
+	networkRE = regexp.MustCompile(`\b(?:` + strings.Join(slices.Concat(networkParts, dynNetworkParts), "|") + `)`)
 	identRE   = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*`)
 
-	networkCalls = compile(networkParts...)
+	// networkCalls are searched in a whole file. allNetworkCalls add the calls
+	// on a module imported by name, for text that has a network module name.
+	networkCalls    = compile(networkParts...)
+	allNetworkCalls = compile(slices.Concat(networkParts, dynNetworkParts)...)
 
 	// Calls that run a string as code, by language.
 	sinksJS   = compile(`eval\s*\(`, `Function\s*\(`, `setTimeout\s*\(`, `setInterval\s*\(`)
@@ -135,6 +145,9 @@ var (
 var (
 	decoderWords = words("atob", "Buffer", "fromCharCode", "zlib", "decode", "bz2", "lzma", "gzip", "unhexlify", "fromhex", "a2b_", "marshal", "codecs")
 	networkWords = words("fetch", "http", "HTTP", "axios", "XMLHttp", "net", "navigator", "tls", "requests", "urllib", "urlopen", "socket", "smtplib")
+
+	// pyNetWords are in the name of every module of pyNetNames.
+	pyNetWords = words("requests", "urllib", "socket", "http.client", "httpx", "aiohttp", "smtplib")
 )
 
 // file accepts the segment name only.
