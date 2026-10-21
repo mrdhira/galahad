@@ -312,7 +312,7 @@ func TestStart(t *testing.T) {
 		{name: "agent missing", agent: "missing", wantErr: "open the agent", wantNoRequests: true},
 		{name: "agent is a directory", agent: "dir", wantErr: "is not a regular file", wantNoRequests: true},
 		{name: "agent is empty", agent: "empty", wantErr: "the agent is empty", wantNoRequests: true},
-		{name: "agent is too large", agent: "large", wantErr: "larger than 268435456 bytes", wantNoRequests: true},
+		{name: "agent is too large", agent: "large", wantErr: "larger than 50331648 bytes", wantNoRequests: true},
 		{name: "firecracker binary missing", firecracker: "missing", wantErr: "run galahad setup", wantNoRequests: true},
 		{name: "firecracker exits before its API is up", mode: "exit", wantErr: "exited before its API was ready: exit status 3", wantNoRequests: true},
 		{name: "the API socket never appears", mode: "hang", apiTimeout: 300 * time.Millisecond, wantErr: "did not appear within 300ms", wantNoRequests: true},
@@ -356,7 +356,7 @@ func TestStart(t *testing.T) {
 			case "empty":
 				mustWrite(t, f.backend.AgentPath, nil)
 			case "large":
-				if err := os.Truncate(f.backend.AgentPath, 256<<20+1); err != nil {
+				if err := os.Truncate(f.backend.AgentPath, 48<<20+1); err != nil {
 					t.Fatal(err)
 				}
 			}

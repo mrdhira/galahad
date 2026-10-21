@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/mrdhira/galahad/internal/config"
@@ -40,7 +41,8 @@ const (
 	defaultAPITimeout     = 10 * time.Second
 	defaultConnectTimeout = 30 * time.Second
 
-	maxAgentBytes = 256 << 20 // the agent is copied to a drive; a larger file is not the agent
+	// galahad-init copies the agent into a 64 MiB tmpfs (/run), which also holds other files.
+	maxAgentBytes = 48 << 20
 	sectorSize    = 512
 	maxConsole    = 1 << 20 // bytes of the Firecracker console kept in console.log
 
@@ -130,10 +132,16 @@ func (b *Backend) Start(ctx context.Context, p Params) (*Machine, error) {
 	}
 
 	m := &Machine{listeners: map[uint32]net.Listener{}, done: make(chan struct{}), connect: orDefault(b.ConnectTimeout, defaultConnectTimeout)}
+	started := false
+	defer func() {
+		if !started { // an error, or a panic inside start
+			_ = m.Kill() // best effort; the start error is the one to report
+		}
+	}()
 	if err := m.start(ctx, b, p, kernel, rootfs); err != nil {
-		_ = m.Kill() // best effort; the start error is the one to report
 		return nil, err
 	}
+	started = true
 	return m, nil
 }
 
@@ -219,6 +227,7 @@ func (m *Machine) start(ctx context.Context, b *Backend, p Params, kernel, rootf
 	w := &capWriter{w: console, left: maxConsole}
 	m.cmd = exec.CommandContext(ctx, b.FirecrackerPath, "--api-sock", fcSock) // #nosec G204 -- the path is the pinned binary of this user
 	m.cmd.Stdout, m.cmd.Stderr = w, w                                         // the same writer: exec serializes its writes
+	m.cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}      // the machine dies with the host
 	m.cmd.WaitDelay = 5 * time.Second                                         // do not wait forever for an output held open by a child
 	if err := m.cmd.Start(); err != nil {
 		m.cmd = nil

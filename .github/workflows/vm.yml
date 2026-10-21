@@ -28,8 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     # The images are built here when their release does not exist yet, which takes a while.
     timeout-minutes: 120
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,6 +56,7 @@ jobs:
 
       - name: Build galahad and galahad-agent
         run: |
+          set -o pipefail
           make build 2>&1 | tee build.log && exit 0
           tail -n 8 build.log | sed 's/^/::error::/'
           exit 1
@@ -72,6 +71,8 @@ jobs:
       # so a build that differs from the pins fails here, as it does in image.yml.
       - name: Download the pinned images
         id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           tag=$(jq -r .tag internal/images/pins.json)
           mkdir -p dl
