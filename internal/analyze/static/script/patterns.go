@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/mrdhira/galahad/internal/analyze/static/signals"
 )
 
 // All patterns are RE2, so matching time is linear in the length of the text.
@@ -116,6 +118,10 @@ var (
 	// "name = json.dumps(". A network call in between is not a wrapper.
 	copyRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*(?:[\w$.]+\s*\(\s*)*$`)
 
+	// envOptionRE ends the text before a copy of the environment that is the
+	// env option of a call: "env=", "env: ", "env={**".
+	envOptionRE = regexp.MustCompile(`\benv\s*[:=]\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*)?$`)
+
 	// assignRE ends at the end of a line prefix and captures the name in
 	// "name = ...".
 	assignRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*=(?:[^=>;\n][^=;\n]*)?$`)
@@ -133,10 +139,8 @@ var (
 		".aws":    file("credentials"),
 		".kube":   file("config"),
 		".docker": file("config.json"),
-		// A private key, or the directory itself. Not config, known_hosts or a public key.
-		".ssh": func(seg string, ok bool) bool {
-			return !ok || strings.HasPrefix(seg, "id_") && !strings.HasSuffix(seg, ".pub")
-		},
+		// The directory itself, or a file that is secret.
+		".ssh": func(seg string, ok bool) bool { return !ok || !signals.SSHPlain(seg) },
 	}
 
 	// Secret classification of a signals.SecretRefs match.

@@ -279,16 +279,19 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 // copyName returns the name that the copy of the environment at off is given
 // by an assignment ("old = dict(os.environ)"). It is "" for a copy that is not
 // assigned, or that is an argument of a network call. ok is false for a copy
-// that is an argument of a call that starts a process: the environment of a child.
+// that is the env option of a call, the environment of a child process.
 func copyName(data []byte, off int) (name string, ok bool) {
 	before := data[max(0, off-160):off]
+	if envOptionRE.Match(before) {
+		return "", false
+	}
 	if g := copyRE.FindSubmatchIndex(before); g != nil && !unclosed(before[:g[2]]) {
 		if hasNetwork(before[g[0]:]) {
 			return "", true
 		}
 		return string(before[g[2]:g[3]]), true
 	}
-	return "", !inProcessCall(before)
+	return "", true
 }
 
 // unclosed reports whether text ends inside a bracket that it opens.
@@ -303,34 +306,6 @@ func unclosed(text []byte) bool {
 		}
 	}
 	return depth > 0
-}
-
-// inProcessCall reports whether text ends inside the arguments of a call that
-// starts a process.
-func inProcessCall(text []byte) bool {
-	depth := 0
-	for i := len(text) - 1; i >= 0; i-- {
-		switch text[i] {
-		case ')':
-			depth++
-		case '(':
-			if depth > 0 {
-				depth--
-				continue
-			}
-			start := i
-			for start > 0 && (isWord(text[start-1]) || text[start-1] == '.') {
-				start--
-			}
-			call := string(text[start : i+1])
-			for _, re := range slices.Concat(spawnsJS, spawnsPy) {
-				if re.MatchString(call) {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // definition reports whether the call-like text at off defines a function or
@@ -482,7 +457,7 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 
 // builtPath reports whether the quoted directory name at off is a segment of a
 // path that the code builds, and the path is one that signals.SecretRefs
-// counts: .ssh alone or followed by a private key, .gnupg, .aws followed by
+// counts: .ssh alone or followed by a file that holds secrets, .gnupg, .aws followed by
 // credentials, .kube by config, .docker by config.json, and .env on a line
 // that reads, and not for dotenv.
 // A path that is the return value of an arrow function or a function ("() =>

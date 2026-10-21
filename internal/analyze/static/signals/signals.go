@@ -33,10 +33,9 @@ var (
 		// a bulk dump of the environment
 		`(?:^|[\s;&|("'])(?:printenv|env)(?:\s+-0)?\s*(?:\||\n|;|\)|$)`,
 		`/proc/self/environ`,
-		// SSH private keys, and the directory itself (a listing or a glob).
-		// config, known_hosts and public keys are not secret material.
-		`\.ssh[/\\]id_[A-Za-z0-9_]*(?:\.pub)?`,
-		`\.ssh[/\\](?:$|[^A-Za-z0-9_.])`,
+		// A file in the .ssh directory, or the directory itself (a listing or a
+		// glob). SecretRefs drops the files that are not secret (SSHPlain).
+		`\.ssh[/\\][A-Za-z0-9_.@-]*`,
 		`\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b`,
 		`\.aws[/\\]credentials`,
 		`\.gnupg\b`,
@@ -83,11 +82,27 @@ func compile(patterns ...string) []*regexp.Regexp {
 // SecretRefs finds references to secret material: secret-named environment
 // variables (*KEY*, *SECRET*, *TOKEN*, *PASSWORD*, AWS_*), .env files, SSH
 // private keys and the .ssh directory, cloud credential files, and browser and
-// wallet directories. SSH public keys, config and known_hosts are not included.
+// wallet directories. A file in .ssh counts unless SSHPlain says it is not secret.
 func SecretRefs(text string) []Match {
 	return slices.DeleteFunc(find(secretPatterns, text), func(m Match) bool {
-		return strings.HasSuffix(text[m.Start:m.End], ".pub")
+		ref := text[m.Start:m.End]
+		if name, ok := strings.CutPrefix(ref, ".ssh"); ok && name != "" && (name[0] == '/' || name[0] == '\\') {
+			return SSHPlain(name[1:])
+		}
+		return strings.HasSuffix(ref, ".pub")
 	})
+}
+
+// SSHPlain reports whether the file name in the .ssh directory is not secret
+// material: the client config, the known hosts, the authorized keys (a
+// persistence target, not a secret) and public keys.
+func SSHPlain(name string) bool {
+	name = strings.ToLower(name)
+	switch name {
+	case "config", "known_hosts", "known_hosts.old", "authorized_keys", "authorized_keys2":
+		return true
+	}
+	return strings.HasSuffix(name, ".pub")
 }
 
 // NetworkTools finds shell network tools: curl, wget, nc, scp, PowerShell web
