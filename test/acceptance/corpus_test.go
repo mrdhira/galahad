@@ -109,6 +109,41 @@ func TestCorpus(t *testing.T) {
 			wantRules: []string{"GAL-DEPS-004 requirements.txt:2", "GAL-DEPS-001 requirements.txt:3"},
 		},
 		{
+			name:   "p2-requirements-include: an included requirements file with another name sets a custom index",
+			target: corpusDir("p2-requirements-include"), wantCode: 10,
+			wantRules: []string{"GAL-DEPS-004 deps/base.txt:3"},
+		},
+		{
+			name:   "p2-npmrc-hijack: .npmrc sets a registry and node-options",
+			target: corpusDir("p2-npmrc-hijack"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-013 .npmrc:2", "GAL-AUTOEXEC-013 .npmrc:3"},
+		},
+		{
+			name:   "p2-yarnrc-hijack: .yarnrc.yml loads a patched yarn and sets a registry",
+			target: corpusDir("p2-yarnrc-hijack"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-013 .yarnrc.yml:1", "GAL-AUTOEXEC-013 .yarnrc.yml:2"},
+		},
+		{
+			name:   "p2-pnpmfile: pnpm runs .pnpmfile.cjs on install",
+			target: corpusDir("p2-pnpmfile"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-015 .pnpmfile.cjs:1"},
+		},
+		{
+			name:   "p2-uv-sources: pyproject with a custom uv index and a git source",
+			target: corpusDir("p2-uv-sources"), wantCode: 10,
+			wantRules: []string{"GAL-DEPS-004 pyproject.toml:9", "GAL-DEPS-002 pyproject.toml:12"},
+		},
+		{
+			name:   "p2-prisma-provider: a generator provider that is a command",
+			target: corpusDir("p2-prisma-provider"), wantCode: 10,
+			wantRules: []string{"GAL-AUTOEXEC-016 prisma/schema.prisma:8"},
+		},
+		{
+			name:   "p2-gyp-expansion: binding.gyp downloads and runs code while gyp reads it",
+			target: corpusDir("p2-gyp-expansion"), wantCode: 20,
+			wantRules: []string{"GAL-AUTOEXEC-017 binding.gyp:6", "GAL-AUTOEXEC-011 binding.gyp:6"},
+		},
+		{
 			name: "git-config fsmonitor: .git/config runs a command (built)",
 			target: gitConfigRepo("[core]\n\trepositoryformatversion = 0\n" +
 				"\tfsmonitor = ./.git/hooks/fsmonitor-evil\n"),
@@ -249,6 +284,53 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "benign-npm-deps: npm project with a registry lockfile (twin of p2-typosquat)",
 			target: corpusDir("benign-npm-deps"), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign .npmrc: npm defaults (built, twin of p2-npmrc-hijack)",
+			target: filesRepo(map[string]string{
+				".npmrc":       "save-exact=true\nengine-strict=true\nfund=false\nregistry=https://registry.npmjs.org/\n",
+				"package.json": "{\n  \"name\": \"plain\",\n  \"version\": \"1.0.0\"\n}\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign .yarnrc.yml: node-modules linker and the committed Yarn release (built, twin of p2-yarnrc-hijack)",
+			target: filesRepo(map[string]string{
+				".yarnrc.yml":                   "nodeLinker: node-modules\nyarnPath: .yarn/releases/yarn-4.5.0.cjs\n",
+				".yarn/releases/yarn-4.5.0.cjs": "// stand-in for the committed Yarn release\n",
+				"package.json":                  "{\n  \"name\": \"plain\",\n  \"version\": \"1.0.0\"\n}\n",
+			}),
+			wantCode: 0,
+		},
+		{
+			name: "benign prisma schema: the default client generator (built, twin of p2-prisma-provider)",
+			target: filesRepo(map[string]string{
+				"prisma/schema.prisma": "generator client {\n  provider = \"prisma-client-js\"\n}\n\ndatasource db {\n  provider = \"postgresql\"\n  url      = env(\"DATABASE_URL\")\n}\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign binding.gyp: no command expansions (built, twin of p2-gyp-expansion)",
+			target: filesRepo(map[string]string{
+				"binding.gyp": "{\n  'targets': [{\n    'target_name': 'addon',\n    'sources': ['addon.cc']\n  }]\n}\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign pyproject: PyPI dependencies only (built, twin of p2-uv-sources)",
+			target: filesRepo(map[string]string{
+				"pyproject.toml": "[project]\nname = \"plain\"\nversion = \"1.0.0\"\ndependencies = [\"requests>=2.31\", \"numpy\"]\n\n[tool.uv]\nindex-url = \"https://pypi.org/simple\"\n",
+			}),
+			wantCode: 0, wantQuiet: true,
+		},
+		{
+			name: "benign text files: README, LICENSE and notes are not requirements files (built, twin of p2-requirements-include)",
+			target: filesRepo(map[string]string{
+				"README.txt":  "Project notes\nSee https://docs.sinkhole.test/guide for details.\nInstall with requests==2.0 first.\n",
+				"LICENSE.txt": "MIT License\n\nCopyright (c) 2024 Someone\n",
+				"notes.txt":   "reqeusts\nbeta\ngamma\n",
+			}),
+			wantCode: 0, wantQuiet: true,
 		},
 		{
 			name: "benign devcontainer: image and forwardPorts only (built, twin of p1-devcontainer-init)",

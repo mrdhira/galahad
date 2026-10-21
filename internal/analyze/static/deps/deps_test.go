@@ -12,6 +12,96 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze/static/deps"
 )
 
+const (
+	pyprojectRequirements = `[project]
+name = "demo"
+dependencies = [
+  "requests>=2",
+  "reqeusts==1",
+  "pkg @ https://dl.sinkhole.test/pkg.zip",
+  "other @ git+https://git.sinkhole.test/o.git",
+]
+[project.optional-dependencies]
+dev = ["pytest", "localpkg @ file:///tmp/t"]
+[build-system]
+requires = ["setuptools>=61", "bad @ https://dl.sinkhole.test/b.zip"]
+[dependency-groups]
+test = ["pytest", {include-group = "lint"}]
+`
+	pyprojectUV = `[tool.uv]
+index-url = "https://pypi.org/simple"
+extra-index-url = ["https://pypi.sinkhole.test/simple",
+  "https://pypi.org/simple"] # second is the default
+find-links = ["./wheels", "https://wheels.sinkhole.test/"]
+index = [{ url = "https://idx.sinkhole.test/simple", name = "x" }]
+[tool.uv.pip]
+extra-index-url = "local-index"
+[[tool.uv.index]]
+name = "internal"
+url = "https://uv.sinkhole.test/simple"
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+`
+	pyprojectSources = `[tool.uv.sources]
+a = { git = "https://git.sinkhole.test/a.git" }
+b = { path = "../b" }
+c = [
+  { url = "https://dl.sinkhole.test/c.whl", marker = "sys_platform == 'win32'" },
+]
+d.git = "https://git.sinkhole.test/d.git"
+e = { workspace = true }
+"g" = { "git" = "https://git.sinkhole.test/g.git" }
+h = { url = "file:///tmp/h.whl" }
+[tool.uv.sources.f]
+git = "https://git.sinkhole.test/f.git"
+`
+	pyprojectPoetry = `[[tool.poetry.source]]
+name = "priv"
+url = "https://poetry.sinkhole.test/simple"
+[tool.poetry.dependencies]
+python = "^3.9"
+g = { git = "https://git.sinkhole.test/g.git", branch = "main" }
+h = "^1.0"
+[tool.poetry.group.dev.dependencies]
+i = { url = "https://dl.sinkhole.test/i.whl" }
+[tool.poetry.group.dev.dependencies.j]
+git = "https://git.sinkhole.test/j.git"
+[tool.other]
+k = { git = "https://git.sinkhole.test/k.git" }
+`
+	pyprojectBenign = `[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinylib"
+dependencies = ["requests>=2.31", "numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+[tool.uv.sources]
+tinylib = { workspace = true }
+local = { path = "../local" }
+
+[tool.poetry.dependencies]
+python = "^3.9"
+flask = "^3.0"
+`
+	uvTomlSettings = `index-url = "https://pypi.org/simple"
+extra-index-url = ["https://pypi.sinkhole.test/simple"]
+[pip]
+find-links = ["https://wheels.sinkhole.test/"]
+[[index]]
+url = "https://uv.sinkhole.test/simple"
+[sources]
+a = { git = "https://git.sinkhole.test/a.git" }
+`
+)
+
 func TestAnalyze(t *testing.T) {
 	filler := strings.Repeat("x", 3<<19) // 1.5 MiB, above MaxConfigSize
 	deep := strings.Repeat(`{"a":`, 40) + "1" + strings.Repeat("}", 40)
@@ -70,6 +160,37 @@ func TestAnalyze(t *testing.T) {
 			wantFindings: []string{"GAL-DEPS-003@9"},
 		},
 		{
+			name:         "pyproject project, build-system and dependency-group requirements",
+			file:         "pyproject.toml",
+			data:         pyprojectRequirements,
+			wantFindings: []string{"GAL-DEPS-001@5", "GAL-DEPS-002@12", "GAL-DEPS-002@6", "GAL-DEPS-002@7"},
+		},
+		{
+			name:         "pyproject uv index settings",
+			file:         "pyproject.toml",
+			data:         pyprojectUV,
+			wantFindings: []string{"GAL-DEPS-004@11", "GAL-DEPS-004@3", "GAL-DEPS-004@5", "GAL-DEPS-004@6", "GAL-DEPS-004@8"},
+		},
+		{
+			name:         "pyproject uv sources from git and URL",
+			file:         "pyproject.toml",
+			data:         pyprojectSources,
+			wantFindings: []string{"GAL-DEPS-002@12", "GAL-DEPS-002@2", "GAL-DEPS-002@5", "GAL-DEPS-002@7", "GAL-DEPS-002@9"},
+		},
+		{
+			name:         "pyproject poetry source and git or URL dependencies",
+			file:         "pyproject.toml",
+			data:         pyprojectPoetry,
+			wantFindings: []string{"GAL-DEPS-002@11", "GAL-DEPS-002@6", "GAL-DEPS-002@9", "GAL-DEPS-004@3"},
+		},
+		{name: "pyproject with only PyPI dependencies", file: "pyproject.toml", data: pyprojectBenign},
+		{
+			name:         "uv.toml settings are read as tool.uv",
+			file:         "uv.toml",
+			data:         uvTomlSettings,
+			wantFindings: []string{"GAL-DEPS-002@8", "GAL-DEPS-004@2", "GAL-DEPS-004@4", "GAL-DEPS-004@6"},
+		},
+		{
 			name:         "requirements index options",
 			file:         "requirements-dev.txt",
 			data:         "-i https://pypi.org/simple\n--index-url=https://files.pythonhosted.org/simple\n--extra-index-url https://pypi.sinkhole.test/simple\n-i https://other.sinkhole.test/simple\n--extra-index-url local-dir\n-r base.txt\n",
@@ -87,6 +208,47 @@ func TestAnalyze(t *testing.T) {
 			data:         "-ihttps://a.sinkhole.test/simple\n--index-url\thttps://b.sinkhole.test/simple\n--extra-index=https://c.sinkhole.test/simple\n--extra-index-url\thttps://pypi.org/simple\n-f https://d.sinkhole.test/wheels\n--find-links=https://pypi.org/x\n-f ./wheels\n--no-binary :all:\n",
 			wantFindings: []string{"GAL-DEPS-004@1", "GAL-DEPS-004@2", "GAL-DEPS-004@3", "GAL-DEPS-004@5"},
 		},
+		{
+			name:         "included file with another name that has a version pin",
+			file:         "base.txt",
+			data:         "# base\nrequests==2.31.0\n--extra-index-url https://pypi.sinkhole.test/simple\nreqeusts==1\n",
+			wantFindings: []string{"GAL-DEPS-001@4", "GAL-DEPS-004@3"},
+		},
+		{
+			name:         "included file recognized by its -r and -c options",
+			file:         "deps.txt",
+			data:         "-r base.txt\n--constraint=pins.txt\npkg @ https://dl.sinkhole.test/pkg.zip\n",
+			wantFindings: []string{"GAL-DEPS-002@3"},
+		},
+		{
+			name:         "included file with hash continuation lines",
+			file:         "locked.txt",
+			data:         "reqeusts==1.0 \\\n    --hash=sha256:abc\n",
+			wantFindings: []string{"GAL-DEPS-001@1"},
+		},
+		{
+			name:         "any txt under a requirements directory",
+			file:         "pip/requirements/dev.txt",
+			data:         "reqeusts\npkg @ https://dl.sinkhole.test/x.zip\n",
+			wantFindings: []string{"GAL-DEPS-001@1", "GAL-DEPS-002@2"},
+		},
+		{
+			name:         "only the first 50 lines decide whether a txt file is requirements",
+			file:         "more.txt",
+			data:         "requests==1\nrequests==1\nreqeusts==1\n" + strings.Repeat("requests==1\n", 47) + "some prose here\n",
+			wantFindings: []string{"GAL-DEPS-001@3"},
+		},
+		{name: "README text is not requirements", file: "README.txt", data: "Project notes\nSee https://docs.sinkhole.test/guide for details.\nInstall with requests==2.0 first.\n"},
+		{name: "license text is not requirements", file: "LICENSE.txt", data: "MIT License\n\nCopyright (c) 2024 Someone\n"},
+		{name: "list of words is not requirements", file: "words.txt", data: "reqeusts\nbeta\ngamma\n"},
+		{name: "list of links is not requirements", file: "links.txt", data: "https://a.sinkhole.test/x\nhttps://b.sinkhole.test/y\n"},
+		{name: "list of e-mail addresses is not requirements", file: "contacts.txt", data: "dev@example.test\nops@example.test\n"},
+		{name: "bullet list is not requirements", file: "todo.txt", data: "- item one\n- item two\n"},
+		{name: "requirement lines followed by prose are not requirements", file: "notes.txt", data: "requests==2.0\nThis is not a requirements file.\n"},
+		{name: "comments only is not requirements", file: "comments.txt", data: "# just a comment\n\n"},
+		{name: "very long line is not requirements", file: "wide.txt", data: "requests==2.0\n" + strings.Repeat("a", 1001) + "\n"},
+		{name: "large txt that is not requirements is not a coverage gap", file: "wordlist.txt", data: filler},
+		{name: "large txt that is requirements is skipped", file: "huge.txt", data: strings.Repeat("requests==1\n", 100000), wantSkip: "too_large"},
 		{
 			name:         "lockfile above the config size limit is still checked",
 			file:         "package-lock.json",

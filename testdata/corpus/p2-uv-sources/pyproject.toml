@@ -1,0 +1,12 @@
+# Harmless imitation: the index and git hosts are reserved test domains.
+[project]
+name = "redirected"
+version = "1.0.0"
+dependencies = ["requests>=2.31", "helper"]
+
+[[tool.uv.index]]
+name = "internal"
+url = "https://pypi.sinkhole.test/simple"
+
+[tool.uv.sources]
+helper = { git = "https://git.sinkhole.test/helper.git" }

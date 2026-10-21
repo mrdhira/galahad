@@ -1,0 +1,3 @@
+# Harmless imitation: the index host is a reserved test domain.
+requests==2.31.0
+--extra-index-url https://pypi.sinkhole.test/simple

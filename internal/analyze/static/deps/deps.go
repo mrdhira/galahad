@@ -1,6 +1,12 @@
 // Package deps finds typosquatted dependency names and dependencies that come
 // from outside the default package registries. It reads package.json,
-// package-lock.json, yarn.lock and requirements*.txt.
+// package-lock.json, yarn.lock, pyproject.toml, uv.toml and pip requirements
+// files.
+//
+// A requirements file is any requirements*.txt, any .txt under a requirements
+// directory, and any other .txt that looks like one (see looksLikeRequirements).
+// That covers the files a requirements file pulls in with -r or -c, because an
+// analyzer sees one file at a time.
 package deps
 
 import (
@@ -12,6 +18,7 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -69,7 +76,12 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 		scan = packageLock
 	case name == "yarn.lock":
 		scan = yarnLock
-	case strings.HasPrefix(name, "requirements") && strings.HasSuffix(name, ".txt"):
+	case name == "pyproject.toml":
+		scan = pyproject
+	case name == "uv.toml":
+		scan = uvToml
+	case strings.HasPrefix(name, "requirements") && strings.HasSuffix(name, ".txt"),
+		strings.HasSuffix(name, ".txt") && (inRequirementsDir(f.Path) || looksLikeRequirements(f.Data)):
 		scan = requirements
 	default:
 		return analyze.Output{}, nil
@@ -177,6 +189,68 @@ func requirements(ctx context.Context, f analyze.File) ([]protocol.Finding, erro
 		found = append(found, requirement(s, ev)...)
 	})
 	return found, err
+}
+
+// How much of an unnamed .txt file looksLikeRequirements reads.
+const (
+	sniffSize  = 64 << 10
+	sniffLines = 50
+	sniffWidth = 1000
+)
+
+var (
+	pipOption    = regexp.MustCompile(`^--?[A-Za-z][A-Za-z-]*(?:[= \t]\S.*)?$`)
+	pipStrongOpt = regexp.MustCompile(`^(?:-[rceif]\b|--(?:requirement|constraint|editable|index-url|extra-index-url|find-links|trusted-host)\b)`)
+	reqVersioned = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[A-Za-z0-9._, -]*\])?\s*((?:(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+\s*,?\s*)*)(?:;.*)?$`)
+	reqDirectURL = regexp.MustCompile(`^(?:[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[A-Za-z0-9._, -]*\])?\s*@\s*[A-Za-z][A-Za-z0-9+.-]*://\S+|git\+\S+)(?:\s+;.*)?$`)
+	reqBareURL   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://\S+$`)
+)
+
+// inRequirementsDir reports whether p has a directory named requirements.
+func inRequirementsDir(p string) bool {
+	dirs := strings.Split(strings.ToLower(strings.ReplaceAll(p, "!/", "/")), "/")
+	return slices.Contains(dirs[:len(dirs)-1], "requirements")
+}
+
+// looksLikeRequirements reports whether the start of a .txt file reads as a pip
+// requirements file. Its first 50 non-comment lines must all be pip options or
+// requirement specifiers, and at least one must be clearly pip: an option such
+// as -r or --index-url, a version pin such as name==1.0, or name @ url. Bare
+// package names, bare URLs and e-mail addresses on their own do not count, so
+// README.txt, LICENSE.txt, notes and word or link lists are not requirements.
+func looksLikeRequirements(data []byte) bool {
+	data = data[:min(len(data), sniffSize)]
+	seen, strong := 0, false
+	for len(data) > 0 && seen < sniffLines {
+		line, rest, _ := bytes.Cut(data, []byte{'\n'})
+		data = rest
+		s := strings.TrimSpace(string(line))
+		if i := strings.Index(s, " #"); i >= 0 {
+			s = strings.TrimSpace(s[:i])
+		}
+		s = strings.TrimSpace(strings.TrimSuffix(s, "\\"))
+		if s == "" || s[0] == '#' {
+			continue
+		}
+		seen++
+		var ok, pinned bool
+		switch m := reqVersioned.FindStringSubmatch(s); {
+		case len(s) > sniffWidth:
+		case s[0] == '-':
+			ok, pinned = pipOption.MatchString(s), pipStrongOpt.MatchString(s)
+		case reqDirectURL.MatchString(s):
+			ok, pinned = true, true
+		case m != nil:
+			ok, pinned = true, strings.TrimSpace(m[1]) != ""
+		default:
+			ok = reqBareURL.MatchString(s)
+		}
+		if !ok {
+			return false
+		}
+		strong = strong || pinned
+	}
+	return strong
 }
 
 // requirement checks one requirement specifier: a URL requirement and the name.
