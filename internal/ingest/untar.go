@@ -4,6 +4,7 @@ package ingest
 
 import (
 	"archive/tar"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -19,14 +20,17 @@ import (
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
-// maxName is the longest entry name the extractor accepts, in bytes.
-const maxName = 4096
+// Limits on one entry name.
+const (
+	maxName  = 4096 // bytes
+	maxDepth = 64   // path elements, the same as the analyzers walk
+)
 
 // Errors Extract and Verify return, wrapped with detail. Test for them with errors.Is.
 var (
 	// ErrTooLarge means the input has more entries or bytes than the caps allow.
 	ErrTooLarge = errors.New("input too large")
-	// ErrUnsafePath means an entry name is absolute, has "..", or is otherwise not a plain relative path.
+	// ErrUnsafePath means an entry name is absolute, has "..", is deeper than 64 elements, or is otherwise not a plain relative path.
 	ErrUnsafePath = errors.New("unsafe path in input")
 	// ErrMismatch means the stream is not the one the End frame describes.
 	ErrMismatch = errors.New("input does not match its end frame")
@@ -50,6 +54,8 @@ func (s Stream) Verify(end protocol.End) error {
 }
 
 // Extract reads a tar stream from r and writes it into the directory dir, which must exist.
+// It stops with the error of ctx, checked once per entry, when ctx is done; reads of r are
+// bounded by the caller.
 // All writes go through an os.Root, so no path can leave dir, and a symlink that was
 // extracted earlier is never followed out of it. Entries are regular files,
 // directories and symlinks; a symlink is created as a link and never followed. Other
@@ -57,7 +63,7 @@ func (s Stream) Verify(end protocol.End) error {
 // At most protocol.MaxInputEntries entries and protocol.MaxInputBytes bytes of stream,
 // and of file content, are accepted. Extract reads r to its end, so that the returned
 // Stream covers every byte.
-func Extract(r io.Reader, dir string) (Stream, error) {
+func Extract(ctx context.Context, r io.Reader, dir string) (Stream, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return Stream{}, err
@@ -75,6 +81,9 @@ func Extract(r io.Reader, dir string) (Stream, error) {
 		}
 		if err != nil {
 			return Stream{}, fmt.Errorf("read tar: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return Stream{}, fmt.Errorf("extract: %w", err)
 		}
 		if entries++; entries > protocol.MaxInputEntries {
 			return Stream{}, fmt.Errorf("%w: more than %d entries", ErrTooLarge, protocol.MaxInputEntries)
@@ -134,6 +143,9 @@ func relName(name string) (string, error) {
 	rel := path.Clean(name)
 	if !filepath.IsLocal(filepath.FromSlash(rel)) {
 		return "", fmt.Errorf("%w: %q", ErrUnsafePath, name)
+	}
+	if n := strings.Count(rel, "/") + 1; n > maxDepth {
+		return "", fmt.Errorf("%w: %d elements deep, max %d", ErrUnsafePath, n, maxDepth)
 	}
 	return rel, nil
 }

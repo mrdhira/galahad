@@ -33,6 +33,11 @@ func runGuest(args []string, _, stderr io.Writer, env Env) int {
 	fs.SetOutput(io.Discard)
 	control := fs.String("control", "", "control channel of the host: vsock:<cid>:<port> or tcp:<host:port>")
 	proxy := fs.String("proxy", "", "proxy channel of the host, same syntax as --control")
+	var memoryLimit int64
+	fs.Func("memory-limit", "soft memory limit in bytes, with an optional KiB, MiB or GiB suffix", func(s string) (err error) {
+		memoryLimit, err = ParseSize(s)
+		return err
+	})
 	unsafeHost := fs.Bool("unsafe-host", false, "run on this host even though it is not a VM, and allow tcp transports; you accept the risk")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "galahad-agent guest: %v\n\n%s", err, usage)
@@ -68,14 +73,16 @@ func runGuest(args []string, _, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "galahad-agent: WARNING: --unsafe-host: taking untrusted input outside a VM (%s)\n", reason)
 	}
 
+	applyMemoryLimit(env, memoryLimit)
+
 	conn, err := dialControl(context.Background())
 	if err != nil {
 		fmt.Fprintf(stderr, "galahad-agent guest: dial control: %v\n", err)
 		return ExitError
 	}
-	defer func() { _ = conn.Close() }() // the session is over; there is nothing left to flush
 
 	host := newHostConn(conn)
+	defer host.close()
 	if err := guestJob(host, *unsafeHost); err != nil {
 		code, msg := errorCode(err)
 		fmt.Fprintf(stderr, "galahad-agent guest: %s: %v\n", code, err)
@@ -95,7 +102,7 @@ func errorCode(err error) (code, msg string) {
 	case errors.Is(err, ingest.ErrTooLarge):
 		return protocol.CodeTooLarge, err.Error()
 	case errors.Is(err, context.DeadlineExceeded):
-		return protocol.CodeTimeout, "the analysis ran out of time"
+		return protocol.CodeTimeout, err.Error()
 	}
 	return protocol.CodeInternal, err.Error()
 }
@@ -139,8 +146,15 @@ func guestJob(host *hostConn, unsafeHost bool) error {
 	if unsafeHost {
 		defer func() { _ = os.RemoveAll(dir) }() // a temp dir of this process
 	}
+	// The ingest share of the job, or the whole job when the host gave no share.
+	ingestTime := jobTime
+	if s := time.Duration(job.Timeouts.Ingest) * time.Second; s > 0 {
+		ingestTime = min(s, jobTime)
+	}
+	ingestCtx, cancelIngest := context.WithDeadline(context.Background(), start.Add(ingestTime))
+	defer cancelIngest()
 	in := &inputReader{host: host}
-	stream, err := ingest.Extract(in, dir)
+	stream, err := ingest.Extract(ingestCtx, in, dir)
 	if err != nil {
 		return fail(ingestCode(err), "ingest: %w", err)
 	}
@@ -189,6 +203,8 @@ func ingestCode(err error) string {
 		return ce.code
 	case errors.Is(err, ingest.ErrTooLarge):
 		return protocol.CodeTooLarge
+	case errors.Is(err, context.DeadlineExceeded):
+		return protocol.CodeTimeout
 	}
 	return protocol.CodeIngest
 }

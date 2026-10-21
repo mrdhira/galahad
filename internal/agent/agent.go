@@ -47,7 +47,7 @@ Commands:
             --memory-limit sets the soft memory limit in bytes, with an optional KiB, MiB or GiB
             suffix; the default is 75% of the memory, at most 4 GiB, unless GOMEMLIMIT is set.
             Refuses to run outside a VM unless --unsafe-host is given.
-  guest --control <addr> [--proxy <addr>] [--unsafe-host]
+  guest --control <addr> [--proxy <addr>] [--memory-limit size] [--unsafe-host]
             Run one job for the host: dial the host, take a job and its tar stream, analyze it and
             send back the result. The address is vsock:<cid>:<port>; tcp:<host:port> needs --unsafe-host.
             Refuses to run outside a VM unless --unsafe-host is given.
@@ -198,11 +198,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 		return ExitUsage
 	}
 
-	ram, _ := physicalMemory()                  // 0 when unknown
-	gomemlimit := os.Getenv("GOMEMLIMIT") != "" // an empty value counts as unset
-	if limit, ok := MemoryLimit(ram, gomemlimit, memoryLimit); ok {
-		env.SetMemoryLimit(limit)
-	}
+	applyMemoryLimit(env, memoryLimit)
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -233,6 +229,15 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	report.Terminal(stdout, &res, paths, useColor(stdout))
 	return res.Verdict.ExitCode()
+}
+
+// applyMemoryLimit sets the soft memory limit: explicit when --memory-limit gave one, otherwise the default.
+func applyMemoryLimit(env Env, explicit int64) {
+	ram, _ := physicalMemory()                  // 0 when unknown
+	gomemlimit := os.Getenv("GOMEMLIMIT") != "" // an empty value counts as unset
+	if limit, ok := MemoryLimit(ram, gomemlimit, explicit); ok {
+		env.SetMemoryLimit(limit)
+	}
 }
 
 // dividedLimits returns the default job limits, each divided by d.

@@ -144,10 +144,10 @@ func readGuest(t *testing.T, c net.Conn) guestFrames {
 			got.errMsg = &e
 		}
 	}
-	// After an Error the guest may close with input unread, which resets the connection.
-	if _, _, err := protocol.ReadFrame(c); got.errMsg == nil && !errors.Is(err, io.EOF) {
+	if _, _, err := protocol.ReadFrame(c); !errors.Is(err, io.EOF) {
 		t.Errorf("after the last frame: %v, want EOF", err)
 	}
+	_ = c.Close() // the host is done; the guest waits for this before it closes
 	return got
 }
 
@@ -194,7 +194,8 @@ func TestGuest(t *testing.T) {
 		target  string     // Job.Name; "proj" when empty
 		kind    string     // Job.Kind; scan when empty
 		timeout int        // Job.Timeouts.Job in seconds; 300 when zero
-		mode    string     // how the host misbehaves: "", "data first", "unknown job field", "stall", "hang up", "bad sha", "bad count"
+		ingest  int        // Job.Timeouts.Ingest in seconds; 0 means the job timeout
+		mode    string     // how the host misbehaves: "", "stall", "hang up", "data first", "unknown job field", "slow", "bad sha", "bad count"
 		// want*
 		wantCode       int
 		wantErrCode    string // the Error frame code; empty means a Result
@@ -204,20 +205,12 @@ func TestGuest(t *testing.T) {
 	}{
 		{name: "directory target", wantTargetKind: protocol.TargetDir},
 		{name: "file target", entries: []tarEntry{{name: "one.txt", body: "hello\n"}}, target: "one.txt", wantTargetKind: protocol.TargetFile},
-		{name: "timeout skip reaches the host", timeout: 1, wantTargetKind: protocol.TargetDir, wantTimeout: true},
+		{name: "host stalls until the job timeout", mode: "stall", timeout: 1, wantCode: agent.ExitError, wantErrCode: protocol.CodeTimeout, wantMessage: "timed out"},
+		{name: "host hangs up", mode: "hang up", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "closed the connection"},
+		{name: "bad frame order", mode: "data first", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "data frame"},
+		{name: "unknown job field", mode: "unknown job field", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "unknown field"},
 		{name: "unsupported kind", kind: protocol.KindProbe, wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "not supported"},
 		{name: "target name with a slash", target: "proj/sub", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "single path element"},
-		{name: "unknown job field", mode: "unknown job field", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "unknown field"},
-		{name: "bad frame order", mode: "data first", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "data frame"},
-		{name: "host hangs up", mode: "hang up", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "closed the connection"},
-		{name: "host stalls until the job timeout", mode: "stall", timeout: 1, wantCode: agent.ExitError, wantErrCode: protocol.CodeTimeout, wantMessage: "timed out"},
-		{
-			name:     "oversize tar",
-			entries:  []tarEntry{{name: "proj", size: protocol.MaxInputBytes + 1}},
-			wantCode: agent.ExitError, wantErrCode: protocol.CodeTooLarge, wantMessage: "bytes of files",
-		},
-		{name: "sha256 mismatch", mode: "bad sha", wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "sha256 is"},
-		{name: "byte count mismatch", mode: "bad count", wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "read "},
 		{
 			name:     "path traversal",
 			entries:  []tarEntry{{name: "proj/", typ: tar.TypeDir}, {name: "../escape.txt", body: "x"}},
@@ -229,15 +222,24 @@ func TestGuest(t *testing.T) {
 			wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "pwned",
 		},
 		{
-			name:     "target is a symlink",
-			entries:  []tarEntry{{name: "proj", typ: tar.TypeSymlink, link: "/etc"}},
-			wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "not a regular file",
+			name:     "oversize tar",
+			entries:  []tarEntry{{name: "proj", size: protocol.MaxInputBytes + 1}},
+			wantCode: agent.ExitError, wantErrCode: protocol.CodeTooLarge, wantMessage: "bytes of files",
 		},
+		{name: "ingest share runs out", mode: "slow", ingest: 1, wantCode: agent.ExitError, wantErrCode: protocol.CodeTimeout, wantMessage: "deadline exceeded"},
+		{name: "sha256 mismatch", mode: "bad sha", wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "sha256 is"},
+		{name: "byte count mismatch", mode: "bad count", wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "read "},
 		{
 			name:     "target missing from the tar",
 			entries:  []tarEntry{{name: "other.txt", body: "x"}},
 			wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "no entry named",
 		},
+		{
+			name:     "target is a symlink",
+			entries:  []tarEntry{{name: "proj", typ: tar.TypeSymlink, link: "/etc"}},
+			wantCode: agent.ExitError, wantErrCode: protocol.CodeIngest, wantMessage: "not a regular file",
+		},
+		{name: "timeout skip reaches the host", timeout: 1, wantTargetKind: protocol.TargetDir, wantTimeout: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -250,6 +252,7 @@ func TestGuest(t *testing.T) {
 			}
 			data := buildTar(t, entries...)
 			job := testJob(cmp.Or(tt.target, "proj"), cmp.Or(tt.timeout, 300))
+			job.Timeouts.Ingest = tt.ingest
 			job.Kind = cmp.Or(tt.kind, protocol.KindScan)
 			if tt.kind != "" {
 				job.Source = ""
@@ -279,6 +282,10 @@ func TestGuest(t *testing.T) {
 				case "stall":
 				case "hang up":
 					_ = c.(*net.TCPConn).CloseWrite()
+				case "slow": // the second entry arrives after the ingest share is gone
+					_ = protocol.WriteFrame(c, protocol.FrameData, data[:512])
+					time.Sleep(1500 * time.Millisecond)
+					_ = sendInput(c, data[512:], end)
 				default:
 					_ = sendInput(c, data, end)
 				}
@@ -337,13 +344,14 @@ func TestGuestArgs(t *testing.T) {
 		wantCode   int
 		wantStderr string
 	}{
-		{name: "outside a VM without --unsafe-host", args: []string{"guest", "--control", "vsock:2:1024"}, wantCode: agent.ExitUsage, wantStderr: "refusing to take untrusted input outside a VM"},
 		{name: "unknown flag", args: []string{"guest", "--nope"}, wantCode: agent.ExitUsage, wantStderr: "flag provided but not defined"},
+		{name: "bad memory limit", args: []string{"guest", "--memory-limit", "lots"}, wantCode: agent.ExitUsage, wantStderr: "invalid value"},
 		{name: "extra argument", args: []string{"guest", "--control", "vsock:2:1024", "x"}, wantCode: agent.ExitUsage, wantStderr: `unexpected argument "x"`},
 		{name: "control is required", args: []string{"guest", "--unsafe-host"}, wantCode: agent.ExitUsage, wantStderr: "--control is required"},
 		{name: "tcp control without --unsafe-host", args: []string{"guest", "--control", "tcp:127.0.0.1:1"}, wantCode: agent.ExitUsage, wantStderr: "only allowed together with --unsafe-host"},
 		{name: "bad control", args: []string{"guest", "--unsafe-host", "--control", "udp:1"}, wantCode: agent.ExitUsage, wantStderr: "--control: transport"},
 		{name: "bad proxy", args: []string{"guest", "--unsafe-host", "--control", "tcp:" + closedAddr, "--proxy", "vsock:2"}, wantCode: agent.ExitUsage, wantStderr: "--proxy: transport"},
+		{name: "outside a VM without --unsafe-host", args: []string{"guest", "--control", "vsock:2:1024"}, wantCode: agent.ExitUsage, wantStderr: "refusing to take untrusted input outside a VM"},
 		{name: "control cannot be reached", args: []string{"guest", "--unsafe-host", "--control", "tcp:" + closedAddr, "--proxy", "tcp:" + closedAddr}, wantCode: agent.ExitError, wantStderr: "dial control"},
 	}
 	for _, tt := range tests {
@@ -367,9 +375,10 @@ func TestGuestEncodesResultWithEncodeResult(t *testing.T) {
 	}
 	tests := []struct {
 		name string
+		// inputs
+		text string
 		// want*
 		wantPresent bool
-		text        string
 	}{
 		{name: "uses EncodeResult", text: "protocol.EncodeResult(", wantPresent: true},
 		{name: "no json import", text: `"encoding/json"`},
@@ -380,6 +389,43 @@ func TestGuestEncodesResultWithEncodeResult(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := strings.Contains(string(src), tt.text); got != tt.wantPresent {
 				t.Errorf("guest.go contains %q = %v, want %v", tt.text, got, tt.wantPresent)
+			}
+		})
+	}
+}
+
+func TestGuestMemoryLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		args []string
+		// want*
+		wantLimit int64
+	}{
+		{name: "limit from the flag", args: []string{"--memory-limit", "64MiB"}, wantLimit: 64 << 20},
+		{name: "default limit", wantLimit: -1}, // some positive value, or GOMEMLIMIT leaves it alone
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOMEMLIMIT", "")
+			var got int64
+			var stderr bytes.Buffer
+			env := agent.Env{
+				DetectVM:       func() (bool, string) { return false, "test" },
+				SetMemoryLimit: func(n int64) { got = n },
+			}
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := l.Addr().String()
+			_ = l.Close() // the guest cannot dial: the limit is set before it does
+			args := append([]string{"guest", "--unsafe-host", "--control", "tcp:" + addr}, tt.args...)
+			if code := agent.RunWithEnv(args, io.Discard, &stderr, env); code != agent.ExitError {
+				t.Fatalf("exit = %d, want %d; stderr %q", code, agent.ExitError, stderr.String())
+			}
+			if tt.wantLimit >= 0 && got != tt.wantLimit || tt.wantLimit < 0 && got <= 0 {
+				t.Errorf("memory limit = %d, want %d", got, tt.wantLimit)
 			}
 		})
 	}

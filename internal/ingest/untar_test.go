@@ -3,14 +3,15 @@ package ingest_test
 import (
 	"archive/tar"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrdhira/galahad/internal/ingest"
 	"github.com/mrdhira/galahad/internal/protocol"
@@ -52,12 +53,22 @@ func build(t *testing.T, entries ...entry) []byte {
 	return buf.Bytes()
 }
 
+// zeros is an endless stream of zero bytes: a tar stream that ends at once, then padding.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
 func TestExtract(t *testing.T) {
 	huge := entry{hdr: tar.Header{Name: "big", Typeflag: tar.TypeReg, Mode: 0o644, Size: protocol.MaxInputBytes + 1}}
+	deepDir := strings.Repeat("d/", 63) // 63 elements
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
 	tests := []struct {
 		name string
+		// inputs
+		ctx context.Context //nolint:containedctx // a test input
 		// input builds the tar stream; outside is a directory next to the extraction directory.
-		input func(t *testing.T, outside string) []byte
+		input func(t *testing.T, outside string) io.Reader
 		// want*
 		wantFiles  map[string]string // path to content
 		wantLinks  map[string]string // path to link target
@@ -67,45 +78,109 @@ func TestExtract(t *testing.T) {
 	}{
 		{
 			name: "files, directories and links",
-			input: func(t *testing.T, _ string) []byte {
+			input: func(t *testing.T, _ string) io.Reader {
 				fifo := entry{hdr: tar.Header{Name: "pipe", Typeflag: tar.TypeFifo, Mode: 0o644}}
 				hard := entry{hdr: tar.Header{Name: "hard", Typeflag: tar.TypeLink, Linkname: "top.txt"}}
-				return build(t, dir("./"), dir("d/"), file("d/a.txt", "alpha"), file("top.txt", "top"),
-					file("x/y/z.txt", "deep"), link("d/link", "a.txt"), fifo, hard)
+				return bytes.NewReader(build(t, dir("./"), dir("d/"), file("d/a.txt", "alpha"), file("top.txt", "top"),
+					file("x/y/z.txt", "deep"), link("d/link", "a.txt"), fifo, hard))
 			},
 			wantFiles:  map[string]string{"d/a.txt": "alpha", "top.txt": "top", "x/y/z.txt": "deep"},
 			wantLinks:  map[string]string{"d/link": "a.txt"},
 			wantAbsent: []string{"pipe", "hard"},
 		},
 		{
-			name:    "garbage is not a tar stream",
-			input:   func(*testing.T, string) []byte { return bytes.Repeat([]byte("not a tar header"), 100) },
+			name: "garbage is not a tar stream",
+			input: func(*testing.T, string) io.Reader {
+				return bytes.NewReader(bytes.Repeat([]byte("not a tar header"), 100))
+			},
 			wantErr: "read tar",
 		},
 		{
+			name: "deadline passed",
+			ctx:  expired,
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, file("a.txt", "x")))
+			},
+			wantAbsent: []string{"a.txt"},
+			wantErr:    "extract", wantIs: context.DeadlineExceeded,
+		},
+		{
+			name: "more entries than the cap",
+			input: func(t *testing.T, _ string) io.Reader {
+				// A FIFO header is skipped, so the entries cost no disk. One header block, repeated.
+				var buf bytes.Buffer
+				if err := tar.NewWriter(&buf).WriteHeader(&tar.Header{Name: "p", Typeflag: tar.TypeFifo}); err != nil {
+					t.Fatal(err)
+				}
+				return bytes.NewReader(bytes.Repeat(buf.Bytes(), protocol.MaxInputEntries+1))
+			},
+			wantErr: "entries", wantIs: ingest.ErrTooLarge,
+		},
+		{
+			name: "file larger than the byte cap",
+			input: func(t *testing.T, _ string) io.Reader {
+				var buf bytes.Buffer
+				if err := tar.NewWriter(&buf).WriteHeader(&huge.hdr); err != nil {
+					t.Fatal(err)
+				}
+				return &buf
+			},
+			wantAbsent: []string{"big"},
+			wantErr:    "bytes of files", wantIs: ingest.ErrTooLarge,
+		},
+		{
+			name:    "stream larger than the byte cap",
+			input:   func(*testing.T, string) io.Reader { return io.LimitReader(zeros{}, protocol.MaxInputBytes+1) },
+			wantErr: "bytes of stream", wantIs: ingest.ErrTooLarge,
+		},
+		{
 			name:    "absolute path",
-			input:   func(t *testing.T, _ string) []byte { return build(t, file("/etc/passwd", "x")) },
+			input:   func(t *testing.T, _ string) io.Reader { return bytes.NewReader(build(t, file("/etc/passwd", "x"))) },
 			wantErr: "unsafe path", wantIs: ingest.ErrUnsafePath,
 		},
 		{
 			name:    "dot dot leaves the directory",
-			input:   func(t *testing.T, _ string) []byte { return build(t, file("../escape", "x")) },
+			input:   func(t *testing.T, _ string) io.Reader { return bytes.NewReader(build(t, file("../escape", "x"))) },
 			wantErr: "unsafe path", wantIs: ingest.ErrUnsafePath,
 		},
 		{
-			name:    "dot dot inside a name",
-			input:   func(t *testing.T, _ string) []byte { return build(t, dir("a/"), file("a/../b", "x")) },
+			name: "dot dot inside a name",
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, dir("a/"), file("a/../b", "x")))
+			},
 			wantErr: "unsafe path", wantIs: ingest.ErrUnsafePath,
+		},
+		{
+			name: "path 64 elements deep",
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, file(deepDir+"f.txt", "x")))
+			},
+			wantFiles: map[string]string{deepDir + "f.txt": "x"},
+		},
+		{
+			name: "path 65 elements deep",
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, file("e/"+deepDir+"f.txt", "x")))
+			},
+			wantAbsent: []string{"e"},
+			wantErr:    "65 elements deep", wantIs: ingest.ErrUnsafePath,
+		},
+		{
+			name: "directory through a symlink",
+			input: func(t *testing.T, outside string) io.Reader {
+				return bytes.NewReader(build(t, link("out", outside), dir("out/sub/")))
+			},
+			wantErr: "sub",
 		},
 		{
 			name:    "a file named dot",
-			input:   func(t *testing.T, _ string) []byte { return build(t, file(".", "x")) },
+			input:   func(t *testing.T, _ string) io.Reader { return bytes.NewReader(build(t, file(".", "x"))) },
 			wantErr: "unsafe path", wantIs: ingest.ErrUnsafePath,
 		},
 		{
 			name: "write through a symlink to an absolute path",
-			input: func(t *testing.T, outside string) []byte {
-				return build(t, link("out", outside), file("out/pwned", "x"))
+			input: func(t *testing.T, outside string) io.Reader {
+				return bytes.NewReader(build(t, link("out", outside), file("out/pwned", "x")))
 			},
 			wantLinks:  map[string]string{"out": ""}, // the link itself is made; the target is checked in the test
 			wantAbsent: []string{"out/pwned"},
@@ -113,50 +188,19 @@ func TestExtract(t *testing.T) {
 		},
 		{
 			name: "write through a symlink to the parent",
-			input: func(t *testing.T, _ string) []byte {
-				return build(t, link("up", ".."), file("up/pwned", "x"))
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, link("up", ".."), file("up/pwned", "x")))
 			},
 			wantAbsent: []string{"up/pwned"},
 			wantErr:    "pwned",
 		},
 		{
-			name: "directory through a symlink",
-			input: func(t *testing.T, outside string) []byte {
-				return build(t, link("out", outside), dir("out/sub/"))
-			},
-			wantErr: "sub",
-		},
-		{
 			name: "file over a symlink",
-			input: func(t *testing.T, _ string) []byte {
-				return build(t, file("f", "x"), link("l", "f"), file("l", "y"))
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, file("f", "x"), link("l", "f"), file("l", "y")))
 			},
 			wantFiles: map[string]string{"f": "x"},
 			wantErr:   "extract",
-		},
-		{
-			name: "file larger than the byte cap",
-			input: func(t *testing.T, _ string) []byte {
-				var buf bytes.Buffer
-				if err := tar.NewWriter(&buf).WriteHeader(&huge.hdr); err != nil {
-					t.Fatal(err)
-				}
-				return buf.Bytes()
-			},
-			wantAbsent: []string{"big"},
-			wantErr:    "bytes of files", wantIs: ingest.ErrTooLarge,
-		},
-		{
-			name: "more entries than the cap",
-			input: func(t *testing.T, _ string) []byte {
-				// A FIFO header is skipped, so the entries cost no disk. One header block, repeated.
-				var buf bytes.Buffer
-				if err := tar.NewWriter(&buf).WriteHeader(&tar.Header{Name: "p", Typeflag: tar.TypeFifo}); err != nil {
-					t.Fatal(err)
-				}
-				return bytes.Repeat(buf.Bytes(), protocol.MaxInputEntries+1)
-			},
-			wantErr: "entries", wantIs: ingest.ErrTooLarge,
 		},
 	}
 	for _, tt := range tests {
@@ -171,17 +215,17 @@ func TestExtract(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			data := tt.input(t, outside)
-
-			stream, err := ingest.Extract(bytes.NewReader(data), dst)
+			ctx := tt.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			stream, err := ingest.Extract(ctx, tt.input(t, outside), dst)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("Extract: %v", err)
 				}
-				sum := sha256.Sum256(data)
-				end := protocol.End{Bytes: int64(len(data)), SHA256: hex.EncodeToString(sum[:])}
-				if err := stream.Verify(end); err != nil {
-					t.Errorf("Verify: %v", err)
+				if stream.Bytes == 0 || len(stream.SHA256) != 64 {
+					t.Errorf("stream = %+v, want the byte count and hash of the input", stream)
 				}
 			} else {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {

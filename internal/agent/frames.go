@@ -15,6 +15,9 @@ import (
 // frameIdle is how long the guest waits for the next frame of the host, or for the host to take one.
 const frameIdle = 60 * time.Second
 
+// drainTime is how long close waits for the host to finish sending.
+const drainTime = 2 * time.Second
+
 // codeError is a failure that has its own Error code for the host.
 type codeError struct {
 	code string
@@ -70,6 +73,20 @@ func (h *hostConn) send(t protocol.FrameType, payload []byte) error {
 		return err
 	}
 	return protocol.WriteFrame(h.conn, t, payload)
+}
+
+// close ends the session after the last frame. Closing a connection with unread input
+// resets it on some systems, and the peer then drops what it had not read yet, which
+// can be the last frame. So the guest first shuts down its sending side, then reads what
+// the host still sends until EOF or a short deadline, and only then closes.
+func (h *hostConn) close() {
+	if cw, ok := h.conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite() // best effort; the drain below still runs
+	}
+	if err := h.conn.SetReadDeadline(time.Now().Add(drainTime)); err == nil {
+		_, _ = io.Copy(io.Discard, h.conn) // ends at EOF, an error or the deadline
+	}
+	_ = h.conn.Close() // nothing is left to flush
 }
 
 // sendJSON writes a small message, which is not a Result, as one frame.

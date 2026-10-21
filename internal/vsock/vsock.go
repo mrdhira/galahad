@@ -37,6 +37,19 @@ func (c *conn) LocalAddr() net.Addr { return c.local }
 // RemoteAddr returns the peer address of the connection.
 func (c *conn) RemoteAddr() net.Addr { return c.remote }
 
+// CloseWrite shuts down the sending side, so the peer reads EOF while this side can still read.
+func (c *conn) CloseWrite() error {
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var serr error
+	if err := rc.Control(func(fd uintptr) { serr = unix.Shutdown(int(fd), unix.SHUT_WR) }); err != nil {
+		return err
+	}
+	return serr
+}
+
 // Dial connects to the given context ID and port. The kernel gives up on a connect
 // that gets no answer after a few seconds.
 func Dial(cid, port uint32) (net.Conn, error) {
