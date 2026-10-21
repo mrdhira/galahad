@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -82,6 +83,7 @@ type row struct {
 	Attack   string
 	Location string // path:line, empty without evidence
 	Snippet  string
+	Auto     bool // the finding is an auto-execution one
 }
 
 var severityRank = map[protocol.Severity]int{
@@ -99,7 +101,7 @@ func rows(res *protocol.Result, keep func(protocol.Finding) bool) []row {
 		if keep != nil && !keep(f) {
 			continue
 		}
-		base := row{Severity: f.Severity, Rule: f.RuleID, Title: f.Title, Attack: f.Attack}
+		base := row{Severity: f.Severity, Rule: f.RuleID, Title: f.Title, Attack: f.Attack, Auto: isAutoexec(f)}
 		if len(f.Evidence) == 0 {
 			out = append(out, base)
 			continue
@@ -107,7 +109,7 @@ func rows(res *protocol.Result, keep func(protocol.Finding) bool) []row {
 		for _, e := range f.Evidence {
 			r := base
 			r.Location = location(e.Path, e.Line)
-			r.Snippet = e.Snippet
+			r.Snippet = strings.TrimLeftFunc(e.Snippet, unicode.IsSpace)
 			out = append(out, r)
 		}
 	}
@@ -115,6 +117,116 @@ func rows(res *protocol.Result, keep func(protocol.Finding) bool) []row {
 		return severityRank[out[i].Severity] > severityRank[out[j].Severity]
 	})
 	return out
+}
+
+// entry is one finding inside a group.
+type entry struct {
+	Severity protocol.Severity
+	Rule     string
+	Title    string
+	Attack   string
+	Auto     bool
+}
+
+// group is the findings that share a location and a snippet, so the reader sees the code once.
+// Entries are most severe first. A row without evidence is a group of its own.
+type group struct {
+	Entries           []entry
+	Location, Snippet string
+}
+
+// groups merges the rows of the kept findings by location and snippet. Groups keep the order of
+// their most severe row.
+func groups(res *protocol.Result, keep func(protocol.Finding) bool) []group {
+	var out []group
+	at := map[[2]string]int{}
+	for _, r := range rows(res, keep) {
+		e := entry{Severity: r.Severity, Rule: r.Rule, Title: r.Title, Attack: r.Attack, Auto: r.Auto}
+		if r.Location == "" && r.Snippet == "" {
+			out = append(out, group{Entries: []entry{e}})
+			continue
+		}
+		k := [2]string{r.Location, r.Snippet}
+		i, ok := at[k]
+		if !ok {
+			at[k] = len(out)
+			out = append(out, group{Entries: []entry{e}, Location: r.Location, Snippet: r.Snippet})
+			continue
+		}
+		if !slices.Contains(out[i].Entries, e) {
+			out[i].Entries = append(out[i].Entries, e)
+		}
+	}
+	return out
+}
+
+func (g group) severity() protocol.Severity { return g.Entries[0].Severity }
+
+// rules, titles and attacks join the distinct values of the group's entries.
+func (g group) rules() string   { return g.join(", ", func(e entry) string { return e.Rule }) }
+func (g group) titles() string  { return g.join("; ", func(e entry) string { return e.Title }) }
+func (g group) attacks() string { return g.join(", ", func(e entry) string { return e.Attack }) }
+
+func (g group) join(sep string, get func(entry) string) string {
+	var vals []string
+	for _, e := range g.Entries {
+		if v := get(e); v != "" && !slices.Contains(vals, v) {
+			vals = append(vals, v)
+		}
+	}
+	return strings.Join(vals, sep)
+}
+
+// maxWhy is how many reasons the verdict header lists.
+const maxWhy = 3
+
+// why returns the first maxWhy groups whose most severe finding is critical or high. A title that
+// repeats at another location is listed once, so the reasons differ.
+func why(gs []group) []group {
+	var out []group
+	seen := map[string]bool{}
+	for _, g := range gs {
+		title := g.Entries[0].Title
+		if s := g.severity(); seen[title] || s != protocol.SeverityCritical && s != protocol.SeverityHigh {
+			continue
+		}
+		seen[title] = true
+		if out = append(out, g); len(out) == maxWhy {
+			break
+		}
+	}
+	return out
+}
+
+// actionLine tells the reader what to do with the target.
+func actionLine(v protocol.Verdict) string {
+	switch v {
+	case protocol.VerdictMalicious:
+		return "Do not open, install or run this."
+	case protocol.VerdictClean:
+		return "No known-bad patterns found. This is not a guarantee."
+	default:
+		return "Treat with caution. Review the findings below before you open, install or run it."
+	}
+}
+
+// metaLine is the one-line summary under the verdict. It counts the items that were not analyzed
+// only when there are some.
+func metaLine(res *protocol.Result, findings int) string {
+	line := fmt.Sprintf("Score %d/100 \u00b7 confidence %d%% (%s) \u00b7 %s \u00b7 coverage %s",
+		res.Score, res.Confidence, clean(res.ConfidenceLevel), plural(findings, "finding"), coveragePercent(res.Coverage))
+	if n := len(res.Coverage.Skipped); n > 0 {
+		line += fmt.Sprintf(" \u00b7 %d not analyzed", n)
+	}
+	return line
+}
+
+// iocHeading names the IOC section. On a clean verdict the indicators are not a sign of compromise.
+func iocHeading(res *protocol.Result) string {
+	if res.Verdict == protocol.VerdictClean {
+		return "Network indicators (not a sign of compromise)"
+	}
+	return fmt.Sprintf("IOCs (%d)", len(res.IOCs))
 }
 
 func isAutoexec(f protocol.Finding) bool { return strings.HasPrefix(f.RuleID, "GAL-AUTOEXEC-") }
@@ -173,6 +285,15 @@ func percent(analyzed, seen int) string {
 		p = 99
 	}
 	return fmt.Sprintf("%d%%", p)
+}
+
+// coveragePercent is percent for the whole coverage. It never shows 100% next to skipped items.
+func coveragePercent(c protocol.Coverage) string {
+	p := percent(c.FilesAnalyzed, c.FilesSeen)
+	if p == "100%" && len(c.Skipped) > 0 {
+		return "99%"
+	}
+	return p
 }
 
 // plural returns "1 file" or "2 files".

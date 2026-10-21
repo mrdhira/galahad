@@ -16,6 +16,41 @@ import (
 // liveLink matches a URL that is not defanged. No report may contain one.
 var liveLink = regexp.MustCompile(`(?i)(?:https?|ftp|file)://`)
 
+var whyList = regexp.MustCompile(`(?s)<ul class="why">(.*?)</ul>`)
+
+var actionLines = map[string]string{
+	"malicious":  "Do not open, install or run this.",
+	"suspicious": "Treat with caution. Review the findings below before you open, install or run it.",
+	"clean":      "No known-bad patterns found. This is not a guarantee.",
+}
+
+// checkHTMLPage checks what every report.html has: the CSP, the verdict in the title, the action line of
+// the verdict, landmarks, at most 3 reasons, the right IOC label, and no link, image or script.
+func checkHTMLPage(t *testing.T, html, verdict string) {
+	t.Helper()
+	for _, want := range []string{
+		`content="default-src 'none'; style-src 'unsafe-inline'"`,
+		"<title>" + strings.ToUpper(verdict) + ": ",
+		actionLines[verdict], "<header ", "<main>", "<footer>", "<h1><span class=\"badge\">" + strings.ToUpper(verdict) + "</span>",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("report.html lacks %q", want)
+		}
+	}
+	for _, absent := range []string{"href=", "src=", "<script"} {
+		if strings.Contains(html, absent) {
+			t.Errorf("report.html contains %q", absent)
+		}
+	}
+	if m := whyList.FindStringSubmatch(html); m != nil && strings.Count(m[1], "<li>") > 3 {
+		t.Errorf("why lists %d items, want at most 3:\n%s", strings.Count(m[1], "<li>"), m[1])
+	}
+	const label = "Network indicators (not a sign of compromise)"
+	if got := strings.Contains(html, label); got != (verdict == "clean") {
+		t.Errorf("IOC label %q present = %v on a %s report", label, got, verdict)
+	}
+}
+
 // corpusDir returns a builder that targets a committed fixture in testdata/corpus.
 func corpusDir(name string) func(t *testing.T) string {
 	return func(t *testing.T) string { return corpus(t, name) }
@@ -539,6 +574,7 @@ func TestCorpus(t *testing.T) {
 					t.Errorf("%s has a live link %q", name, m)
 				}
 			}
+			checkHTMLPage(t, readFile(t, filepath.Join(out, "report.html")), rep.Verdict)
 		})
 	}
 }

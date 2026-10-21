@@ -33,9 +33,9 @@ func TestDemo(t *testing.T) {
 			name:         "fake-interview-repo is malicious with tasks.json:7 and setup.js:3 as evidence",
 			args:         []string{"analyze", "--unsafe-host", "-o", "{out}", "{corpus}/fake-interview-repo"},
 			wantCode:     20,
-			wantStdout:   []string{"Verdict: MALICIOUS", "report.html"},
+			wantStdout:   []string{"Verdict: MALICIOUS", "Do not open, install or run this.", "Runs automatically (", "report.html"},
 			wantEvidence: []string{"GAL-AUTOEXEC-010 .vscode/tasks.json:7", "GAL-EXFIL-001 scripts/setup.js:3"},
-			wantSummary:  []string{".vscode/tasks.json:7", "scripts/setup.js:3", "- Kind: folder, "},
+			wantSummary:  []string{".vscode/tasks.json:7", "scripts/setup.js:3", "- Kind: folder, ", "Do not open, install or run this.", "## Why", "## Runs automatically ("},
 			wantFiles:    []string{"summary.md", "report.html", "report.json"},
 			wantVerdict:  "malicious",
 		},
@@ -43,7 +43,8 @@ func TestDemo(t *testing.T) {
 			name:        "benign-express-app is clean",
 			args:        []string{"analyze", "--unsafe-host", "-o", "{out}", "{corpus}/benign-express-app"},
 			wantCode:    0,
-			wantStdout:  []string{"Verdict: CLEAN"},
+			wantStdout:  []string{"Verdict: CLEAN", "No known-bad patterns found. This is not a guarantee."},
+			wantSummary: []string{"No known-bad patterns found. This is not a guarantee.", "## Network indicators (not a sign of compromise)"},
 			wantFiles:   []string{"summary.md", "report.html", "report.json"},
 			wantVerdict: "clean",
 		},
@@ -100,6 +101,7 @@ func TestDemo(t *testing.T) {
 					t.Errorf("%s has a live link %q", name, m)
 				}
 			}
+			checkHTMLPage(t, readFile(t, filepath.Join(out, "report.html")), rep.Verdict)
 		})
 	}
 }
