@@ -43,6 +43,7 @@ func TestCorpus(t *testing.T) {
 		wantSummary  []string // each must appear in summary.md
 		wantSkips    int      // coverage skips; when zero, files_analyzed must equal files_seen
 		wantQuiet    bool     // only info findings and the auto-execution inventory (GAL-AUTOEXEC-006 to 008)
+		wantLow      []string // rules a quiet case may also report, at low severity only
 	}{
 		// Malicious or suspicious imitations.
 		{
@@ -217,6 +218,16 @@ func TestCorpus(t *testing.T) {
 			wantCode: 0, wantQuiet: true,
 		},
 		{
+			name: "benign install commands: devcontainer postCreateCommand npm ci and postinstall node-gyp rebuild (built, twin of fake-interview-repo)",
+			target: filesRepo(map[string]string{
+				".devcontainer/devcontainer.json": "{\n  \"name\": \"app\",\n  \"postCreateCommand\": \"npm ci\"\n}\n",
+				"package.json":                    "{\n  \"name\": \"app\",\n  \"scripts\": {\n    \"postinstall\": \"node-gyp rebuild\"\n  }\n}\n",
+			}),
+			wantCode:  0,
+			wantRules: []string{"GAL-AUTOEXEC-004 .devcontainer/devcontainer.json:3", "GAL-AUTOEXEC-005 package.json:4"},
+			wantQuiet: true, wantLow: []string{"GAL-AUTOEXEC-004", "GAL-AUTOEXEC-005"},
+		},
+		{
 			name:     "benign git config: built-in fsmonitor daemon (built, twin of git-config fsmonitor)",
 			target:   gitConfigRepo("[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n"),
 			wantCode: 0, wantQuiet: true,
@@ -272,6 +283,9 @@ func TestCorpus(t *testing.T) {
 			if tt.wantQuiet {
 				quiet := otherFindings(rep)
 				for _, f := range rep.Findings {
+					if f.Severity == "low" && slices.Contains(tt.wantLow, f.RuleID) {
+						continue
+					}
 					if f.Severity != "info" && slices.Contains(quiet, f.RuleID) {
 						t.Errorf("benign fixture has a %s finding %s", f.Severity, f.RuleID)
 					}
