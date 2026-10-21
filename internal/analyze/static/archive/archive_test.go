@@ -271,6 +271,16 @@ func TestAnalyze(t *testing.T) {
 	badLocal[bytes.LastIndex(badLocal[:bytes.Index(badLocal, []byte("PK\x01\x02"))], []byte("PK\x03\x04"))+3] = 5
 	iso := make([]byte, 0x8100)
 	copy(iso[0x8001:], "CD001")
+	// A stub, then a zip whose end record implies a shift by the stub. patch edits a record planted
+	// in the stub at the offset where the unshifted directory would start.
+	planted := func(patch func(rec []byte)) []byte {
+		z := zipOf(t, entry{name: strings.Repeat("n", 40), data: "a"})
+		stub := sfx(t, make([]byte, 64)...) // room for a record
+		rec := stub[bytes.Index(z, []byte("PK\x01\x02")):]
+		copy(rec, "PK\x01\x02")
+		patch(rec)
+		return append(stub, z...)
+	}
 
 	tests := []struct {
 		name string
@@ -317,6 +327,18 @@ func TestAnalyze(t *testing.T) {
 				return buf.Bytes()
 			}(),
 			wantChildren: []string{"a.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-006 in.exe"}},
+		{name: "planted record whose name runs past the file does not undo the shift", file: "in.exe",
+			data:         planted(func(rec []byte) { binary.LittleEndian.PutUint16(rec[28:], 0xffff) }),
+			wantChildren: []string{strings.Repeat("n", 40)},
+			wantFindings: []string{"GAL-ARCHIVE-006 in.exe"}},
+		{name: "planted record with a zip64 field too short for its full size does not undo the shift", file: "in.exe",
+			data: planted(func(rec []byte) {
+				binary.LittleEndian.PutUint32(rec[20:], 1<<32-1)
+				binary.LittleEndian.PutUint16(rec[30:], 8)
+				copy(rec[46:], []byte{1, 0, 4, 0})
+			}),
+			wantChildren: []string{strings.Repeat("n", 40)},
 			wantFindings: []string{"GAL-ARCHIVE-006 in.exe"}},
 		{name: "executable with an appended zip at the nesting limit is not expanded", file: "in.exe", depth: analyze.MaxNesting,
 			data:      sfx(t, zipOf(t, entry{name: "a.txt", data: "a"})...),
@@ -522,6 +544,113 @@ func TestAnalyze(t *testing.T) {
 			}
 			if !slices.Equal(skips, tt.wantSkips) {
 				t.Errorf("skips = %v, want %v", skips, tt.wantSkips)
+			}
+		})
+	}
+}
+
+func TestAnalyzeBrokenZip64(t *testing.T) {
+	le := binary.LittleEndian
+	good := rawZip(1, nil, true)
+	locator := bytes.LastIndex(good, []byte("PK\x06\x07"))
+	end := bytes.LastIndex(good, []byte("PK\x05\x06"))
+	// The locator loses its last four bytes, so it no longer ends at the end record.
+	truncatedLocator := slices.Concat(good[:end-4], good[end:])
+	// The locator points past the end of the file.
+	farLocator := slices.Clone(good)
+	le.PutUint64(farLocator[locator+8:], uint64(len(good))+100)
+	// The zip64 extra field of the record holds four bytes where the offset needs eight.
+	shortExtra := func() []byte {
+		z := slices.Clone(good)
+		field := bytes.Index(z, []byte{1, 0, 8, 0})
+		z = slices.Concat(z[:field], []byte{1, 0, 4, 0, 0, 0, 0, 0}, z[field+12:])
+		z[bytes.Index(z, []byte("PK\x01\x02"))+30] = 8
+		z64 := bytes.Index(z, []byte("PK\x06\x06"))
+		le.PutUint64(z[z64+40:], le.Uint64(z[z64+40:])-4)
+		le.PutUint64(z[bytes.Index(z, []byte("PK\x06\x07"))+8:], uint64(z64))
+		e := bytes.LastIndex(z, []byte("PK\x05\x06"))
+		le.PutUint32(z[e+12:], le.Uint32(z[e+12:])-4)
+		return z
+	}()
+	tests := []struct {
+		name string
+		// inputs
+		data []byte
+		// expectations
+		wantChildren []string
+		wantErr      bool
+	}{
+		{name: "intact zip64 zip is expanded", data: good, wantChildren: []string{"a"}},
+		{name: "truncated zip64 locator", data: truncatedLocator, wantErr: true},
+		{name: "zip64 locator that points past the end", data: farLocator, wantErr: true},
+		{name: "zip64 extra field too short for the offset", data: shortExtra, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := analyze.File{Path: "in.zip", Name: "in.zip", Kind: ident.Zip, Data: tt.data}
+
+			out, err := archive.New().Analyze(context.Background(), f)
+
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tt.wantErr)
+			}
+			var children []string
+			for _, c := range out.Children {
+				children = append(children, c.Name)
+			}
+			if !slices.Equal(children, tt.wantChildren) {
+				t.Errorf("children = %v, want %v", children, tt.wantChildren)
+			}
+			if len(out.Findings) != 0 {
+				t.Errorf("findings = %+v, want none", out.Findings)
+			}
+		})
+	}
+}
+
+func TestAnalyzeBudget(t *testing.T) {
+	data := zipOf(t, entry{name: "a.txt", data: strings.Repeat("a", 600<<10)})
+	tests := []struct {
+		name string
+		// inputs
+		budget int64 // negative means the context carries none
+		// expectations
+		wantChildren []string
+		wantFindings []string
+		wantSkips    []string
+	}{
+		{name: "a member that fits in the budget is expanded", budget: 1 << 20, wantChildren: []string{"a.txt"}},
+		{name: "no budget leaves the archive limits alone", budget: -1, wantChildren: []string{"a.txt"}},
+		{name: "a member over the budget is a bomb and a budget skip", budget: 1 << 10,
+			wantFindings: []string{"GAL-ARCHIVE-003 in.zip"}, wantSkips: []string{"in.zip!/a.txt budget"}},
+		{name: "a spent budget expands nothing", budget: 0,
+			wantFindings: []string{"GAL-ARCHIVE-003 in.zip"}, wantSkips: []string{"in.zip!/a.txt budget"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.budget >= 0 {
+				ctx = analyze.WithBudget(ctx, tt.budget)
+			}
+			f := analyze.File{Path: "in.zip", Name: "in.zip", Kind: ident.Zip, Data: data}
+
+			out, err := archive.New().Analyze(ctx, f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			var children, findings, skips []string
+			for _, c := range out.Children {
+				children = append(children, c.Name)
+			}
+			for _, fd := range out.Findings {
+				findings = append(findings, fd.RuleID+" "+fd.Evidence[0].Path)
+			}
+			for _, s := range out.Skips {
+				skips = append(skips, s.Path+" "+s.Reason)
+			}
+			if !slices.Equal(children, tt.wantChildren) || !slices.Equal(findings, tt.wantFindings) || !slices.Equal(skips, tt.wantSkips) {
+				t.Errorf("children %v findings %v skips %v, want %v %v %v", children, findings, skips, tt.wantChildren, tt.wantFindings, tt.wantSkips)
 			}
 		})
 	}
