@@ -26,9 +26,12 @@ import (
 //
 // B. Only for an npm script: exactly one known tool with no arguments. The tool
 // must be declared as a dependency with a registry version, must not be
-// committed under node_modules/.bin, and nothing may redirect it: no workspaces
-// in the package or a parent, no override, resolution or patch that names it,
-// no pnpmfile and no bunfig.toml.
+// committed under node_modules/.bin, and nothing may redirect it: every entry
+// for it is a registry version, no workspaces in the package or a parent, no
+// override, resolution or patch that names it, no package manager config file
+// except a pnpm-workspace.yaml that sets none of that, and no package manager
+// other than a plain version (pnpm 9 or later when pnpm-workspace.yaml lists
+// packages, since older pnpm links a workspace package of the same name).
 //
 // The command is attacker-controlled text, so only a small alphabet is parsed.
 // The neighbor files are read through File.Open; without it nothing is benign.
@@ -63,6 +66,8 @@ var (
 	// managerRE is a packageManager value that names a released version. A URL
 	// makes corepack download and run that file.
 	managerRE = regexp.MustCompile(`^(npm|yarn|pnpm|bun)@[0-9][0-9A-Za-z.+-]*$`)
+	// pnpm9RE is a packageManager value that pins pnpm 9 or later.
+	pnpm9RE = regexp.MustCompile(`^pnpm@([1-9][0-9]+|9)\.`)
 
 	// tools maps a whole command to the package that provides it and its
 	// name under node_modules/.bin.
@@ -176,10 +181,10 @@ func mentions(n *node, name string) bool {
 }
 
 // pnpmClean reports whether no pnpm-workspace.yaml in dir or a parent folder
-// sets a pnpmfile, or names the package name in its overrides or
-// patchedDependencies. Only top-level block keys are read; anything that could
+// sets a pnpmfile or linkWorkspacePackages, lists packages unless pnpm9 is set,
+// or names the package name in its overrides or patchedDependencies. Only top-level block keys are read; anything that could
 // hide a key (flow style, anchors, escapes) counts as naming it.
-func (g *grader) pnpmClean(dir, name string) bool {
+func (g *grader) pnpmClean(dir, name string, pnpm9 bool) bool {
 	for d := dir; ; d = parentDir(d) {
 		p, _ := within(d, "pnpm-workspace.yaml")
 		data, err := g.read(p)
@@ -191,7 +196,8 @@ func (g *grader) pnpmClean(dir, name string) bool {
 			if line != "" && !strings.ContainsAny(line[:1], " \t#-") {
 				key, _, _ := strings.Cut(line, ":")
 				block = strings.Trim(strings.TrimSpace(key), `"'`)
-				if strings.ContainsAny(line[:1], "{[?&*!|>%@`\\") || strings.Contains(block, "\\") || strings.Contains(block, "npmfile") {
+				if strings.ContainsAny(line[:1], "{[?&*!|>%@`\\") || strings.Contains(block, "\\") || strings.Contains(block, "npmfile") ||
+					block == "linkWorkspacePackages" || block == "packages" && !pnpm9 {
 					return false
 				}
 			}
@@ -280,7 +286,7 @@ func (g *grader) install(words []string, dir string) bool {
 	if pkg == nil || g.inWorkspace(dir) || slices.ContainsFunc(redirects, func(k string) bool { return pkg.get(k) != nil }) {
 		return false
 	}
-	if m := pkg.get("packageManager"); pkg.get("devEngines") != nil || m != nil && (m.kind != 's' || !managerRE.MatchString(m.str)) {
+	if !plainManager(pkg) {
 		return false
 	}
 	if p, _ := within(dir, "binding.gyp"); !g.absent(p) {
@@ -302,10 +308,15 @@ func (g *grader) tool(cmd, dir string) bool {
 	if !ok || pkg == nil || !g.declared(pkg, t.pkg) || g.inWorkspace(dir) {
 		return false
 	}
-	if slices.ContainsFunc(redirects, func(k string) bool { return mentions(pkg.get(k), t.pkg) }) || !g.pnpmClean(dir, t.pkg) {
+	if !plainManager(pkg) || slices.ContainsFunc(redirects, func(k string) bool { return mentions(pkg.get(k), t.pkg) }) {
 		return false
 	}
-	if !g.absentUp(dir, path.Join("node_modules", ".bin", t.bin), "bunfig.toml") {
+	m := pkg.get("packageManager")
+	if !g.pnpmClean(dir, t.pkg, m != nil && pnpm9RE.MatchString(m.str)) {
+		return false
+	}
+	names := append([]string{path.Join("node_modules", ".bin", t.bin)}, slices.DeleteFunc(slices.Clone(installConfigs), func(n string) bool { return n == "pnpm-workspace.yaml" })...)
+	if !g.absentUp(dir, names...) {
 		return false
 	}
 	if t.pkg == "prisma" {
@@ -314,15 +325,30 @@ func (g *grader) tool(cmd, dir string) bool {
 	return true
 }
 
-// declared reports whether pkg lists name in dependencies or devDependencies
-// with a registry version range.
+// declared reports whether pkg lists name in dependencies or devDependencies,
+// and every entry for name in any dependency section is a registry version
+// range. The package manager installs one of them, so each must be safe.
 func (g *grader) declared(pkg *node, name string) bool {
-	for _, section := range []string{"dependencies", "devDependencies"} {
-		if v := pkg.get(section).get(name); v != nil && v.kind == 's' && versionRE.MatchString(v.str) {
-			return true
+	found := false
+	for _, section := range []string{"dependencies", "devDependencies", "optionalDependencies", "peerDependencies"} {
+		v := pkg.get(section).get(name)
+		if v == nil {
+			continue
 		}
+		if v.kind != 's' || !versionRE.MatchString(v.str) {
+			return false
+		}
+		found = found || section == "dependencies" || section == "devDependencies"
 	}
-	return false
+	return found
+}
+
+// plainManager reports whether pkg names no package manager, or one by a
+// released version. devEngines can also make corepack fetch one, so it must be
+// absent.
+func plainManager(pkg *node) bool {
+	m := pkg.get("packageManager")
+	return pkg.get("devEngines") == nil && (m == nil || m.kind == 's' && managerRE.MatchString(m.str))
 }
 
 // prismaClean reports whether the schema that prisma generate reads has no
