@@ -1,0 +1,126 @@
+name: image
+
+# Builds the guest kernel and the core root filesystem and compares them with internal/images/pins.json.
+# A tag images-* also publishes them as a release. There is no KVM here; booting the images is
+# checked by vm.yml.
+
+on:
+  pull_request:
+    paths:
+      - 'images/**'
+      - 'internal/images/pins.json'
+      - '.github/workflows/image.yml'
+  push:
+    tags: ['images-*']
+
+permissions:
+  contents: read
+
+env:
+  # The build container. Its tools (e2fsprogs, gzip, tar) decide the bytes of the images,
+  # so it is pinned by digest. Update the digest with the pins in the same pull request.
+  BUILD_IMAGE: debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the scripts
+        run: shellcheck -x -P SCRIPTDIR images/linux/*.sh images/linux/kernel/build.sh images/linux/overlay/sbin/galahad-init
+
+      - name: Check the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          expected="images-$(cat images/linux/VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::the tag is $GITHUB_REF_NAME, images/linux/VERSION says $expected"
+            exit 1
+          fi
+
+      # The debs and the kernel tarball are downloaded from snapshot.debian.org and kernel.org,
+      # which are slow. apt and sha256 checks make a cached file as safe as a fresh one.
+      - id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache
+          key: image-cache-${{ hashFiles('images/linux/common.sh', 'images/linux/packages-core.txt', 'images/linux/kernel/build.sh') }}
+          restore-keys: image-cache-
+
+      - name: Build the core image
+        run: |
+          docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+            "$BUILD_IMAGE" bash images/linux/build.sh core
+
+      - name: Build the kernel
+        run: |
+          docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+            "$BUILD_IMAGE" bash images/linux/kernel/build.sh
+
+      # Saved only after both builds worked, so a failed build cannot leave a half-filled cache behind.
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Take back the files of the container
+        run: sudo chown -R "$(id -u):$(id -g)" out .cache
+
+      # Fails when the hashes differ from pins.json, and prints the new ones.
+      - name: Compare with pins.json
+        run: images/linux/check-pins.sh out internal/images/pins.json images/linux/VERSION
+
+      - name: Collect the release files
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir release
+          cp out/vmlinux.gz out/core.ext4.gz out/core.manifest out/core.gpl-sources out/vmlinux.config out/linux-*.tar.xz release/
+          tar -C out -cf release/core-sources.tar sources
+          (cd release && sha256sum vmlinux.gz core.ext4.gz > SHA256SUMS)
+
+      - name: Upload the release files
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  # Only a tag publishes, and only after the build matched the pins.
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/vmlinux.gz
+            release/core.ext4.gz
+            release/SHA256SUMS
+
+      # The images are not the latest release of the repository: that is the galahad binary.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Guest kernel and core root filesystem for galahad setup.
+          For license compliance the release also holds the package manifest (core.manifest),
+          the GPL source packages (core-sources.tar, core.gpl-sources), and the kernel source
+          and config (linux-*.tar.xz, vmlinux.config)."
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+            --title "$GITHUB_REF_NAME" --notes "$notes"
