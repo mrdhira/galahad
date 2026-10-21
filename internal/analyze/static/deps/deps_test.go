@@ -69,6 +69,31 @@ git = "https://git.sinkhole.test/j.git"
 [tool.other]
 k = { git = "https://git.sinkhole.test/k.git" }
 `
+	pyprojectMultiline = `[project]
+summary = '''one [ line'''
+description = """
+[tool.uv]
+index-url = "https://pypi.sinkhole.test/simple"
+dependencies = [ "
+"""
+dependencies = [
+  "pkg @ https://dl.sinkhole.test/p.zip",
+]
+`
+	pyprojectDotted = `[tool]
+uv.sources.a = { git = "https://git.sinkhole.test/a.git" }
+uv.index-url = "https://pypi.sinkhole.test/simple"
+uv.sources.b.url = "https://dl.sinkhole.test/b.whl"
+poetry.dependencies.c = { url = "https://dl.sinkhole.test/c.whl" }
+[tool.uv]
+sources = { d = { git = "https://git.sinkhole.test/d.git" }, e = { path = "../e" } }
+index = [{ url = "https://idx.sinkhole.test/simple" }]
+[project]
+optional-dependencies = { dev = ["pkg @ https://dl.sinkhole.test/p.zip", "pytest"], docs = ["sphinx"] }
+dependencies = []
+[dependency-groups]
+all = [{include-group = "dev"}]
+`
 	pyprojectBenign = `[build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -184,6 +209,18 @@ func TestAnalyze(t *testing.T) {
 			wantFindings: []string{"GAL-DEPS-002@11", "GAL-DEPS-002@6", "GAL-DEPS-002@9", "GAL-DEPS-004@3"},
 		},
 		{name: "pyproject with only PyPI dependencies", file: "pyproject.toml", data: pyprojectBenign},
+		{
+			name:         "pyproject multi-line strings hide no table or bracket",
+			file:         "pyproject.toml",
+			data:         pyprojectMultiline,
+			wantFindings: []string{"GAL-DEPS-002@9"},
+		},
+		{
+			name:         "pyproject dotted keys and inline tables are classified by their full path",
+			file:         "pyproject.toml",
+			data:         pyprojectDotted,
+			wantFindings: []string{"GAL-DEPS-002@10", "GAL-DEPS-002@2", "GAL-DEPS-002@4", "GAL-DEPS-002@5", "GAL-DEPS-002@7", "GAL-DEPS-004@3", "GAL-DEPS-004@8"},
+		},
 		{
 			name:         "uv.toml settings are read as tool.uv",
 			file:         "uv.toml",

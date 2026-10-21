@@ -39,6 +39,7 @@ type toml struct {
 	kind    int // how the strings of the value being read are used
 	open    int // brackets and braces of that value still open
 	braces  int
+	multi   byte   // quote of the multi-line string that is open at the end of the line
 	key     string // inline table key before the next string
 	word    string // last bare word, the key if "=" follows
 	found   []protocol.Finding
@@ -57,6 +58,16 @@ func readTOML(ctx context.Context, f analyze.File, prefix string) ([]protocol.Fi
 }
 
 func (t *toml) line(line string, off int) {
+	if t.multi != 0 {
+		// inside a multi-line string: brackets and tables there are text
+		end := strings.Index(line, strings.Repeat(string(t.multi), 3))
+		if end < 0 {
+			return
+		}
+		t.multi = 0
+		t.value(line[end+3:], off)
+		return
+	}
 	if t.open > 0 {
 		t.value(line, off)
 		return
@@ -73,7 +84,7 @@ func (t *toml) line(line string, off int) {
 		if !ok {
 			return
 		}
-		t.kind = valueKindOf(t.section, key)
+		t.kind = valueKindOf(strings.TrimPrefix(t.section+"."+key, "."))
 		t.open, t.braces, t.key, t.word = 0, 0, "", ""
 		t.value(rest, off)
 	}
@@ -98,36 +109,51 @@ func cutKey(s string) (key, value string, ok bool) {
 	return "", "", false
 }
 
-// valueKindOf says how to read the value of key in section.
-func valueKindOf(section, key string) int {
+// valueKindOf says how to read the value at a full path: the section and the
+// dotted key together, so "[tool]" with "uv.sources.x = ..." and "[tool.uv.sources]"
+// with "x = ..." are the same place.
+func valueKindOf(p string) int {
 	switch {
-	case section == "project" && key == "dependencies", section == "project.optional-dependencies",
-		section == "dependency-groups", section == "build-system" && key == "requires":
+	case p == "project.dependencies", p == "build-system.requires", p == "project.optional-dependencies", p == "dependency-groups",
+		strings.HasPrefix(p, "project.optional-dependencies."), strings.HasPrefix(p, "dependency-groups."):
 		return valueRequirement
-	case (section == "tool.uv" || section == "tool.uv.pip") && (key == "index-url" || key == "extra-index-url"):
+	case p == "tool.uv.index-url", p == "tool.uv.extra-index-url", p == "tool.uv.pip.index-url", p == "tool.uv.pip.extra-index-url",
+		p == "tool.uv.index.url", p == "tool.poetry.source.url":
 		return valueIndex
-	case (section == "tool.uv" || section == "tool.uv.pip") && key == "find-links":
+	case p == "tool.uv.find-links", p == "tool.uv.pip.find-links":
 		return valueFindLinks
-	case section == "tool.uv" && key == "index":
+	case p == "tool.uv.index":
 		return valueIndexTable
-	case (section == "tool.uv.index" || section == "tool.poetry.source") && key == "url":
-		return valueIndex
-	case isSources(section):
-		if strings.HasSuffix(key, ".git") || strings.HasSuffix(key, ".url") {
+	}
+	if rest, ok := sourcesRest(p); ok {
+		if strings.HasSuffix(rest, ".git") || strings.HasSuffix(rest, ".url") {
 			return valueSourceString
 		}
 		return valueSources
-	case isSources(section[:max(0, strings.LastIndex(section, "."))]) && (key == "git" || key == "url"):
-		return valueSourceString
 	}
 	return valueNone
 }
 
-// isSources reports whether section holds one entry per dependency: the uv
-// sources and the Poetry dependency tables.
-func isSources(section string) bool {
-	return section == "tool.uv.sources" || section == "tool.poetry.dependencies" || section == "tool.poetry.dev-dependencies" ||
-		strings.HasPrefix(section, "tool.poetry.group.") && strings.HasSuffix(section, ".dependencies")
+// sourcesRest reports whether p is in a table with one entry per dependency, the
+// uv sources or a Poetry dependency table, and returns the path below it.
+func sourcesRest(p string) (string, bool) {
+	for _, table := range []string{"tool.uv.sources", "tool.poetry.dependencies", "tool.poetry.dev-dependencies"} {
+		if p == table {
+			return "", true
+		}
+		if rest, ok := strings.CutPrefix(p, table+"."); ok {
+			return rest, true
+		}
+	}
+	group, ok := strings.CutPrefix(p, "tool.poetry.group.")
+	if !ok {
+		return "", false
+	}
+	_, below, _ := strings.Cut(group, ".") // the group name
+	if below == "dependencies" {
+		return "", true
+	}
+	return strings.CutPrefix(below, "dependencies.")
 }
 
 // value reads the strings of text, which is the rest of a key line or a
@@ -141,7 +167,7 @@ func (t *toml) value(text string, off int) {
 	for _, l := range t.scan(text) {
 		switch {
 		case l.val == "":
-		case t.kind == valueRequirement && !l.inTable:
+		case t.kind == valueRequirement && l.key != "include-group":
 			t.found = append(t.found, requirement(l.val, ev)...)
 		case t.kind == valueIndex && !l.inTable, t.kind == valueIndexTable && l.inTable && l.key == "url":
 			if foreignHost(l.val, pypiHosts) || !strings.Contains(l.val, "://") {
@@ -167,6 +193,17 @@ func (t *toml) scan(text string) []lit {
 		case '#':
 			return out
 		case '"', '\'':
+			if triple := strings.Repeat(string(c), 3); strings.HasPrefix(text[i:], triple) {
+				end := strings.Index(text[i+3:], triple)
+				if end < 0 {
+					t.multi = c
+					return out
+				}
+				out = append(out, lit{val: text[i+3 : i+3+end], key: t.key, inTable: t.braces > 0})
+				t.key = ""
+				i += 3 + end + 2
+				continue
+			}
 			end := i + 1
 			for end < len(text) && text[end] != c {
 				if c == '"' && text[end] == '\\' {

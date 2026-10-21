@@ -310,9 +310,9 @@ func TestCorpus(t *testing.T) {
 			wantCode: 0, wantQuiet: true,
 		},
 		{
-			name: "benign binding.gyp: no command expansions (built, twin of p2-gyp-expansion)",
+			name: "benign binding.gyp: the node-addon-api include expansion only (built, twin of p2-gyp-expansion)",
 			target: filesRepo(map[string]string{
-				"binding.gyp": "{\n  'targets': [{\n    'target_name': 'addon',\n    'sources': ['addon.cc']\n  }]\n}\n",
+				"binding.gyp": "{\n  'targets': [{\n    'target_name': 'addon',\n    'sources': ['addon.cc'],\n    'include_dirs': [\"<!@(node -p \\\"require('node-addon-api').include\\\")\"]\n  }]\n}\n",
 			}),
 			wantCode: 0, wantQuiet: true,
 		},
