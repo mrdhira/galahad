@@ -25,6 +25,9 @@ var globalMemoryStatusEx = windows.NewLazySystemDLL("kernel32.dll").NewProc("Glo
 
 // physicalMemory returns the memory of the machine in bytes, from GlobalMemoryStatusEx.
 func physicalMemory() (uint64, bool) {
+	if globalMemoryStatusEx.Find() != nil {
+		return 0, false
+	}
 	m := memoryStatusEx{Length: uint32(unsafe.Sizeof(memoryStatusEx{}))}
 	// #nosec G103 -- the API fills a structure that this process owns
 	r, _, _ := globalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&m)))

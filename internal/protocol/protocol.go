@@ -7,10 +7,7 @@
 // and reasons are bounded in runes.
 package protocol
 
-import (
-	"strings"
-	"time"
-)
+import "time"
 
 // Target kinds.
 const (
@@ -26,6 +23,7 @@ const (
 	SkipUnsupported = "unsupported"
 	SkipEncrypted   = "encrypted"
 	SkipParseError  = "parse_error"
+	SkipUnreadable  = "unreadable" // a container member that could not be extracted
 	SkipTimeout     = "timeout"
 	SkipPanic       = "panic"
 )
@@ -136,24 +134,24 @@ type Skip struct {
 
 // Unread reports a skip that leaves a file or member unread: too large, over a
 // budget, too deep, encrypted, cut short by a timeout or a panic, or a container
-// member that cannot be read. Such a member counts as seen but not analyzed.
+// member that could not be extracted. Such a member counts as seen but not
+// analyzed.
 func (s Skip) Unread() bool {
 	return s.Reason == SkipTooLarge || s.HidesContent()
 }
 
 // HidesContent reports a skip behind which a payload could be hidden on purpose:
 // a container that is too deep, encrypted or over its member budget, input that
-// makes an analyzer run out of time or panic, or a container member (its path holds "!/") that is unsupported or fails to parse,
-// such as a zip member with an unsupported compression method. A file that is
-// only too large, such as a data file or a media file, is not one, and neither is
-// a top-level file that is unsupported or fails to parse: benign inputs have
-// those, so they lower confidence but never decide the verdict.
+// makes an analyzer run out of time or panic, or a member the container could
+// not extract, such as a zip member with an unsupported compression method. A
+// file that is only too large, such as a data file or a media file, is not one,
+// and neither is a file that is unsupported or fails to parse, even inside a
+// container: benign inputs have those, so they lower confidence but never decide
+// the verdict.
 func (s Skip) HidesContent() bool {
 	switch s.Reason {
-	case SkipBudget, SkipDepth, SkipEncrypted, SkipTimeout, SkipPanic:
+	case SkipBudget, SkipDepth, SkipEncrypted, SkipTimeout, SkipPanic, SkipUnreadable:
 		return true
-	case SkipParseError, SkipUnsupported:
-		return strings.Contains(s.Path, "!/")
 	}
 	return false
 }

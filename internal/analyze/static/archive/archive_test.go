@@ -398,7 +398,7 @@ func TestAnalyze(t *testing.T) {
 		{name: "local header that is not where the directory says is reported", file: "in.zip",
 			data:         badLocal,
 			wantChildren: []string{"a.txt"},
-			wantFindings: []string{"GAL-ARCHIVE-007 in.zip"}, wantSkips: []string{"in.zip!/b.txt parse_error"}},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip"}, wantSkips: []string{"in.zip!/b.txt unreadable"}},
 		{name: "many entries sharing one local header with decoy signatures", file: "in.zip",
 			data: rawZip(archive.MaxEntries, decoys, false), wantChildren: crowded},
 		{name: "zip64 central directory records are followed", file: "in.zip",

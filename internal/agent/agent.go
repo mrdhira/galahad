@@ -185,8 +185,8 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 		return ExitUsage
 	}
 
-	ram, _ := physicalMemory() // 0 when unknown
-	_, gomemlimit := os.LookupEnv("GOMEMLIMIT")
+	ram, _ := physicalMemory()                  // 0 when unknown
+	gomemlimit := os.Getenv("GOMEMLIMIT") != "" // an empty value counts as unset
 	if limit, ok := MemoryLimit(ram, gomemlimit, memoryLimit); ok {
 		env.SetMemoryLimit(limit)
 	}

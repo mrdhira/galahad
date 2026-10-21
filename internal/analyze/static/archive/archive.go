@@ -240,7 +240,7 @@ func (u *unpack) read(r io.Reader, name string) error {
 		u.bomb(name)
 		return err
 	case err != nil:
-		u.skip(u.member(name), protocol.SkipParseError)
+		u.skip(u.member(name), protocol.SkipUnreadable)
 		return err
 	case len(data) > analyze.MaxFileSize:
 		u.skip(u.member(name), protocol.SkipTooLarge)
@@ -526,7 +526,7 @@ func (u *unpack) members(zr *zip.Reader) error {
 		}
 		rc, err := zf.Open()
 		if err != nil {
-			u.skip(u.member(zf.Name), protocol.SkipParseError)
+			u.skip(u.member(zf.Name), protocol.SkipUnreadable)
 			continue
 		}
 		before := len(u.out.Children)

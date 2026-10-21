@@ -253,6 +253,20 @@ func TestRun(t *testing.T) {
 			wantTruncated:  true,
 		},
 		{
+			name: "the walk stops at maxFilesSeen with a budget skip",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a/.keep", nil)
+				pad(t, dir, "a", analyze.MaxFiles*10)
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{nothing},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  analyze.MaxFiles,
+			wantSeen:       analyze.MaxFiles * 10, wantAnalyzed: analyze.MaxFiles,
+			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a/f%06d", analyze.MaxFiles*10-1), Reason: protocol.SkipBudget}},
+			wantTruncated: true,
+		},
+		{
 			name: "symlinks are not followed",
 			setup: func(t *testing.T, dir string) string {
 				target := filepath.Join(dir, "target")
@@ -405,13 +419,13 @@ func TestRun(t *testing.T) {
 				return dir
 			},
 			analyzers: []analyze.Analyzer{fake{name: "skips", fn: func(context.Context, analyze.File) (analyze.Output, error) {
-				return analyze.Output{Skips: []protocol.Skip{{Path: "a.zip!/m", Reason: protocol.SkipUnsupported}}}, nil
+				return analyze.Output{Skips: []protocol.Skip{{Path: "a.zip!/m", Reason: protocol.SkipUnreadable}}}, nil
 			}}},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  1,
 			wantFiles:      []string{"a.zip"},
 			wantSeen:       2, wantAnalyzed: 1,
-			wantSkips: []protocol.Skip{{Path: "a.zip!/m", Reason: protocol.SkipUnsupported}},
+			wantSkips: []protocol.Skip{{Path: "a.zip!/m", Reason: protocol.SkipUnreadable}},
 		},
 		{
 			name: "a member skipped twice or a skip of the file itself is not another file",
@@ -708,7 +722,7 @@ func TestRun(t *testing.T) {
 			wantTruncated: true,
 		},
 		{
-			name: "a file the analyzers ask for over MaxFileSize past MaxFiles is skipped as too_large",
+			name: "a file the analyzers ask for over MaxFileSize past MaxFiles is a budget skip",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
 				pad(t, dir, "a", analyze.MaxFiles-1)
@@ -722,21 +736,65 @@ func TestRun(t *testing.T) {
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  analyze.MaxFiles + 1,
 			wantSeen:       analyze.MaxFiles + 1, wantAnalyzed: analyze.MaxFiles,
-			wantSkips:     []protocol.Skip{{Path: "z/big.cfg", Reason: protocol.SkipTooLarge}},
+			wantSkips:     []protocol.Skip{{Path: "z/big.cfg", Reason: protocol.SkipBudget}},
 			wantTruncated: true,
 		},
 		{
-			name: "the walk stops at maxFilesSeen with a budget skip",
+			name: "a file the analyzers ask for over what is left of the extra allowance is a budget skip",
 			setup: func(t *testing.T, dir string) string {
 				write(t, dir, "a/.keep", nil)
-				pad(t, dir, "a", analyze.MaxFiles*10)
+				pad(t, dir, "a", analyze.MaxFiles-1)
+				for i := range 4 {
+					p := write(t, dir, fmt.Sprintf("z/f%d.cfg", i), nil)
+					if err := os.Truncate(p, 20<<20); err != nil {
+						t.Fatal(err)
+					}
+				}
 				return dir
 			},
-			analyzers:      []analyze.Analyzer{nothing},
+			analyzers:      []analyze.Analyzer{prioritized{}},
 			wantTargetKind: protocol.TargetDir,
-			wantFileCount:  analyze.MaxFiles,
-			wantSeen:       analyze.MaxFiles * 10, wantAnalyzed: analyze.MaxFiles,
-			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a/f%06d", analyze.MaxFiles*10-1), Reason: protocol.SkipBudget}},
+			wantFileCount:  analyze.MaxFiles + 4,
+			wantSeen:       analyze.MaxFiles + 4, wantAnalyzed: analyze.MaxFiles + 3,
+			wantSkips:     []protocol.Skip{{Path: "z/f3.cfg", Reason: protocol.SkipBudget}},
+			wantRules:     []string{"GAL-T-006"},
+			wantTruncated: true,
+		},
+		{
+			name: "a file the analyzers ask for over MaxFileSize is a budget skip even within the caps",
+			setup: func(t *testing.T, dir string) string {
+				p := write(t, dir, "big.cfg", nil)
+				if err := os.Truncate(p, analyze.MaxFileSize+1); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{prioritized{}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantFiles:      []string{"big.cfg"},
+			wantSeen:       1,
+			wantSkips:      []protocol.Skip{{Path: "big.cfg", Reason: protocol.SkipBudget}},
+		},
+		{
+			name: "members past the file cap are dropped with one budget skip",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.zip", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "kids", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
+				var out analyze.Output
+				if f.Name == "a.zip" {
+					for i := range analyze.MaxFiles + 5 {
+						out.Children = append(out.Children, analyze.File{Name: fmt.Sprintf("m%05d", i), Data: []byte("x")})
+					}
+				}
+				return out, nil
+			}}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantSeen:       analyze.MaxFiles + 6, wantAnalyzed: analyze.MaxFiles,
+			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a.zip!/m%05d", analyze.MaxFiles-1), Reason: protocol.SkipBudget}},
 			wantTruncated: true,
 		},
 	}

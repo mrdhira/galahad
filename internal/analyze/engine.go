@@ -97,6 +97,7 @@ type job struct {
 	extraFiles int   // files read past the file cap or byte budget
 	extraBytes int64 // their size
 	extraFull  bool  // an extra file was refused for want of allowance
+	memberCut  bool  // a member past the file cap was dropped, and a skip says so
 }
 
 func newJob(analyzers []Analyzer) *job {
@@ -201,8 +202,16 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 		return
 	}
 	limit := MaxTotalBytes - j.bytes
+	readMax := int64(MaxFileSize)
+	if late {
+		if j.extraFiles >= MaxExtraFiles || j.extraBytes >= MaxExtraBytes {
+			j.refuse(cp)
+			return
+		}
+		readMax = min(readMax, MaxExtraBytes-j.extraBytes)
+	}
 	h := sha256.New()
-	data, err := io.ReadAll(io.LimitReader(r, MaxFileSize+1))
+	data, err := io.ReadAll(io.LimitReader(r, readMax+1))
 	if err != nil {
 		j.skip(cp, protocol.SkipParseError)
 		return
@@ -217,13 +226,24 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 			return
 		}
 	}
+	if late && size > readMax {
+		// Over MaxFileSize or over what is left of the extra allowance. The bytes
+		// read count against the allowance, so reading them stays bounded.
+		j.extraFiles++
+		j.extraBytes += size
+		j.skip(cp, protocol.SkipBudget)
+		return
+	}
 	if late || size > limit {
 		j.res.Coverage.Truncated = true
-		if size > MaxFileSize || !j.priority(cp) {
+		switch {
+		case !j.priority(cp):
 			j.skip(cp, protocol.SkipTooLarge)
-			return
+		case size > MaxFileSize:
+			j.skip(cp, protocol.SkipBudget) // an auto-run file that no analyzer can read hides content
+		default:
+			j.extra(ctx, cp, name, data, h.Sum(nil))
 		}
-		j.extra(ctx, cp, name, data, h.Sum(nil))
 		return
 	}
 	j.bytes += size
@@ -246,14 +266,10 @@ func (j *job) priority(cp string) bool {
 
 // extra analyzes a small file that an analyzer must see although the file cap or
 // the byte budget is spent. It draws on its own allowance and does not charge the
-// job budget. Once the allowance is gone, further files are unread, which hides
-// content, so one budget skip says so.
+// job budget.
 func (j *job) extra(ctx context.Context, cp, name string, data, sum []byte) {
 	if j.extraFiles >= MaxExtraFiles || j.extraBytes+int64(len(data)) > MaxExtraBytes {
-		if !j.extraFull {
-			j.extraFull = true
-			j.skip(cp, protocol.SkipBudget)
-		}
+		j.refuse(cp)
 		return
 	}
 	j.extraFiles++
@@ -262,6 +278,15 @@ func (j *job) extra(ctx context.Context, cp, name string, data, sum []byte) {
 		j.dispatch(ctx, f)
 	}
 	j.drain(ctx)
+}
+
+// refuse records that the extra allowance is gone. Further files are unread,
+// which hides content, so one budget skip says so.
+func (j *job) refuse(cp string) {
+	if !j.extraFull {
+		j.extraFull = true
+		j.skip(cp, protocol.SkipBudget)
+	}
 }
 
 // admit counts one more file seen. ok says the file may be analyzed; more says
@@ -292,7 +317,11 @@ func (j *job) accept(cp, name string, depth int, data []byte, size int64, sum []
 	info := protocol.FileInfo{Path: cp, Size: size, Kind: string(kind), SHA256: hex.EncodeToString(sum)}
 	if large {
 		j.res.Files = append(j.res.Files, info)
-		j.skip(cp, protocol.SkipTooLarge)
+		if j.priority(cp) {
+			j.skip(cp, protocol.SkipBudget) // an auto-run file that no analyzer can read hides content
+		} else {
+			j.skip(cp, protocol.SkipTooLarge)
+		}
 		return File{}, false
 	}
 	info.Entropy = ident.Entropy(data)
@@ -439,8 +468,10 @@ func (j *job) drain(ctx context.Context) {
 		ok, more := j.admit()
 		switch {
 		case !more:
+			j.dropMember(c.Path)
 			j.queue = nil
 		case !ok:
+			j.dropMember(c.Path)
 		case c.Depth > MaxNesting:
 			j.skip(c.Path, protocol.SkipDepth)
 		default:
@@ -449,6 +480,15 @@ func (j *job) drain(ctx context.Context) {
 				j.dispatch(ctx, f)
 			}
 		}
+	}
+}
+
+// dropMember records that members past the file cap were not analyzed. They could
+// hold a payload, so one budget skip, at the first of them, says so.
+func (j *job) dropMember(path string) {
+	if !j.memberCut {
+		j.memberCut = true
+		j.skip(path, protocol.SkipBudget)
 	}
 }
 

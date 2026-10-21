@@ -440,7 +440,7 @@ func TestAnalyze(t *testing.T) {
 			name: "part that cannot be opened is skipped",
 			kind: ident.OOXML, path: word,
 			data:      func(t *testing.T) []byte { return zipUnsupported(t, "a.rels") },
-			wantSkips: []string{word + "!/a.rels:parse_error"},
+			wantSkips: []string{word + "!/a.rels:unreadable"},
 		},
 		{
 			name: "parts beyond the package budget stop the scan",

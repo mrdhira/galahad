@@ -111,14 +111,14 @@ func (s *scan) read(zf *zip.File, member string, limit int64, budget *int64) (da
 	}
 	rc, err := zf.Open()
 	if err != nil {
-		s.skip(member, protocol.SkipParseError)
+		s.skip(member, protocol.SkipUnreadable)
 		return nil, false
 	}
 	defer func() { _ = rc.Close() }() // in-memory reader
 	data, err = io.ReadAll(io.LimitReader(rc, limit+1))
 	switch {
 	case err != nil:
-		s.skip(member, protocol.SkipParseError)
+		s.skip(member, protocol.SkipUnreadable)
 		return nil, false
 	case int64(len(data)) > limit:
 		s.skip(member, protocol.SkipTooLarge)

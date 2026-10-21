@@ -228,9 +228,10 @@ func TestSkipUnreadAndHidesContent(t *testing.T) {
 		{name: "depth", path: "a", reason: protocol.SkipDepth, wantUnread: true, wantHides: true},
 		{name: "encrypted", path: "a", reason: protocol.SkipEncrypted, wantUnread: true, wantHides: true},
 		{name: "unsupported top-level file", path: "a", reason: protocol.SkipUnsupported},
-		{name: "unsupported container member", path: "a.zip!/b", reason: protocol.SkipUnsupported, wantUnread: true, wantHides: true},
+		{name: "unsupported container member", path: "a.zip!/b", reason: protocol.SkipUnsupported},
 		{name: "parse error in a top-level file", path: "a", reason: protocol.SkipParseError},
-		{name: "parse error in a container member", path: "a.zip!/b", reason: protocol.SkipParseError, wantUnread: true, wantHides: true},
+		{name: "parse error in a container member", path: "a.zip!/b", reason: protocol.SkipParseError},
+		{name: "member that could not be extracted", path: "a.zip!/b", reason: protocol.SkipUnreadable, wantUnread: true, wantHides: true},
 		{name: "timeout", path: "a", reason: protocol.SkipTimeout, wantUnread: true, wantHides: true},
 		{name: "panic", path: "a", reason: protocol.SkipPanic, wantUnread: true, wantHides: true},
 	}

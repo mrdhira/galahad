@@ -354,7 +354,7 @@ func TestRunAnalyzeMemoryLimit(t *testing.T) {
 		name string
 		// inputs
 		flags    []string
-		gomemlim string // GOMEMLIMIT; empty means unset
+		gomemlim string // GOMEMLIMIT; empty means unset, "set-empty" means set to an empty string
 		// expectations
 		wantCode  int
 		wantCalls int   // times the memory limit is set
@@ -365,15 +365,20 @@ func TestRunAnalyzeMemoryLimit(t *testing.T) {
 		{name: "flag sets the limit", flags: []string{"--memory-limit", "512MiB"}, wantCode: agent.ExitClean, wantCalls: 1, wantLimit: 512 << 20},
 		{name: "flag overrides GOMEMLIMIT", flags: []string{"--memory-limit", "64KiB"}, gomemlim: "1GiB", wantCode: agent.ExitClean, wantCalls: 1, wantLimit: 64 << 10},
 		{name: "GOMEMLIMIT is left alone", gomemlim: "1GiB", wantCode: agent.ExitClean, wantCalls: 0},
+		{name: "empty GOMEMLIMIT counts as unset", gomemlim: "set-empty", wantCode: agent.ExitClean, wantCalls: 1},
 		{name: "bad flag value is a usage error", flags: []string{"--memory-limit", "lots"}, wantCode: agent.ExitUsage, wantCalls: 0, wantErr: "memory-limit"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("GOMEMLIMIT", "") // restored when the test ends
-			if tt.gomemlim != "" {
+			switch tt.gomemlim {
+			case "":
+				if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
+					t.Fatal(err)
+				}
+			case "set-empty": // set, but to an empty string
+			default:
 				t.Setenv("GOMEMLIMIT", tt.gomemlim)
-			} else if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
-				t.Fatal(err)
 			}
 			tmp := t.TempDir()
 			target := filepath.Join(tmp, "a.txt")
