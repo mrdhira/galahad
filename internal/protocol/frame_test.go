@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -141,6 +142,80 @@ func TestReadFrameRejects(t *testing.T) {
 				}
 			case err == nil || !strings.Contains(err.Error(), tt.wantErr):
 				t.Errorf("ReadFrame = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestReadFrameOf(t *testing.T) {
+	// A refused header claims 64 MiB and carries nothing else.
+	huge := func(typ protocol.FrameType) []byte {
+		return []byte{byte(typ), 0x04, 0, 0, 0}
+	}
+	tests := []struct {
+		name string
+		// inputs
+		stream  []byte
+		allowed []protocol.FrameType
+		// expectations
+		wantType    protocol.FrameType
+		wantPayload string
+		wantErr     string
+		wantIs      error
+	}{
+		{name: "allowed type", stream: []byte{byte(protocol.FrameConnect), 0, 0, 0, 2, '{', '}'}, allowed: []protocol.FrameType{protocol.FrameConnect}, wantType: protocol.FrameConnect, wantPayload: "{}"},
+		{name: "one of several allowed", stream: []byte{byte(protocol.FrameEnd), 0, 0, 0, 0}, allowed: []protocol.FrameType{protocol.FrameData, protocol.FrameEnd}, wantType: protocol.FrameEnd},
+		{name: "empty stream", stream: nil, allowed: []protocol.FrameType{protocol.FrameConnect}, wantIs: io.EOF},
+		{name: "unknown type", stream: []byte{99, 0, 0, 0, 1}, allowed: []protocol.FrameType{protocol.FrameConnect}, wantErr: "unknown frame type 99"},
+		{name: "type not allowed", stream: huge(protocol.FrameResult), allowed: []protocol.FrameType{protocol.FrameConnect}, wantErr: "unexpected result frame"},
+		{name: "nothing allowed", stream: []byte{byte(protocol.FrameEnd), 0, 0, 0, 0}, wantErr: "unexpected end frame"},
+		{name: "allowed type over its limit", stream: huge(protocol.FrameConnect), allowed: []protocol.FrameType{protocol.FrameConnect}, wantErr: "max 1024"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			typ, payload, err := protocol.ReadFrameOf(bytes.NewReader(tt.stream), tt.allowed...)
+			switch {
+			case tt.wantIs != nil:
+				if !errors.Is(err, tt.wantIs) {
+					t.Fatalf("ReadFrameOf = %v, want %v", err, tt.wantIs)
+				}
+			case tt.wantErr != "":
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ReadFrameOf = %v, want error containing %q", err, tt.wantErr)
+				}
+			case err != nil:
+				t.Fatalf("ReadFrameOf: %v", err)
+			case typ != tt.wantType || string(payload) != tt.wantPayload:
+				t.Errorf("ReadFrameOf = %v, %q; want %v, %q", typ, payload, tt.wantType, tt.wantPayload)
+			}
+		})
+	}
+}
+
+func TestReadFrameOfAllocation(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		typ protocol.FrameType
+		// expectations
+		wantMaxBytes uint64
+	}{
+		{name: "refused result header of 64 MiB", typ: protocol.FrameResult, wantMaxBytes: 1 << 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := []byte{byte(tt.typ), 0x04, 0, 0, 0}
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			for range 100 {
+				if _, _, err := protocol.ReadFrameOf(bytes.NewReader(stream), protocol.FrameConnect); err == nil {
+					t.Fatal("ReadFrameOf accepted a refused type")
+				}
+			}
+			runtime.ReadMemStats(&after)
+			// Allocating the payload 100 times would be 6.4 GB.
+			if got := after.TotalAlloc - before.TotalAlloc; got > tt.wantMaxBytes {
+				t.Errorf("allocated %d bytes for 100 refused frames, want at most %d", got, tt.wantMaxBytes)
 			}
 		})
 	}

@@ -70,6 +70,16 @@ if printf '%s\n' "$host_deps" | grep -F -q "$main_module/internal/sandbox/fake";
   echo "a build without tags must not contain internal/sandbox/fake" >&2
   exit 1
 fi
+# The proxy test hooks (GALAHAD_TEST_RESOLVE, GALAHAD_TEST_SINKHOLE) exist only in galahadtest builds.
+# Check the files the package compiles: a missing file in the tagged list would make this vacuous.
+if ! go list -tags galahadtest -f '{{join .GoFiles " "}}' ./internal/proxy | grep -F -q testhooks_fake.go; then
+  echo "internal/proxy/testhooks_fake.go is not part of a galahadtest build" >&2
+  exit 1
+fi
+if go list -f '{{join .GoFiles " "}}' ./internal/proxy | grep -F -q testhooks_fake.go; then
+  echo "a build without tags must not contain the proxy test hooks" >&2
+  exit 1
+fi
 
 step vuln
 if [ "${SKIP_VULN:-}" = "1" ]; then
