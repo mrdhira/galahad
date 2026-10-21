@@ -209,14 +209,23 @@ func TestAutoexec(t *testing.T) {
 			wantSeverity: map[string]string{"GAL-AUTOEXEC-004": "low"},
 		},
 		{
-			name: "benign twin: postinstall runs husky and a repository script without findings",
+			name: "benign twin: postinstall runs husky, which the package declares",
 			setup: filesRepo(map[string]string{
-				"package.json":     "{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"preinstall\": \"npx only-allow pnpm\",\n    \"postinstall\": \"husky install && node scripts/setup.js\"\n  }\n}\n",
-				"scripts/setup.js": "'use strict';\nconsole.log('ready');\n",
+				"package.json": "{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"postinstall\": \"husky\"\n  },\n  \"devDependencies\": { \"husky\": \"^9.0.0\" }\n}\n",
 			}),
 			wantCode:     0,
-			wantAt:       map[string]string{"GAL-AUTOEXEC-005": "package.json:5"},
+			wantAt:       map[string]string{"GAL-AUTOEXEC-005": "package.json:4"},
 			wantSeverity: map[string]string{"GAL-AUTOEXEC-005": "low"},
+		},
+		{
+			name: "postinstall runs a husky that the repository commits under node_modules/.bin",
+			setup: filesRepo(map[string]string{
+				"package.json":            "{\n  \"scripts\": {\n    \"postinstall\": \"husky\"\n  },\n  \"devDependencies\": { \"husky\": \"^9.0.0\" }\n}\n",
+				"node_modules/.bin/husky": "#!/bin/sh\necho harmless\n",
+			}),
+			wantCode:     10,
+			wantAt:       map[string]string{"GAL-AUTOEXEC-005": "package.json:3"},
+			wantSeverity: map[string]string{"GAL-AUTOEXEC-005": "medium"},
 		},
 		{
 			name: "postinstall runs a repository script that sends a secret file away",

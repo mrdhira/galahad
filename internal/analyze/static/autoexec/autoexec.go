@@ -650,7 +650,7 @@ func (s *scan) packageJSON(root *node) {
 		dir = ""
 	}
 	g := newGrader(s)
-	g.preload(dir, scripts)
+	g.dir, g.own = dir, root
 	for _, group := range []struct {
 		rule  protocol.Rule
 		names []string
@@ -658,7 +658,7 @@ func (s *scan) packageJSON(root *node) {
 	}{{ruleNpm, npmInstall, true}, {ruleHook, npmPrepare, false}} {
 		for _, name := range group.names {
 			if v := scripts.get(name); v != nil && v.kind == 's' {
-				s.addGraded(group.rule, v.start, group.grade && g.hook(dir, name, 0))
+				s.addGraded(group.rule, v.start, group.grade && g.benign(v.str, dir, true))
 				s.riskAt(v.str, v.start)
 			}
 		}

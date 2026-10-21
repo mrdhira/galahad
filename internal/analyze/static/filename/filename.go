@@ -33,11 +33,12 @@ const maxLNKScan = 64 << 10
 const minString = 4
 
 var (
-	// decoyExts are the document, image, media and archive types that people open by double-click. Data
-	// and markup types (json, xml, html, csv, yaml, md) and source types (ts, map, min) are not decoys:
-	// source trees are full of names such as express.json.js and index.d.ts.
-	decoyExts = setOf("txt", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "odt", "ods",
-		"jpg", "jpeg", "png", "gif", "bmp", "ico", "mp3", "mp4", "mov", "wav", "zip", "rar")
+	// decoyExts are the document, image, media, data and archive types that people open by double-click.
+	// dataExts are the data and markup types among them: source trees are full of names such as
+	// express.json.js, so they are decoys for every executable type except js.
+	decoyExts = setOf("txt", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "csv", "odt", "ods",
+		"jpg", "jpeg", "png", "gif", "bmp", "ico", "mp3", "mp4", "mov", "wav", "zip", "rar", "json", "xml", "html", "htm")
+	dataExts     = setOf("csv", "json", "xml", "html", "htm")
 	execExts     = setOf("exe", "scr", "com", "pif", "bat", "cmd", "lnk", "js", "jse", "vbs", "vbe", "wsf", "hta", "ps1", "msi", "jar")
 	sourceDirs   = setOf("test", "tests", "__tests__", "fixtures", "playground", "examples", "e2e")
 	shortcutExts = setOf("lnk", "url", "scf", "hta", "wsf", "vbe", "jse")
@@ -108,11 +109,12 @@ func lastExt(name string) string {
 func isDoubleExt(name string) bool {
 	name = strings.TrimRightFunc(name, isTrailing)
 	i := strings.LastIndexByte(name, '.')
-	if i < 0 || !execExts[strings.ToLower(name[i+1:])] {
+	exec := strings.ToLower(name[i+1:])
+	if i < 0 || !execExts[exec] {
 		return false
 	}
-	stem := strings.TrimRightFunc(name[:i], isPadding)
-	return decoyExts[lastExt(stem)]
+	decoy := lastExt(strings.TrimRightFunc(name[:i], isPadding))
+	return decoyExts[decoy] && !(exec == "js" && dataExts[decoy])
 }
 
 // isSourceFixture reports a plain JavaScript file on disk below a test or example
