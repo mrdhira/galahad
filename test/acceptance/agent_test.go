@@ -50,17 +50,19 @@ type report struct {
 }
 
 // analyze runs "galahad-agent analyze" on target, expects exit code wantCode and returns the parsed report.
-func analyze(t *testing.T, target string, wantCode int) report {
+// Extra flags go before the path.
+func analyze(t *testing.T, target string, wantCode int, flags ...string) report {
 	t.Helper()
-	rep, _ := analyzeOut(t, target, wantCode)
+	rep, _ := analyzeOut(t, target, wantCode, flags...)
 	return rep
 }
 
 // analyzeOut is analyze that also returns the output directory, for tests that read summary.md or report.html.
-func analyzeOut(t *testing.T, target string, wantCode int) (report, string) {
+func analyzeOut(t *testing.T, target string, wantCode int, flags ...string) (report, string) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
-	stdout, stderr, code := runAgent(t, "analyze", "--unsafe-host", "-o", out, target)
+	args := append([]string{"analyze", "--unsafe-host", "-o", out}, flags...)
+	stdout, stderr, code := runAgent(t, append(args, target)...)
 	if code != wantCode {
 		t.Fatalf("analyze exit = %d, want %d\nstdout: %s\nstderr: %s", code, wantCode, stdout, stderr)
 	}

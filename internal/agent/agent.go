@@ -146,6 +146,9 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 	outDir := fs.String("o", "", "output directory (default: a new temporary directory)")
 	timeout := fs.Duration("timeout", analyze.DefaultJobTimeout, "time limit for the whole job")
 	unsafeHost := fs.Bool("unsafe-host", false, "analyze on this host even though it is not a VM; you accept the risk")
+	// Hidden from the usage text: the acceptance tests divide every job limit by it, so a
+	// few small files cross the limits instead of tens of thousands.
+	limitDivisor := fs.Int("limit-divisor", 1, "")
 	var memoryLimit int64
 	fs.Func("memory-limit", "soft memory limit in bytes, with an optional KiB, MiB or GiB suffix", func(s string) (err error) {
 		memoryLimit, err = ParseSize(s)
@@ -161,6 +164,10 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintf(stderr, "galahad-agent analyze: want exactly one path, got %d arguments\n\n%s", fs.NArg(), usage)
+		return ExitUsage
+	}
+	if *limitDivisor < 1 {
+		fmt.Fprintf(stderr, "galahad-agent analyze: -limit-divisor must be at least 1, got %d\n", *limitDivisor)
 		return ExitUsage
 	}
 	target := fs.Arg(0)
@@ -193,7 +200,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	res, err := analyze.Run(ctx, target, static.All())
+	res, err := analyze.Run(ctx, target, static.All(), analyze.WithLimits(dividedLimits(*limitDivisor)))
 	if err != nil {
 		fmt.Fprintf(stderr, "galahad-agent analyze: %v\n", err)
 		return ExitError
@@ -220,6 +227,19 @@ func runAnalyze(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	report.Terminal(stdout, &res, paths, useColor(stdout))
 	return res.Verdict.ExitCode()
+}
+
+// dividedLimits returns the default job limits, each divided by d.
+func dividedLimits(d int) analyze.Limits {
+	l := analyze.DefaultLimits()
+	n := int64(d)
+	l.MaxFileSize /= n
+	l.MaxTotalBytes /= n
+	l.MaxFiles /= d
+	l.MaxFilesSeen /= d
+	l.MaxExtraFiles /= d
+	l.MaxExtraBytes /= n
+	return l
 }
 
 // useColor reports whether w is a terminal and NO_COLOR is unset.
