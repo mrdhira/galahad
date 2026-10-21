@@ -12,7 +12,9 @@ import (
 //go:embed report.html.tmpl
 var htmlSource string
 
-var htmlTemplate = template.Must(template.New("report").Parse(htmlSource))
+// A Windows checkout can turn the template's line endings into CRLF. The page, and the copyable IOC
+// list in it, must be the same on every OS, so the template is read with LF.
+var htmlTemplate = template.Must(template.New("report").Parse(strings.ReplaceAll(htmlSource, "\r\n", "\n")))
 
 type htmlData struct {
 	Verdict, VerdictClass string
