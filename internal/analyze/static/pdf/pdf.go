@@ -19,6 +19,7 @@ import (
 	"encoding/ascii85"
 	"io"
 	"strconv"
+	"strings"
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/ident"
@@ -81,15 +82,39 @@ type object struct {
 	buf      []byte // buffer holding the dictionary
 	ds, de   int    // dictionary region in buf
 	content  []byte // raw or decoded stream; nil without a stream
+	rawAt    int    // file offset of content when it is the unfiltered stream; 0 otherwise
 	objStm   bool
 	n, first int      // /N and /First of an object stream
 	members  [][2]int // member regions of an object stream inside content
 	skipScan bool     // image or font data
 }
 
+// evidence is one place a rule fired: the file offset, the span of its line
+// and, for decoded content, the snippet to show instead of the line.
 type evidence struct {
-	off  int
-	snip string
+	off        int
+	start, end int
+	snip       string
+}
+
+// region is a piece of PDF syntax to scan. at is the file offset of buf, or -1
+// when buf is decoded data that is not in the file; hdr is then the offset of
+// the stream object that holds it.
+type region struct {
+	buf []byte
+	at  int
+	hdr int
+}
+
+// where returns the file offset and the snippet override for the token at
+// buf[off]. Tokens in the file point at their own line. Decoded tokens point
+// at the stream header and show the decoded text that follows the token.
+func (r region) where(off int) (int, string) {
+	if r.at >= 0 {
+		return r.at + off, ""
+	}
+	text := string(r.buf[off:min(len(r.buf), off+maxSnippetRaw)])
+	return r.hdr, protocol.Snippet("decoded: " + strings.Join(strings.Fields(text), " "))
 }
 
 type hit struct{ evs []evidence }
@@ -159,45 +184,73 @@ func (s *scanner) run() (analyze.Output, error) {
 
 // scanObject scans the dictionary and the stream content of one object.
 func (s *scanner) scanObject(o *object) error {
-	if err := s.scanRegion(s.tok(o.buf[o.ds:o.de]), o.hdr); err != nil {
+	if err := s.scanRegion(region{buf: o.buf[o.ds:o.de], at: o.ds, hdr: o.hdr}); err != nil {
 		return err
 	}
 	if o.content == nil || o.skipScan {
 		return nil
 	}
+	at := -1
+	if o.rawAt > 0 {
+		at = o.rawAt
+	}
 	if len(o.members) > 0 {
 		for _, m := range o.members {
-			if err := s.scanRegion(s.tok(o.content[m[0]:m[1]]), o.hdr); err != nil {
+			r := region{buf: o.content[m[0]:m[1]], at: at, hdr: o.hdr}
+			if at >= 0 {
+				r.at += m[0]
+			}
+			if err := s.scanRegion(r); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	if o.objStm || looksText(o.content) {
-		return s.scanRegion(s.tok(o.content), o.hdr)
+		return s.scanRegion(region{buf: o.content, at: at, hdr: o.hdr})
 	}
 	return nil
 }
 
-// add records a hit for the rule at the object header offset. A later snippet
-// replaces an empty one for the same offset.
-func (s *scanner) add(r protocol.Rule, off int, snip string) {
+// full reports whether the rule already has all the evidence it keeps.
+func (s *scanner) full(r protocol.Rule) bool {
+	h := s.hits[r.ID]
+	return h != nil && len(h.evs) >= maxEvidence
+}
+
+// add records a hit for the rule at the token buf[off] of the region.
+func (s *scanner) add(r protocol.Rule, reg region, off int) {
+	if s.full(r) {
+		return
+	}
+	at, snip := reg.where(off)
+	s.addAt(r, at, snip)
+}
+
+// addAt records a hit for the rule at a file offset. A hit on a line that
+// already has one is not repeated.
+func (s *scanner) addAt(r protocol.Rule, off int, snip string) {
+	if s.full(r) {
+		return
+	}
 	h := s.hits[r.ID]
 	if h == nil {
 		h = &hit{}
 		s.hits[r.ID] = h
 	}
-	for i := range h.evs {
-		if h.evs[i].off == off {
-			if h.evs[i].snip == "" {
-				h.evs[i].snip = snip
-			}
+	for _, e := range h.evs {
+		if off >= e.start && off < e.end {
 			return
 		}
 	}
-	if len(h.evs) < maxEvidence {
-		h.evs = append(h.evs, evidence{off: off, snip: snip})
+	data := s.f.Data
+	off = min(off, len(data))
+	start := bytes.LastIndexByte(data[:off], '\n') + 1
+	end := len(data)
+	if i := bytes.IndexByte(data[off:], '\n'); i >= 0 {
+		end = off + i
 	}
+	h.evs = append(h.evs, evidence{off: off, start: start, end: end + 1, snip: snip})
 }
 
 // locate finds every "N G obj" and decodes its stream.
@@ -240,7 +293,7 @@ func (s *scanner) locate() error {
 				se = len(data) - ss
 			}
 			se += ss
-			s.prepareStream(o, data[ss:se])
+			s.prepareStream(o, data[ss:se], ss)
 			kw2, at2 := nextKeyword(data, min(len(data), se+len("endstream")))
 			next = at2
 			if kw2 == "endobj" {
@@ -366,7 +419,7 @@ func headerBefore(data []byte, i int) (num, hdr int, ok bool) {
 }
 
 // prepareStream reads the stream metadata from the dictionary and sets o.content.
-func (s *scanner) prepareStream(o *object, raw []byte) {
+func (s *scanner) prepareStream(o *object, raw []byte, rawAt int) {
 	var filters []string
 	toks := s.tok(o.buf[o.ds:o.de])
 	for i, t := range toks {
@@ -399,6 +452,7 @@ func (s *scanner) prepareStream(o *object, raw []byte) {
 	}
 	if len(filters) == 0 {
 		o.content = raw
+		o.rawAt = rawAt
 		return
 	}
 	if o.skipScan || slicesAny(filters, imageFilters) {
@@ -410,7 +464,7 @@ func (s *scanner) prepareStream(o *object, raw []byte) {
 		out, err := s.decode(f, data)
 		data = out
 		if err != "" {
-			s.add(ruleOpaque, o.hdr, err)
+			s.addAt(ruleOpaque, o.hdr, err)
 			s.undecoded = true
 			break
 		}

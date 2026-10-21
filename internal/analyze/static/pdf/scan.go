@@ -22,7 +22,7 @@ func (s *scanner) scanTrailers() error {
 		if e := bytes.Index(data[i:end], []byte("startxref")); e >= 0 {
 			end = i + e
 		}
-		if err := s.scanRegion(s.tok(data[i+len("trailer"):end]), i); err != nil {
+		if err := s.scanRegion(region{buf: data[i+len("trailer") : end], at: i + len("trailer")}); err != nil {
 			return err
 		}
 		pos = i + len("trailer")
@@ -30,9 +30,10 @@ func (s *scanner) scanTrailers() error {
 	return nil
 }
 
-// scanRegion looks at the names and strings of one dictionary or decoded stream.
-// off is the offset of the containing object header in the file.
-func (s *scanner) scanRegion(toks []token, off int) error {
+// scanRegion looks at the names and strings of one dictionary or decoded
+// stream. Each finding points at the token that triggered it.
+func (s *scanner) scanRegion(reg region) error {
+	toks := s.tok(reg.buf)
 	for i, t := range toks {
 		if i&1023 == 0 {
 			if err := s.ctx.Err(); err != nil {
@@ -43,7 +44,7 @@ func (s *scanner) scanRegion(toks []token, off int) error {
 			continue
 		}
 		if t.obf {
-			s.add(ruleObf, off, "")
+			s.add(ruleObf, reg, t.off)
 		}
 		next := token{}
 		if i+1 < len(toks) {
@@ -51,27 +52,27 @@ func (s *scanner) scanRegion(toks []token, off int) error {
 		}
 		switch t.val {
 		case "JS":
-			s.add(ruleJS, off, s.jsSnippet(toks, i+1))
+			s.add(ruleJS, reg, t.off)
 		case "S":
 			switch {
 			case next.kind == tName && next.val == "JavaScript":
-				s.add(ruleJS, off, "")
+				s.add(ruleJS, reg, next.off)
 			case next.kind == tName && next.val == "Launch":
-				s.add(ruleLaunch, off, "")
+				s.add(ruleLaunch, reg, next.off)
 			}
 		case "URI":
 			if uri, ok := s.stringAt(toks, i+1); ok {
-				s.addURI(uri, off)
+				s.addURI(uri, reg, t.off)
 			}
 		case "OpenAction", "AA":
 			if s.targetsAction(toks, i+1) {
-				s.add(ruleAuto, off, "")
+				s.add(ruleAuto, reg, t.off)
 			}
 		case "EmbeddedFile", "EmbeddedFiles":
-			s.add(ruleEmbedded, off, "")
+			s.add(ruleEmbedded, reg, t.off)
 		case "Encrypt":
 			s.encrypted = true
-			s.add(ruleOpaque, off, "encrypted document")
+			s.add(ruleOpaque, reg, t.off)
 		}
 	}
 	return nil
@@ -101,23 +102,7 @@ func (s *scanner) stringAt(toks []token, i int) (string, bool) {
 	return "", false
 }
 
-// jsSnippet returns the start of the JavaScript that /JS at toks[i-1] points to, cleaned to one line.
-func (s *scanner) jsSnippet(toks []token, i int) string {
-	text, ok := s.stringAt(toks, i)
-	if !ok {
-		if n, isRef := refAt(toks, i); isRef {
-			if o := s.byNum[n]; o != nil && o.content != nil {
-				text = string(o.content[:min(len(o.content), maxSnippetRaw)])
-			}
-		}
-	}
-	if len(text) > maxSnippetRaw {
-		text = text[:maxSnippetRaw]
-	}
-	return protocol.Snippet(strings.Join(strings.Fields(text), " "))
-}
-
-func (s *scanner) addURI(uri string, off int) {
+func (s *scanner) addURI(uri string, reg region, off int) {
 	uri = strings.TrimSpace(uri)
 	if len(uri) == 0 || len(uri) > MaxURILen || s.seenURI[uri] {
 		return
@@ -142,8 +127,9 @@ func (s *scanner) addURI(uri string, off int) {
 			return
 		}
 	}
-	s.add(ruleLinks, off, "")
-	s.iocs = append(s.iocs, protocol.IOC{Type: typ, Value: val, Path: s.f.Path, Line: s.evidenceLine(off)})
+	at, snip := reg.where(off)
+	s.addAt(ruleLinks, at, snip)
+	s.iocs = append(s.iocs, protocol.IOC{Type: typ, Value: val, Path: s.f.Path, Line: s.evidenceLine(at)})
 }
 
 func isScheme(x string) bool {
