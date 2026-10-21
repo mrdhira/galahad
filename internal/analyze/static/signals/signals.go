@@ -9,6 +9,7 @@ package signals
 import (
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // MaxMatches bounds how many matches one call returns.
@@ -32,8 +33,10 @@ var (
 		// a bulk dump of the environment
 		`(?:^|[\s;&|("'])(?:printenv|env)(?:\s+-0)?\s*(?:\||\n|;|\)|$)`,
 		`/proc/self/environ`,
-		`\.ssh[/\\]`,
-		`\bid_(?:rsa|dsa|ecdsa|ed25519)\b`,
+		// A file in the .ssh directory, or the directory itself (a listing or a
+		// glob). SecretRefs drops the files that are not secret (SSHPlain).
+		`\.ssh[/\\][A-Za-z0-9_.@-]*`,
+		`\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b`,
 		`\.aws[/\\]credentials`,
 		`\.gnupg\b`,
 		`\.kube[/\\]config`,
@@ -77,9 +80,31 @@ func compile(patterns ...string) []*regexp.Regexp {
 }
 
 // SecretRefs finds references to secret material: secret-named environment
-// variables (*KEY*, *SECRET*, *TOKEN*, *PASSWORD*, AWS_*), .env files, SSH and
-// cloud credential files, and browser and wallet directories.
-func SecretRefs(text string) []Match { return find(secretPatterns, text) }
+// variables (*KEY*, *SECRET*, *TOKEN*, *PASSWORD*, AWS_*), .env files, SSH
+// private keys and the .ssh directory, cloud credential files, and browser and
+// wallet directories. A file in .ssh counts unless SSHPlain says it is not secret.
+func SecretRefs(text string) []Match {
+	return slices.DeleteFunc(find(secretPatterns, text), func(m Match) bool {
+		ref := text[m.Start:m.End]
+		if name, ok := strings.CutPrefix(ref, ".ssh"); ok && name != "" && (name[0] == '/' || name[0] == '\\') {
+			// A name followed by more path ("known_hosts/../id_rsa") is not the last component.
+			return SSHPlain(name[1:]) && (m.End >= len(text) || text[m.End] != '/' && text[m.End] != '\\')
+		}
+		return strings.HasSuffix(ref, ".pub")
+	})
+}
+
+// SSHPlain reports whether the file name in the .ssh directory is not secret
+// material: the client config, the known hosts, the authorized keys (a
+// persistence target, not a secret) and public keys.
+func SSHPlain(name string) bool {
+	name = strings.ToLower(name)
+	switch name {
+	case "config", "known_hosts", "known_hosts.old", "authorized_keys", "authorized_keys2":
+		return true
+	}
+	return strings.HasSuffix(name, ".pub")
+}
 
 // NetworkTools finds shell network tools: curl, wget, nc, scp, PowerShell web
 // cmdlets, .NET web clients and /dev/tcp.

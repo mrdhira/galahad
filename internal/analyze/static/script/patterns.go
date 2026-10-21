@@ -3,7 +3,10 @@ package script
 import (
 	"bytes"
 	"regexp"
+	"slices"
 	"strings"
+
+	"github.com/mrdhira/galahad/internal/analyze/static/signals"
 )
 
 // All patterns are RE2, so matching time is linear in the length of the text.
@@ -44,6 +47,12 @@ var networkParts = []string{
 	`httpx\s*\.\s*(?:get|post|put|request|Client|AsyncClient)\b`,
 	`aiohttp\s*\.\s*ClientSession\b`,
 	`smtplib\s*\.\s*SMTP`,
+}
+
+// dynNetworkParts are the Python network calls on a module that is imported by
+// name at run time. Every match contains the name of a network module, so they
+// are searched only in text that has one.
+var dynNetworkParts = []string{
 	`__import__\s*\(\s*['"]` + pyNetModule + `['"]\s*\)` + nsCall,
 	`importlib\s*\.\s*import_module\s*\(\s*['"]` + pyNetModule + `['"]\s*\)` + nsCall,
 }
@@ -53,10 +62,13 @@ const pyNetModule = `(?:requests|urllib(?:\.request)?|urllib2|socket|http\.clien
 
 var (
 	decoderRE = regexp.MustCompile(decoderSrc)
-	networkRE = regexp.MustCompile(`\b(?:` + strings.Join(networkParts, "|") + `)`)
+	networkRE = regexp.MustCompile(`\b(?:` + strings.Join(slices.Concat(networkParts, dynNetworkParts), "|") + `)`)
 	identRE   = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*`)
 
-	networkCalls = compile(networkParts...)
+	// networkCalls are searched in a whole file. allNetworkCalls add the calls
+	// on a module imported by name, for text that has a network module name.
+	networkCalls    = compile(networkParts...)
+	allNetworkCalls = compile(slices.Concat(networkParts, dynNetworkParts)...)
 
 	// Calls that run a string as code, by language.
 	sinksJS   = compile(`eval\s*\(`, `Function\s*\(`, `setTimeout\s*\(`, `setInterval\s*\(`)
@@ -101,6 +113,21 @@ var (
 		`process\.env[ \t]*(?:[;\n]|$)`,
 	)
 
+	// copyRE ends at the end of the text before a copy of the environment and
+	// captures the name that the copy is given: "name = ", "name: ",
+	// "name = json.dumps(". A network call in between is not a wrapper.
+	copyRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*(?:[\w$.]+\s*\(\s*)*$`)
+
+	// envOptionRE ends the text before a copy of the environment that is the
+	// value of an "env" key: "env=", "env: ", "env={**". It is the option of
+	// a child process only in the shapes that envOption accepts.
+	// childKeyRE matches a key that only a child process has.
+	// returnRE ends the text before a copy that a function returns: "return
+	// {...". That is the environment for a child process.
+	envOptionRE = regexp.MustCompile(`\benv\s*[:=]\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*|Object\s*\.\s*assign\(\s*\{\s*\}\s*,\s*)?$`)
+	childKeyRE  = regexp.MustCompile(`\b(?:stdio|shell|detached|windowsHide|maxBuffer|killSignal|argv0|uid|gid)\s*[:=]`)
+	returnRE    = regexp.MustCompile(`\breturn\b\s*(?:\{\s*(?:\*\*|\.\.\.)?\s*|Object\s*\.\s*assign\(\s*\{\s*\}\s*,\s*)?$`)
+
 	// assignRE ends at the end of a line prefix and captures the name in
 	// "name = ...".
 	assignRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*=(?:[^=>;\n][^=;\n]*)?$`)
@@ -111,10 +138,18 @@ var (
 	// segmentRE is a quoted directory name that holds credentials, a segment of
 	// a path built with join, joinpath, resolve or the / operator. These are
 	// the paths that signals.SecretRefs counts when they are written in one
-	// literal, so segmentNext names the file that must follow the directory
-	// in the others.
+	// literal, so segmentNext says which quoted segment after the directory
+	// makes it a credential file. ok is false when none follows, and more is
+	// set when yet another segment follows seg.
 	segmentRE   = regexp.MustCompile("['\"`](\\.ssh|\\.aws|\\.gnupg|\\.docker|\\.kube|\\.env)['\"`]")
-	segmentNext = map[string]string{".aws": "credentials", ".kube": "config", ".docker": "config.json"}
+	segmentNext = map[string]func(seg string, ok, more bool) bool{
+		".aws":    file("credentials"),
+		".kube":   file("config"),
+		".docker": file("config.json"),
+		// The directory itself, a file that is secret, or a plain file that
+		// is not the last segment ("config", "..", "id_rsa").
+		".ssh": func(seg string, ok, more bool) bool { return !ok || more || !signals.SSHPlain(seg) },
+	}
 
 	// Secret classification of a signals.SecretRefs match.
 	namedEnvRE = regexp.MustCompile(`^(?:\$|%|process\.env|os\.environ|os\.getenv|getenv|ENV\[)`)
@@ -127,7 +162,15 @@ var (
 var (
 	decoderWords = words("atob", "Buffer", "fromCharCode", "zlib", "decode", "bz2", "lzma", "gzip", "unhexlify", "fromhex", "a2b_", "marshal", "codecs")
 	networkWords = words("fetch", "http", "HTTP", "axios", "XMLHttp", "net", "navigator", "tls", "requests", "urllib", "urlopen", "socket", "smtplib")
+
+	// pyNetWords are in the name of every module of pyNetNames.
+	pyNetWords = words("requests", "urllib", "socket", "http.client", "httpx", "aiohttp", "smtplib")
 )
+
+// file accepts the segment name only.
+func file(name string) func(string, bool, bool) bool {
+	return func(seg string, ok, _ bool) bool { return ok && seg == name }
+}
 
 func words(w ...string) [][]byte {
 	out := make([][]byte, len(w))

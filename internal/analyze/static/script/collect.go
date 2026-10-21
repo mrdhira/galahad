@@ -264,12 +264,135 @@ func (s *scan) scanCode(d *doc, f *found, base, minEnd int, text string) {
 	if d.lang&langPy != 0 {
 		eachMatch(d, spawnsPy, base, minEnd, text, spawn)
 	}
-	eachMatch(d, bulkEnv, base, minEnd, text, func(off, _ int) { keep(s, &f.secrets, secretHit{off: off, kind: secretDump}) })
+	eachMatch(d, bulkEnv, base, minEnd, text, func(off, _ int) {
+		if name, ok := copyName(d.data, off); ok {
+			keep(s, &f.secrets, secretHit{off: off, kind: secretDump, name: name})
+		}
+	})
 	eachMatch(d, bulkEnvVar, base, minEnd, text, func(off, _ int) {
-		if g := assignRE.FindSubmatch(d.data[max(0, off-160):off]); g != nil && !bytes.ContainsRune(g[0], '\n') {
+		before := d.data[max(0, off-160):off]
+		if g := assignRE.FindSubmatch(before); g != nil && !bytes.ContainsRune(g[0], '\n') && !envOption(d.data, off) && !returnRE.Match(before) {
 			keep(s, &f.secrets, secretHit{off: off, kind: secretDump, name: string(g[1])})
 		}
 	})
+}
+
+// copyName returns the name that the copy of the environment at off is given
+// by an assignment ("old = dict(os.environ)"). It is "" for a copy that is not
+// assigned, or that is an argument of a network call. ok is false for a copy
+// that is the env option of a call, the environment of a child process.
+func copyName(data []byte, off int) (name string, ok bool) {
+	before := data[max(0, off-160):off]
+	if envOption(data, off) {
+		return "", false
+	}
+	if g := copyRE.FindSubmatchIndex(before); g != nil && !unclosed(before[:g[2]]) {
+		if hasNetwork(before[g[0]:]) {
+			return "", true
+		}
+		return string(before[g[2]:g[3]]), true
+	}
+	return "", true
+}
+
+const (
+	envLook   = 512 // bytes before an env option that are searched for the call that holds it
+	envHolder = 512 // bytes of the object or call that holds an env option that are read
+)
+
+// envOption reports whether the copy of the environment at data[off] is the
+// environment of a child process: the value of "env" in an object or a keyword
+// list that is passed straight to a call (not dict, Object.assign,
+// JSON.stringify or a network call), or that also has a key that only a child
+// process has (stdio, shell, ...). An env in a report object that is built and
+// kept in a variable is data, not an option.
+func envOption(data []byte, off int) bool {
+	lo := max(0, off-160)
+	loc := envOptionRE.FindIndex(data[lo:off])
+	if loc == nil {
+		return false
+	}
+	at := lo + loc[0]
+	from := max(0, at-envLook)
+	before := data[from:at]
+	p := openBracket(before)
+	if p < 0 {
+		return false
+	}
+	if childKeyRE.Match(heldBy(data[from+p : min(len(data), from+p+envHolder)])) {
+		return true
+	}
+	q := p
+	if before[p] == '{' {
+		prev := bytes.TrimRight(before[:p], " \t\r\n")
+		if len(prev) == 0 || prev[len(prev)-1] != '(' && prev[len(prev)-1] != ',' {
+			return false
+		}
+		q = openBracket(before[:p])
+	}
+	if q < 0 || before[q] != '(' {
+		return false
+	}
+	callee := before[:q]
+	callee = bytes.TrimRight(callee, " \t\r\n")
+	start := len(callee)
+	for start > 0 && (isWord(callee[start-1]) || callee[start-1] == '.') {
+		start--
+	}
+	name := string(callee[start:])
+	if name == "" {
+		return false
+	}
+	last := name[strings.LastIndexByte(name, '.')+1:]
+	return last != "dict" && last != "assign" && last != "stringify" && !hasNetwork([]byte(name+"("))
+}
+
+// openBracket returns the index of the innermost bracket that text opens and
+// does not close, or -1.
+func openBracket(text []byte) int {
+	depth := 0
+	for i := len(text) - 1; i >= 0; i-- {
+		switch text[i] {
+		case ')', ']', '}':
+			depth++
+		case '(', '[', '{':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
+}
+
+// heldBy returns text, which starts with a bracket, up to the bracket that closes it.
+func heldBy(text []byte) []byte {
+	depth := 0
+	for i, c := range text {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth--; depth == 0 {
+				return text[:i+1]
+			}
+		}
+	}
+	return text
+}
+
+// unclosed reports whether text ends inside a bracket that it opens.
+func unclosed(text []byte) bool {
+	depth := 0
+	for _, c := range text {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		}
+	}
+	return depth > 0
 }
 
 // definition reports whether the call-like text at off defines a function or
@@ -320,7 +443,11 @@ func receiver(data []byte, dot int) bool {
 
 // scanNet finds network calls, including calls through an alias.
 func (s *scan) scanNet(d *doc, f *found, base, minEnd int, text string) {
-	eachMatch(d, networkCalls, base, minEnd, text, func(off, _ int) {
+	calls := networkCalls
+	if anyIn(d.data[base:base+len(text)], pyNetWords) {
+		calls = allNetworkCalls
+	}
+	eachMatch(d, calls, base, minEnd, text, func(off, _ int) {
 		if !definition(d.data, off) && (!bytes.HasPrefix(d.data[off:], []byte("fetch")) || off == 0 || d.data[off-1] != '.' || globalObject(d.data, off-1)) {
 			keep(s, &f.nets, off)
 		}
@@ -340,24 +467,32 @@ func (s *scan) scanShell(d *doc, f *found, base, minEnd int, text string) {
 	if !s.spend(len(text)) {
 		return
 	}
-	for _, m := range signals.DownloadExec(text) {
+	dl := signals.DownloadExec(text)
+	dec := signals.DecodeExec(text)
+	tools := signals.NetworkTools(text)
+	s.limited = s.limited || cut(dl) || cut(dec) || cut(tools)
+	for _, m := range dl {
 		off, ok := match(d, base, minEnd, text, m.Start, m.End)
 		// A command has an operator or a URL. A list of PowerShell aliases has neither.
 		if t := text[m.Start:m.End]; ok && len(t) <= maxShellMatch && strings.ContainsAny(t, "|&;($") && !inManifest(d, off) {
 			keep(s, &f.dl, off)
 		}
 	}
-	for _, m := range signals.DecodeExec(text) {
+	for _, m := range dec {
 		if off, ok := match(d, base, minEnd, text, m.Start, m.End); ok && shellDecode(text[m.Start:m.End]) && !inManifest(d, off) {
 			keep(s, &f.dec, off)
 		}
 	}
-	for _, m := range signals.NetworkTools(text) {
+	for _, m := range tools {
 		if off, ok := match(d, base, minEnd, text, m.Start, m.End); ok && !weakWord(text, m.Start, m.End) {
 			keep(s, &f.nets, off)
 		}
 	}
 }
+
+// cut reports whether a signals call hit its limit of matches, which drops the
+// matches that come last in the text.
+func cut(ms []signals.Match) bool { return len(ms) == signals.MaxMatches }
 
 // inManifest reports whether off sits in the "scripts" of a package manifest
 // that was embedded as text. Those commands are data, not code that runs.
@@ -387,7 +522,9 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 	if !s.spend(len(text)) {
 		return
 	}
-	for _, m := range signals.SecretRefs(text) {
+	refs := signals.SecretRefs(text)
+	s.limited = s.limited || cut(refs)
+	for _, m := range refs {
 		off, ok := match(d, base, minEnd, text, m.Start, m.End)
 		if !ok {
 			continue
@@ -407,8 +544,9 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 
 // builtPath reports whether the quoted directory name at off is a segment of a
 // path that the code builds, and the path is one that signals.SecretRefs
-// counts: .ssh and .gnupg, .aws followed by credentials, .kube by config,
-// .docker by config.json, and .env on a line that reads, and not for dotenv.
+// counts: .ssh alone or followed by a file that holds secrets, .gnupg, .aws followed by
+// credentials, .kube by config, .docker by config.json, and .env on a line
+// that reads, and not for dotenv.
 // A path that is the return value of an arrow function or a function ("() =>
 // process.env.X || join(", "return path.join(") only defines where a file
 // lives and is not a read.
@@ -416,8 +554,15 @@ func (s *scan) builtPath(data []byte, off int, name string) bool {
 	if !s.spend(pathLook) {
 		return false
 	}
-	if next, ok := segmentNext[name]; ok && !followedBy(data, off+len(name)+2, next) {
-		return false
+	if counts, ok := segmentNext[name]; ok {
+		seg, next, ok := nextSegment(data, off+len(name)+2)
+		more := false
+		if ok {
+			_, _, more = nextSegment(data, next)
+		}
+		if !counts(seg, ok, more) {
+			return false
+		}
 	}
 	if !pathlibOperand(data, off) {
 		call := enclosingPathCall(data, off)
@@ -508,9 +653,13 @@ func returned(data []byte, callee int) bool {
 	return end >= 0 && returnedRE.Match(before[end:])
 }
 
-// followedBy reports whether the quoted segment seg follows after a comma or
-// a / operator at data[i:], across lines.
-func followedBy(data []byte, i int, seg string) bool {
+// maxSegment is the longest path segment that nextSegment reads.
+const maxSegment = 64
+
+// nextSegment returns the quoted segment that follows after a comma or a /
+// operator at data[i:], across lines, and the offset after it, or false if
+// there is none.
+func nextSegment(data []byte, i int) (seg string, next int, ok bool) {
 	skip := func(i int) int {
 		for n := 0; n < pathLook && i < len(data) && strings.IndexByte(" \t\r\n", data[i]) >= 0; n++ {
 			i++
@@ -519,11 +668,17 @@ func followedBy(data []byte, i int, seg string) bool {
 	}
 	i = skip(i)
 	if i >= len(data) || data[i] != ',' && data[i] != '/' {
-		return false
+		return "", 0, false
 	}
 	i = skip(i + 1)
-	end := i + 1 + len(seg)
-	return end < len(data) && strings.IndexByte("'\"`", data[i]) >= 0 && string(data[i+1:end]) == seg && data[end] == data[i]
+	if i >= len(data) || strings.IndexByte("'\"`", data[i]) < 0 {
+		return "", 0, false
+	}
+	end := bytes.IndexByte(data[i+1:min(len(data), i+1+maxSegment)], data[i])
+	if end < 0 {
+		return "", 0, false
+	}
+	return string(data[i+1 : i+1+end]), i + 2 + end, true
 }
 
 // spend charges n bytes of text given to the signals patterns, which are slow

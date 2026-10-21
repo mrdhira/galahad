@@ -7,10 +7,12 @@
 // slower signals patterns run only on windows around rare words such as curl,
 // .ssh or process.env.API_TOKEN. The context is checked between windows of at
 // most chunkSize bytes, so a file with one giant line costs the same as a
-// normal one. Work is budgeted per file (signalBudget, argBudget, maxHits); a
-// file that runs out gets a too_large skip. Encoded blobs are decoded once (at
-// most maxBlobs blobs and maxDecodedTotal bytes per file) and the decoded text
-// gets one more pass of all checks. It is never decoded again.
+// normal one. Work is budgeted per file (signalBudget, argBudget, maxHits and
+// more). A file that runs out gets a budget skip, not too_large: the rest of
+// the file was not fully checked, and an attacker can fill a budget on purpose.
+// Encoded blobs are decoded once (at most maxBlobs blobs and maxDecodedTotal
+// bytes per file) and the decoded text gets one more pass of all checks. It is
+// never decoded again.
 package script
 
 import (
@@ -101,7 +103,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	s := &scan{ctx: ctx, f: f, out: &out, counts: map[string]int{}}
 	s.run(&doc{data: f.Data, lang: l})
 	if s.limited && !s.timedOut {
-		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipTooLarge})
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipBudget})
 	}
 	return out, nil
 }
@@ -133,6 +135,8 @@ type scan struct {
 	decoded  int // bytes decoded
 	looked   int // lookback bytes used
 	farTries int // credential paths checked for far network use
+
+	bindCalls int // names followed from the one that the current eval is given
 
 	pyImports   int // Python import statements examined by the alias search
 	carrierRuns int // windows searched for the variables that hold an environment copy

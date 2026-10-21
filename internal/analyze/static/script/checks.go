@@ -75,18 +75,21 @@ func (s *scan) sinkEvidence(d *doc, off, via int) func() []protocol.Evidence {
 // assigned looks back from the call at off for the last assignment "id = ..."
 // and reports whether its right side decodes or downloads. It returns the
 // offset of the assignment. The search reads at most lookback bytes per call
-// and lookbackBudget per file.
+// and lookbackBudget per file, and the bytes it searched are what it is charged.
 func (s *scan) assigned(d *doc, off int, id string) (decoded, download bool, via int) {
-	lo := max(0, off-lookback)
-	if s.looked+off-lo > lookbackBudget {
+	if s.looked >= lookbackBudget {
+		s.limited = true
 		return false, false, -1
 	}
-	s.looked += off - lo
+	lo := max(0, off-lookback)
 	win := d.data[lo:off]
 	name := []byte(id)
-	for end := len(win); end > 0; {
+	end := len(win)
+	defer func() { s.looked += len(win) - end }()
+	for end > 0 {
 		i := bytes.LastIndex(win[:end], name)
 		if i < 0 {
+			end = 0
 			break
 		}
 		end = i
@@ -125,16 +128,12 @@ func rootName(arg []byte) string {
 	return string(identRE.Find(bytes.TrimLeft(arg, "( \t\r\n")))
 }
 
-// loopVarRE ends the text before a name that a for loop declares.
-var loopVarRE = regexp.MustCompile(`\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+$`)
-
 // fetchedBefore looks at the windowLines lines (at most windowBytes) before
 // off for a network call and returns the offset of the last one, or -1. With a
-// root name, the data must flow from the call to off: the name must appear
-// from the line of the network call on, and not only as the variable that a
-// for loop declares. Without a name (.then(eval)) the call alone counts. A
-// name also asks for a callback or an await in the window, which carry the
-// response to off.
+// root name, the data must flow from the call to off: from the line of the
+// network call on, the name must get its value from the response (see bound).
+// Without a name (.then(eval)) the call alone counts. A name also asks for a
+// callback or an await in the window, which carry the response to off.
 func (s *scan) fetchedBefore(d *doc, off int, root string) int {
 	n := min(off, windowBytes)
 	if s.argBytes += n; s.argBytes > argBudget {
@@ -155,27 +154,289 @@ func (s *scan) fetchedBefore(d *doc, off int, root string) int {
 		return -1
 	}
 	at := s.networkAt(d, win)
-	if at < 0 || root != "" && !flows(win[bytes.LastIndexByte(win[:at], '\n')+1:], root) {
+	if at < 0 {
+		return -1
+	}
+	line := bytes.LastIndexByte(win[:at], '\n') + 1
+	if root != "" && !s.bound(d, win[line:], root, maxBindHops, at-line) {
 		return -1
 	}
 	return lo + at
 }
 
-// flows reports whether text uses name as a whole word anywhere but in the
-// declaration of a for loop variable.
-func flows(text []byte, name string) bool {
-	for from := 0; ; {
-		i := bytes.Index(text[from:], []byte(name))
+// responseReads show that a statement reads a response.
+var responseReads = words("await", ".text(", ".json(", ".blob(", ".buffer(", ".arrayBuffer(", ".read(", ".data", ".body", "responseText")
+
+// loopVarRE ends the text before a name that a for loop declares.
+var loopVarRE = regexp.MustCompile(`\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+$`)
+
+const (
+	maxBindHops    = 2   // plain assignments followed from a name to the one that gets the response
+	maxBindUses    = 64  // places where a name is looked at in one window
+	maxBindHopUses = 8   // the same, for a name followed from a right side
+	maxBindSpan    = 100 // bytes searched around a name for its parameter list or braces
+	maxStmt        = 400 // bytes of a statement that are read
+	maxBindIdents  = 4   // names of a right side that are followed
+	maxBindCalls   = 8   // names followed from the one that eval is given
+)
+
+// bound reports whether the name root gets a value from the response of the
+// network call that text starts at the line of, and that is net bytes into
+// text. Its uses are looked at from the last one back. It is a parameter of a
+// callback after the call ("(t) =>", "t =>", "function (t)"), it is appended to
+// ("body +=", "parts.push(await ...)"), it is assigned from an await or a
+// response read ("const r = await ...", "d = res.data", "st.code = await
+// ..."), it is destructured from an await ("const { data } = await ..."), it is
+// assigned from an expression that uses a name that is bound, up to hops
+// assignments away, or it is the variable of a for loop over a network call. A
+// name that is assigned from something else, such as process.argv, is not
+// bound. The bytes searched are charged to the call argument budget.
+func (s *scan) bound(d *doc, text []byte, root string, hops, net int) bool {
+	cost, limit := len(text), maxBindUses
+	if hops == maxBindHops {
+		s.bindCalls = 0
+	} else if s.bindCalls++; s.bindCalls > maxBindCalls {
+		return false
+	} else {
+		cost, limit = cost/16, maxBindHopUses
+	}
+	if s.argBytes += cost; s.argBytes > argBudget {
+		s.limited = true
+		return false
+	}
+	name := []byte(root)
+	uses := 0
+	for end := len(text); end > 0 && uses < limit; {
+		i := bytes.LastIndex(text[:end], name)
 		if i < 0 {
-			return false
+			break
 		}
-		i += from
-		from = i + 1
-		end := i + len(name)
-		if wordStart(text, i) && (end == len(text) || !isWord(text[end])) && !loopVarRE.Match(text[max(0, i-40):i]) {
+		end = i
+		after := i + len(name)
+		if i > 0 && (isWord(text[i-1]) || text[i-1] == '.') || after < len(text) && isWord(text[after]) {
+			continue
+		}
+		uses++
+		if s.binds(d, text, i, after, hops, net) {
 			return true
 		}
 	}
+	return false
+}
+
+// binds reports whether the use of a name at text[i:after] gives it a value
+// from a response: see bound.
+func (s *scan) binds(d *doc, text []byte, i, after, hops, net int) bool {
+	rest := bytes.TrimLeft(text[after:], " \t")
+	switch {
+	case bytes.HasPrefix(rest, []byte("+=")), bytes.HasPrefix(rest, []byte("=>")):
+		return true
+	case bytes.HasPrefix(rest, []byte("=")) && !bytes.HasPrefix(rest, []byte("==")):
+		stmt := statement(rest[1:])
+		if anyIn(stmt, responseReads) {
+			return true
+		}
+		if hops > 0 {
+			for _, id := range identsIn(stmt, maxBindIdents) {
+				if s.bound(d, text[:i], id, hops-1, net) {
+					return true
+				}
+			}
+		}
+		return false
+	case bytes.HasPrefix(rest, []byte(".push(")), bytes.HasPrefix(rest, []byte(".concat(")):
+		return anyIn(statement(rest), responseReads)
+	case bytes.HasPrefix(rest, []byte(".")) && propAssigned(rest):
+		return anyIn(statement(rest[bytes.IndexByte(rest, '=')+1:]), responseReads)
+	case loopVarRE.Match(text[max(0, i-40):i]) && bytes.HasPrefix(rest, []byte("of ")):
+		return s.networkAt(d, firstLine(rest)) >= 0
+	}
+	return i > net && inParams(text, i, after) || destructured(text, i, after)
+}
+
+// propAssigned reports whether rest starts with a property that is assigned:
+// ".code = ". It is false for a comparison and an arrow.
+func propAssigned(rest []byte) bool {
+	n := 1
+	for n < len(rest) && isWord(rest[n]) {
+		n++
+	}
+	tail := bytes.TrimLeft(rest[n:], " \t")
+	return n > 1 && bytes.HasPrefix(tail, []byte("=")) && !bytes.HasPrefix(tail, []byte("==")) && !bytes.HasPrefix(tail, []byte("=>"))
+}
+
+// notIdents are the words of a right side that are not names.
+var notIdents = map[string]bool{
+	"await": true, "new": true, "typeof": true, "void": true, "true": true, "false": true, "null": true,
+	"undefined": true, "this": true, "function": true, "async": true, "in": true, "of": true,
+	"instanceof": true, "delete": true, "yield": true, "None": true, "True": true, "False": true,
+	"not": true, "and": true, "or": true, "if": true, "else": true, "lambda": true,
+}
+
+// identsIn returns the first limit names that the code in b uses, in order.
+// It skips keywords, numbers, names right after a dot, the text of string
+// literals, and the text of a template literal outside of ${ }.
+func identsIn(b []byte, limit int) []string {
+	var out []string
+	var quote byte // the quote of the string that is open
+	expr := 0      // braces open in a ${ } of a template literal
+	for i := 0; i < len(b) && len(out) < limit; i++ {
+		c := b[i]
+		if quote != 0 && expr == 0 {
+			switch {
+			case c == '\\':
+				i++
+			case c == quote:
+				quote = 0
+			case quote == '`' && c == '$' && i+1 < len(b) && b[i+1] == '{':
+				expr = 1
+				i++
+			}
+			continue
+		}
+		switch {
+		case expr > 0 && c == '{':
+			expr++
+		case expr > 0 && c == '}':
+			expr--
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case isWord(c) && (i == 0 || !isWord(b[i-1])):
+			j := i
+			for j < len(b) && isWord(b[j]) {
+				j++
+			}
+			word := string(b[i:j])
+			if (c < '0' || c > '9') && !notIdents[word] && (i == 0 || b[i-1] != '.') {
+				out = append(out, word)
+			}
+			i = j - 1
+		}
+	}
+	return out
+}
+
+// statement returns the text up to the end of the statement: a semicolon or a
+// line break outside a string literal, at most maxStmt bytes.
+func statement(b []byte) []byte {
+	b = b[:min(len(b), maxStmt)]
+	var quote byte
+	for i, c := range b {
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == ';' || c == '\n':
+			return b[:i]
+		}
+	}
+	return b
+}
+
+func firstLine(b []byte) []byte {
+	b = b[:min(len(b), maxStmt)]
+	if k := bytes.IndexByte(b, '\n'); k >= 0 {
+		b = b[:k]
+	}
+	return b
+}
+
+// around finds the bracket open that comes before text[i] and the bracket close that
+// comes after text[after], with no other bracket of those two kinds between.
+func around(text []byte, i, after int, open, closing byte) (lo, hi int, ok bool) {
+	lo = -1
+	for j := i - 1; j >= 0 && i-j <= maxBindSpan; j-- {
+		if text[j] == closing {
+			return 0, 0, false
+		}
+		if text[j] == open {
+			lo = j
+			break
+		}
+	}
+	if lo < 0 {
+		return 0, 0, false
+	}
+	for k := after; k < len(text) && k-after <= maxBindSpan; k++ {
+		if text[k] == open {
+			return 0, 0, false
+		}
+		if text[k] == closing {
+			return lo, k, true
+		}
+	}
+	return 0, 0, false
+}
+
+// inParams reports whether the name is in the parameter list of a callback:
+// "(a, t) =>" or "function (t)".
+func inParams(text []byte, i, after int) bool {
+	lo, hi, ok := around(text, i, after, '(', ')')
+	if !ok {
+		return false
+	}
+	if bytes.HasPrefix(bytes.TrimLeft(text[hi+1:], " \t"), []byte("=>")) {
+		return true
+	}
+	// A function without a name is a callback, and so is a named function
+	// expression such as .then(function run(code) {...}). A declared function is
+	// not handed to the call, so its parameters are not the response.
+	head := bytes.TrimRight(text[:lo], " \t")
+	if endsWithWord(head, "function") {
+		return true
+	}
+	j := len(head)
+	for j > 0 && isWord(head[j-1]) {
+		j--
+	}
+	if j == len(head) {
+		return false
+	}
+	head = bytes.TrimRight(head[:j], " \t")
+	if !endsWithWord(head, "function") {
+		return false
+	}
+	return isExpressionStart(bytes.TrimRight(head[:len(head)-len("function")], " \t"))
+}
+
+// endsWithWord reports whether b ends with the whole word w.
+func endsWithWord(b []byte, w string) bool {
+	return bytes.HasSuffix(b, []byte(w)) && (len(b) == len(w) || !isWord(b[len(b)-len(w)-1]))
+}
+
+// isExpressionStart reports whether a function keyword after before sits where
+// an expression is expected (an argument, an assignment, a return value), not
+// at the start of a statement, where it declares a function.
+func isExpressionStart(before []byte) bool {
+	before = bytes.TrimSuffix(before, []byte("async"))
+	before = bytes.TrimRight(before, " \t")
+	if endsWithWord(before, "return") {
+		return true
+	}
+	if len(before) == 0 {
+		return false
+	}
+	switch before[len(before)-1] {
+	case '(', ',', '=', ':', '?', '&', '|', '!', '[':
+		return true
+	}
+	return false
+}
+
+// destructured reports whether the name is in "{ a, t } = await".
+func destructured(text []byte, i, after int) bool {
+	_, hi, ok := around(text, i, after, '{', '}')
+	if !ok {
+		return false
+	}
+	tail := bytes.TrimLeft(text[hi+1:], " \t")
+	if !bytes.HasPrefix(tail, []byte("=")) || bytes.HasPrefix(tail, []byte("==")) {
+		return false
+	}
+	return bytes.HasPrefix(bytes.TrimLeft(tail[1:], " \t"), []byte("await"))
 }
 
 // maxString is the longest string literal that argAt skips over.
@@ -395,7 +656,8 @@ func (s *scan) farNet(d *doc, nets []int, sec secretHit) (int, bool) {
 
 // carriers returns the variables that hold a copy of the environment: the one
 // it is assigned to and the ones assigned from that, in the next maxFar bytes.
-// A variable counts when the right side uses it as a whole, not one property.
+// A variable counts when the right side uses it as a whole, not one property
+// and not as a function that is called.
 // A hit that is not a copy has none. The search is bounded: a window is charged
 // to the budget, a name is looked at in at most maxCarrierUses places, and
 // the regular expression runs at most maxCarrierRuns times per file. When one
@@ -420,7 +682,7 @@ func (s *scan) carriers(d *doc, sec secretHit) []string {
 			at := from + k
 			from = at + 1
 			end := at + len(names[i])
-			if at > 0 && (isWord(win[at-1]) || win[at-1] == '.') || end < len(win) && (isWord(win[end]) || win[end] == '.' || win[end] == '[') {
+			if at > 0 && (isWord(win[at-1]) || win[at-1] == '.') || end < len(win) && (isWord(win[end]) || win[end] == '.' || win[end] == '[' || win[end] == '(') {
 				continue
 			}
 			if uses++; uses > maxCarrierUses || s.carrierRuns >= maxCarrierRuns {
@@ -462,10 +724,14 @@ func assignsBefore(text []byte) bool {
 // pairNet picks the network use for a secret. Named variables pair with the
 // nearest one. Other secrets pair with the nearest one that is near enough,
 // or with any when far is set, and, for a copy of the environment in
-// variables, that uses one of them.
+// variables, that sends one of them (see sends).
 func pairNet(data []byte, nets []int, sec secretHit, names []string, far bool) (int, bool) {
 	if sec.kind == secretNamed {
 		return nearest(nets, sec.off), true
+	}
+	uses := usesAny
+	if sec.kind == secretDump {
+		uses = sendsAny
 	}
 	i := sort.SearchInts(nets, sec.off)
 	for lo, hi := i-1, i; (lo >= 0 || hi < len(nets)) && i-lo < 16 && hi-i < 16; {
@@ -480,7 +746,7 @@ func pairNet(data []byte, nets []int, sec secretHit, names []string, far bool) (
 		if !far && !near(data, sec.off, net) {
 			return 0, false
 		}
-		if names == nil || usesAny(data[net:min(len(data), net+400)], names) {
+		if names == nil || uses(data[net:min(len(data), net+400)], names) {
 			return net, true
 		}
 	}
@@ -494,6 +760,70 @@ func usesAny(text []byte, names []string) bool {
 		}
 	}
 	return false
+}
+
+// sendsAny reports whether text sends one of the copies of the environment.
+func sendsAny(text []byte, names []string) bool {
+	for _, n := range names {
+		if sends(text, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// notSentRE ends the text before a copy of the environment that is not sent:
+// the env or proxies option of a call, and the restore of the environment.
+var notSentRE = regexp.MustCompile(`(?:\b(?:env|proxies|proxy)\s*[:=]\s*(?:\{\s*\*\*\s*)?|\benviron\s*\.\s*update\(\s*|\bprocess\.env\s*,\s*)$`)
+
+// sends reports whether text has the copy of the environment name as a whole
+// word, and uses it as a whole: not as the target of an assignment or a keyword
+// ("old_env = ...", "data=..."), not to read one value (see readsOne),
+// not as the environment of a child process or the proxies of a request, and
+// not to restore the environment.
+func sends(text []byte, name string) bool {
+	for from := 0; ; {
+		i := bytes.Index(text[from:], []byte(name))
+		if i < 0 {
+			return false
+		}
+		i += from
+		from = i + 1
+		end := i + len(name)
+		if i > 0 && isWord(text[i-1]) || end < len(text) && isWord(text[end]) {
+			continue
+		}
+		after := bytes.TrimLeft(text[end:min(len(text), end+32)], " \t")
+		if len(after) > 0 && after[0] == '=' && !bytes.HasPrefix(after, []byte("==")) || readsOne(after) || notSentRE.Match(text[max(0, i-40):i]) {
+			continue
+		}
+		return true
+	}
+}
+
+// readsOne reports whether the text after a copy of the environment reads one
+// value from it: an index, .get( .pop( .setdefault(, or a property. Any other
+// method call, such as .encode() or .toString(), uses the copy as a whole.
+func readsOne(after []byte) bool {
+	if len(after) == 0 {
+		return false
+	}
+	if after[0] == '[' {
+		return true
+	}
+	if after[0] != '.' {
+		return false
+	}
+	member := bytes.TrimLeft(after[1:], " \t")
+	n := 0
+	for n < len(member) && isWord(member[n]) {
+		n++
+	}
+	switch string(member[:n]) {
+	case "get", "pop", "setdefault":
+		return true
+	}
+	return !bytes.HasPrefix(bytes.TrimLeft(member[n:], " \t"), []byte("("))
 }
 
 // usesName reports whether text has name as a whole word.
