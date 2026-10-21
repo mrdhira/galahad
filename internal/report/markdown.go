@@ -24,6 +24,11 @@ func mdEscape(s string) string {
 	return mdEscapeClean(strings.ReplaceAll(clean(s), "www.", "www[.]"))
 }
 
+// mdText is mdEscape for free text (snippets, titles, reasons): it also defangs the IOC hosts.
+func mdText(hosts map[string]bool, s string) string {
+	return mdEscapeClean(strings.ReplaceAll(text(hosts, s), "www.", "www[.]"))
+}
+
 // mdValue is mdEscape for a value that is a URL, domain, IP or email as a whole.
 func mdValue(s string) string {
 	return mdEscapeClean(cleanValue(s))
@@ -62,23 +67,29 @@ func mdEscapeClean(s string) string {
 func renderMarkdown(res *protocol.Result) string {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
+	hosts := iocHosts(res)
 
 	w("# Galahad report\n\n")
 	w("**Verdict: %s** | score %d/100 | confidence %d%% (%s)\n\n", mdEscape(strings.ToUpper(string(res.Verdict))), res.Score, res.Confidence, mdEscape(res.ConfidenceLevel))
 	for _, r := range res.Reasons {
-		w("- %s\n", mdEscape(r))
+		w("- %s\n", mdText(hosts, r))
 	}
 
 	w("\n## Target\n\n")
-	w("- Name: %s\n- Kind: %s\n- SHA-256: %s\n- Size: %d bytes, %d files\n", mdEscape(res.Target.Name), mdEscape(res.Target.Kind), mdEscape(res.Target.SHA256), res.Target.Size, res.Target.FileCount)
+	t := describeTarget(res.Target)
+	w("- Name: %s\n- Kind: %s\n", mdEscape(res.Target.Name), t.Kind)
+	if t.SHA256 != "" {
+		w("- SHA-256: %s\n", mdEscape(t.SHA256))
+	}
+	w("- Size: %s\n", t.Size)
 
 	all := rows(res, nil)
 	w("\n## Findings (%d)\n\n", len(all))
-	mdFindings(&b, all, mdMaxFindings)
+	mdFindings(&b, hosts, all, mdMaxFindings)
 
 	auto := rows(res, isAutoexec)
 	w("\n## Auto-execution inventory (%d)\n\n", len(auto))
-	mdFindings(&b, auto, mdMaxFindings)
+	mdFindings(&b, hosts, auto, mdMaxFindings)
 
 	w("\n## IOCs (%d)\n\n", len(res.IOCs))
 	if len(res.IOCs) == 0 {
@@ -96,7 +107,10 @@ func renderMarkdown(res *protocol.Result) string {
 
 	w("\n## Coverage\n\n")
 	c := res.Coverage
-	w("- Files analyzed: %d of %d (%s)\n", c.FilesAnalyzed, c.FilesSeen, percent(c.FilesAnalyzed, c.FilesSeen))
+	w("- %s\n", coverageLine(c))
+	if warn := coverageWarning(c); warn != "" {
+		w("- **Warning:** %s\n", warn)
+	}
 	if c.Truncated {
 		w("- Truncated: the file or finding limit was reached\n")
 	}
@@ -113,7 +127,7 @@ func renderMarkdown(res *protocol.Result) string {
 	return b.String()
 }
 
-func mdFindings(b *strings.Builder, rs []row, limit int) {
+func mdFindings(b *strings.Builder, hosts map[string]bool, rs []row, limit int) {
 	if len(rs) == 0 {
 		b.WriteString("None.\n")
 		return
@@ -124,7 +138,7 @@ func mdFindings(b *strings.Builder, rs []row, limit int) {
 			fmt.Fprintf(b, "\nShowing %d of %d. See report.json for the rest.\n", limit, len(rs))
 			break
 		}
-		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(string(r.Severity)), mdEscape(r.Rule), mdEscape(r.Title), mdEscape(r.Attack), mdEscape(r.Location), mdEscape(r.Snippet))
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(string(r.Severity)), mdEscape(r.Rule), mdText(hosts, r.Title), mdEscape(r.Attack), mdEscape(r.Location), mdText(hosts, r.Snippet))
 	}
 }
 
