@@ -7,11 +7,15 @@
 // cannot be read is reported twice: as GAL-PDF-007 (low) with the object line,
 // and as one coverage Skip per file, so the verdict cannot claim a full
 // analysis. The Skip reason is "encrypted" for a document with an /Encrypt
-// entry, "budget" when the object or token limit was hit (the file has more
-// objects or tokens than the analyzer reads, so a payload could sit in the part
-// that was not read), and "unsupported" when a non-image stream (always an
-// object stream) could not be decoded. A whole file over the size limit is
-// skipped by the engine as "too_large" before this analyzer runs.
+// entry; "budget" when a limit left part of the file's syntax unread (more
+// objects than MaxObjects, a dictionary, trailer or object stream cut by the
+// token limit, an inline action dictionary longer than the examined tokens, an
+// object stream that was cut by a size limit or could not be decoded), because
+// a payload could sit in the part that was not read; "too_large" when only plain
+// page content was cut by the token limit, which never holds actions; and
+// "unsupported" when another non-image stream could not be decoded. A whole file
+// over the size limit is skipped by the engine as "too_large" before this
+// analyzer runs.
 // Image streams are never decoded and never reported.
 package pdf
 
@@ -117,9 +121,10 @@ func evidenceKey(kind, off int) int { return off*4 + kind }
 // when buf is decoded data that is not in the file; hdr is then the offset of
 // the stream object that holds it.
 type region struct {
-	buf []byte
-	at  int
-	hdr int
+	buf     []byte
+	at      int
+	hdr     int
+	content bool // page content or other plain stream data, not a dictionary or object stream
 }
 
 // key returns the evidence key of the region.
@@ -164,7 +169,8 @@ type scanner struct {
 	lineNo    int
 	encrypted bool
 	undecoded bool
-	truncated bool
+	truncated bool // the token limit cut a dictionary, trailer or object stream: budget
+	cutPlain  bool // the token limit cut plain stream content: too_large
 	tooMany   bool
 }
 
@@ -206,6 +212,8 @@ func (s *scanner) run() (analyze.Output, error) {
 	out.IOCs = s.iocs
 	if s.tooMany || s.truncated {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipBudget})
+	} else if s.cutPlain {
+		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipTooLarge})
 	}
 	if s.encrypted {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipEncrypted})
@@ -240,7 +248,7 @@ func (s *scanner) scanObject(o *object) error {
 		return nil
 	}
 	if o.objStm || looksText(o.content) {
-		return s.scanRegion(region{buf: o.content, at: at, hdr: o.hdr})
+		return s.scanRegion(region{buf: o.content, at: at, hdr: o.hdr, content: !o.objStm})
 	}
 	return nil
 }
@@ -513,6 +521,7 @@ func (s *scanner) prepareStream(o *object, raw []byte, rawAt int) {
 		if err != "" {
 			s.addAt(ruleOpaque, o.hdr, err, evidenceKey(keyStream, o.hdr))
 			s.undecoded = true
+			s.truncated = s.truncated || o.objStm // its members stay unread
 			break
 		}
 	}
@@ -591,7 +600,11 @@ func (s *scanner) registerMembers(o *object) error {
 	head := s.tok(o.content[:o.first])
 	type member struct{ num, off int }
 	var ms []member
-	for i := 0; i+1 < len(head) && len(ms) < o.n && len(s.byNum)+len(ms) < 2*MaxObjects; i += 2 {
+	for i := 0; i+1 < len(head) && len(ms) < o.n; i += 2 {
+		if len(s.byNum)+len(ms) >= 2*MaxObjects {
+			s.tooMany = true
+			break
+		}
 		num, err1 := strconv.Atoi(head[i].val)
 		off, err2 := strconv.Atoi(head[i+1].val)
 		if err1 != nil || err2 != nil || off < 0 {

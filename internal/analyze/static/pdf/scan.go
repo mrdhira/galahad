@@ -33,7 +33,12 @@ func (s *scanner) scanTrailers() error {
 // scanRegion looks at the names and strings of one dictionary or decoded
 // stream. Each finding points at the token that triggered it.
 func (s *scanner) scanRegion(reg region) error {
-	toks := s.tok(reg.buf)
+	toks, cut := tokenize(reg.buf, maxTokens)
+	if cut && reg.content {
+		s.cutPlain = true
+	} else if cut {
+		s.truncated = true
+	}
 	for i, t := range toks {
 		if i&1023 == 0 {
 			if err := s.ctx.Err(); err != nil {
@@ -203,6 +208,7 @@ func (s *scanner) targetsAction(toks []token, j int) bool {
 	if toks[j].kind == tPunct && toks[j].val == "<<" {
 		level := 0
 		end := min(len(toks), j+maxInlineToks)
+		closed := false
 		for k := j; k < end; k++ {
 			if toks[k].kind != tPunct {
 				continue
@@ -215,8 +221,12 @@ func (s *scanner) targetsAction(toks []token, j int) bool {
 			}
 			if level == 0 {
 				end = k + 1
+				closed = true
 				break
 			}
+		}
+		if !closed && end < len(toks) {
+			s.truncated = true // the dictionary goes on past what is examined
 		}
 		return s.holdsAction(toks[j:end])
 	}
