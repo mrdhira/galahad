@@ -213,18 +213,19 @@ func TestResultJSON(t *testing.T) {
 	}
 }
 
-func TestSkipHidesContent(t *testing.T) {
+func TestSkipUnreadAndHidesContent(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
 		reason string
 		// expectations
-		wantHides bool
+		wantUnread bool
+		wantHides  bool
 	}{
-		{name: "too large", reason: protocol.SkipTooLarge, wantHides: true},
-		{name: "budget", reason: protocol.SkipBudget, wantHides: true},
-		{name: "depth", reason: protocol.SkipDepth, wantHides: true},
-		{name: "encrypted", reason: protocol.SkipEncrypted, wantHides: true},
+		{name: "too large is unread but hides nothing", reason: protocol.SkipTooLarge, wantUnread: true},
+		{name: "budget", reason: protocol.SkipBudget, wantUnread: true, wantHides: true},
+		{name: "depth", reason: protocol.SkipDepth, wantUnread: true, wantHides: true},
+		{name: "encrypted", reason: protocol.SkipEncrypted, wantUnread: true, wantHides: true},
 		{name: "unsupported", reason: protocol.SkipUnsupported},
 		{name: "parse error", reason: protocol.SkipParseError},
 		{name: "timeout", reason: protocol.SkipTimeout},
@@ -232,8 +233,9 @@ func TestSkipHidesContent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := (protocol.Skip{Path: "a", Reason: tt.reason}).HidesContent(); got != tt.wantHides {
-				t.Errorf("HidesContent() = %v, want %v", got, tt.wantHides)
+			s := protocol.Skip{Path: "a", Reason: tt.reason}
+			if s.Unread() != tt.wantUnread || s.HidesContent() != tt.wantHides {
+				t.Errorf("Unread() = %v, HidesContent() = %v, want %v, %v", s.Unread(), s.HidesContent(), tt.wantUnread, tt.wantHides)
 			}
 		})
 	}

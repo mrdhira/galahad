@@ -35,8 +35,10 @@ const (
 	tarHeadLen      = 512
 	partHeadLen     = 512         // bytes of an OOXML part checked against its name
 	eocdWindow      = 64<<10 + 22 // where the end of central directory record of a zip may start
+	eocdLen         = 22          // fixed part of the end of central directory record
+	dirHeadLen      = 46          // fixed part of a central directory record
 	localHeadLen    = 30          // fixed part of a zip local file header
-	maxLocalExtra   = 1<<16 - 1   // longest name or extra field of a local file header
+	max32           = 1<<32 - 1   // a 32-bit zip field that is too small, so the zip64 field holds the value
 )
 
 var (
@@ -53,6 +55,7 @@ var (
 
 var (
 	localSig = []byte("PK\x03\x04")
+	dirSig   = []byte("PK\x01\x02")
 	eocdSig  = []byte("PK\x05\x06")
 )
 
@@ -67,6 +70,7 @@ func (analyzer) Name() string { return "archive" }
 
 func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
 	u := &unpack{ctx: ctx, f: f, left: allowance(len(f.Data))}
+
 	var err error
 	switch f.Kind {
 	case ident.Zip, ident.OOXML, ident.Tar, ident.Gzip, ident.Bzip2:
@@ -92,6 +96,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 			u.skip(f.Path, protocol.SkipUnsupported)
 		}
 	}
+	u.flush()
 	return u.out, err
 }
 
@@ -114,6 +119,38 @@ type unpack struct {
 	left    int64 // decompressed bytes still allowed
 	entries int
 	bombed  bool
+
+	// Findings that every entry of a bad archive would raise are kept as one each.
+	backslash, names tally
+}
+
+// tally groups the entries of one archive that raise the same finding, so that a
+// flood of them cannot fill the findings cap before the members are analyzed.
+type tally struct {
+	n      int
+	path   string // evidence path of the first
+	detail string // what the first looked like
+}
+
+func (t *tally) add(path, detail string) {
+	if t.n == 0 {
+		t.path, t.detail = path, detail
+	}
+	t.n++
+}
+
+// flush reports the grouped findings, once the entries are all seen.
+func (u *unpack) flush() {
+	for _, g := range []struct {
+		rule protocol.Rule
+		t    *tally
+	}{{ruleBackslash, &u.backslash}, {ruleNames, &u.names}} {
+		if g.t.n > 0 {
+			u.out.Findings = append(u.out.Findings, g.rule.Finding(protocol.Evidence{
+				Path: g.t.path, Snippet: protocol.Snippet(fmt.Sprintf("%d in this archive, first: %s", g.t.n, g.t.detail)),
+			}))
+		}
+	}
 }
 
 func (u *unpack) member(name string) string { return u.f.Path + "!/" + protocol.CleanPath(name) }
@@ -155,9 +192,7 @@ func (u *unpack) admit(name string) (ok, stop bool) {
 	}
 	if strings.Contains(name, `\`) {
 		// The engine turns the backslash into a slash, so keep the raw name here.
-		u.out.Findings = append(u.out.Findings, ruleBackslash.Finding(protocol.Evidence{
-			Path: u.member(name), Snippet: protocol.Snippet(name),
-		}))
+		u.backslash.add(u.member(name), name)
 	}
 	return true, false
 }
@@ -266,31 +301,113 @@ func (u *unpack) inert(zf *zip.File) bool {
 		bytes.IndexByte(head, 0) < 0 && (kind == ident.Text || kind == ident.Unknown)
 }
 
-// localName returns the name in the local file header of zf when it differs from
-// the name in the central directory. A local header that cannot be found is not
-// a mismatch. The header is the closest "PK\x03\x04" before the data whose name and
-// extra field lengths end exactly at the data.
-func localName(data []byte, zf *zip.File) (string, bool) {
-	dataAt, err := zf.DataOffset()
-	if err != nil || dataAt > int64(len(data)) {
-		return "", false
+// localNames returns the name in the local file header of every entry of zr, in
+// directory order. It follows the offsets of the central directory records, the
+// way the zip reader does, so a header that an attacker plants elsewhere cannot
+// stand in for the real one. ok is false when the records do not match the
+// reader's entries or point at no local header.
+func localNames(data []byte, zr *zip.Reader) (names []string, ok bool) {
+	pos, base, ok := directory(data)
+	if !ok {
+		return nil, false
 	}
-	lo := max(0, dataAt-localHeadLen-2*maxLocalExtra)
-	end := dataAt - localHeadLen + int64(len(localSig)) // the last signature that leaves room for the fixed part
-	for end > lo {
-		at := lo + int64(bytes.LastIndex(data[lo:end], localSig))
-		if at < lo {
-			return "", false
+	size := int64(len(data))
+	names = make([]string, 0, len(zr.File))
+	for _, zf := range zr.File {
+		if pos+dirHeadLen > size || !bytes.HasPrefix(data[pos:], dirSig) {
+			return nil, false
 		}
-		nameLen := int64(binary.LittleEndian.Uint16(data[at+26:]))
-		extraLen := int64(binary.LittleEndian.Uint16(data[at+28:]))
-		if at+localHeadLen+nameLen+extraLen == dataAt {
-			name := string(data[at+localHeadLen : at+localHeadLen+nameLen])
-			return name, name != zf.Name
+		rec := data[pos:]
+		nameLen, extraLen, commentLen := int64(le.Uint16(rec[28:])), int64(le.Uint16(rec[30:])), int64(le.Uint16(rec[32:]))
+		next := pos + dirHeadLen + nameLen + extraLen + commentLen
+		if next > size || string(rec[dirHeadLen:dirHeadLen+nameLen]) != zf.Name {
+			return nil, false
 		}
-		end = at + int64(len(localSig)) - 1
+		off := int64(le.Uint32(rec[42:]))
+		if off == max32 {
+			if off, ok = zip64Offset(rec[dirHeadLen+nameLen:dirHeadLen+nameLen+extraLen], le.Uint32(rec[24:]), le.Uint32(rec[20:])); !ok {
+				return nil, false
+			}
+		}
+		at := base + off
+		if at < 0 || at+localHeadLen > size || !bytes.HasPrefix(data[at:], localSig) {
+			return nil, false
+		}
+		end := at + localHeadLen + int64(le.Uint16(data[at+26:]))
+		dataAt, err := zf.DataOffset()
+		if end > size || err != nil || dataAt != end+int64(le.Uint16(data[at+28:])) {
+			return nil, false
+		}
+		names = append(names, string(data[at+localHeadLen:end]))
+		pos = next
 	}
-	return "", false
+	return names, true
+}
+
+var le = binary.LittleEndian
+
+// directory finds where the central directory records start and how far the
+// offsets stored in them are shifted by data before the zip, as the zip reader
+// does: from the end of central directory record and its zip64 form.
+func directory(data []byte) (start, base int64, ok bool) {
+	size := int64(len(data))
+	lo := max(0, size-eocdWindow)
+	last := size - eocdLen + int64(len(eocdSig))
+	if last <= lo {
+		return 0, 0, false
+	}
+	at := lo + int64(bytes.LastIndex(data[lo:last], eocdSig))
+	if at < lo || at+eocdLen+int64(le.Uint16(data[at+20:])) > size {
+		return 0, 0, false
+	}
+	dirSize, dirOff, end := int64(le.Uint32(data[at+12:])), int64(le.Uint32(data[at+16:])), at
+	if le.Uint16(data[at+10:]) == 0xffff || dirSize == max32 || dirOff == max32 {
+		// A zip64 locator sits right before the record, and the zip64 record holds the real values.
+		if loc := at - 20; loc >= 0 && bytes.HasPrefix(data[loc:], []byte("PK\x06\x07")) && le.Uint32(data[loc+4:]) == 0 && le.Uint32(data[loc+16:]) == 1 {
+			p := le.Uint64(data[loc+8:])
+			if p > uint64(size) || int64(p)+56 > size || !bytes.HasPrefix(data[p:], []byte("PK\x06\x06")) {
+				return 0, 0, false
+			}
+			sz, off := le.Uint64(data[p+40:]), le.Uint64(data[p+48:])
+			if sz > 1<<62 || off > 1<<62 {
+				return 0, 0, false
+			}
+			dirSize, dirOff, end = int64(sz), int64(off), int64(p)
+		}
+	}
+	base = end - dirSize - dirOff
+	if dirOff+base < 0 || dirOff+base >= size {
+		return 0, 0, false
+	}
+	if base > 0 && dirOff+dirHeadLen <= size && bytes.HasPrefix(data[dirOff:], dirSig) {
+		base = 0 // the records are valid without the shift, which the reader prefers
+	}
+	return dirOff + base, base, true
+}
+
+// zip64Offset reads the offset of a local header from the zip64 extra field of a
+// central directory record, which holds only the values whose 32-bit fields are full.
+func zip64Offset(extra []byte, usize, csize uint32) (int64, bool) {
+	for len(extra) >= 4 {
+		id, n := le.Uint16(extra), int(le.Uint16(extra[2:]))
+		if extra = extra[4:]; n > len(extra) {
+			return 0, false
+		}
+		if id == 1 {
+			b := extra[:n]
+			for _, full := range []bool{usize == max32, csize == max32} {
+				if full {
+					b = b[min(8, len(b)):]
+				}
+			}
+			if len(b) < 8 || le.Uint64(b) > 1<<62 {
+				return 0, false
+			}
+			return int64(le.Uint64(b)), true
+		}
+		extra = extra[n:]
+	}
+	return 0, false
 }
 
 func (u *unpack) reader() (*zip.Reader, error) {
@@ -330,7 +447,11 @@ func (u *unpack) appended() error {
 }
 
 func (u *unpack) members(zr *zip.Reader) error {
-	for _, zf := range zr.File {
+	locals, matched := localNames(u.f.Data, zr)
+	if !matched {
+		u.names.add(u.f.Path, "the local headers do not match the central directory")
+	}
+	for i, zf := range zr.File {
 		if err := u.ctx.Err(); err != nil {
 			return err
 		}
@@ -340,8 +461,8 @@ func (u *unpack) members(zr *zip.Reader) error {
 		}
 		mode := zf.Mode()
 		alt := ""
-		if ok && !mode.IsDir() {
-			alt = u.mismatch(zf)
+		if ok && matched && !mode.IsDir() {
+			alt = u.mismatch(zf, locals[i])
 		}
 		switch {
 		case !ok, mode.IsDir():
@@ -380,14 +501,11 @@ func (u *unpack) members(zr *zip.Reader) error {
 // mismatch reports an entry whose local header name differs from its central
 // directory name and returns the local name, or "" when there is nothing more to
 // analyze: the names agree, or the local name escapes or reads the same.
-func (u *unpack) mismatch(zf *zip.File) string {
-	local, differs := localName(u.f.Data, zf)
-	if !differs {
+func (u *unpack) mismatch(zf *zip.File, local string) string {
+	if local == zf.Name {
 		return ""
 	}
-	u.out.Findings = append(u.out.Findings, ruleNames.Finding(protocol.Evidence{
-		Path: u.member(zf.Name), Snippet: protocol.Snippet("central: " + zf.Name + ", local: " + local),
-	}))
+	u.names.add(u.member(zf.Name), "central: "+zf.Name+", local: "+local)
 	if escapes(local) {
 		u.out.Findings = append(u.out.Findings, ruleSlip.Finding(protocol.Evidence{
 			Path: u.member(local), Snippet: protocol.Snippet(local),

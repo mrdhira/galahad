@@ -2,7 +2,9 @@ package acceptance_test
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,6 +27,37 @@ func builtFile(name string, build func(t *testing.T, dest string)) func(t *testi
 		p := filepath.Join(t.TempDir(), name)
 		build(t, p)
 		return p
+	}
+}
+
+// nestingLimit is analyze.MaxNesting: an archive at this container depth is not opened.
+const nestingLimit = 6
+
+// corpusWithBig returns a builder that copies a committed fixture into a scratch directory and
+// adds a file of zeros of the given size, like a data file or a media file in a repository.
+func corpusWithBig(name, bigName string, size int64) func(t *testing.T) string {
+	return func(t *testing.T) string {
+		dir := t.TempDir()
+		for _, e := range dirEntries(t, corpus(t, name), "") {
+			p := filepath.Join(dir, filepath.FromSlash(e.name))
+			if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			writeBytes(t, p, e.data)
+		}
+		writeBytes(t, filepath.Join(dir, bigName), make([]byte, size))
+		return dir
+	}
+}
+
+// payloadAs returns a builder for a zip that holds the tasks file of p1-folderopen-curl under name.
+func payloadAs(name string) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		tasks, err := os.ReadFile(filepath.Join(corpus(t, "p1-folderopen-curl"), ".vscode", "tasks.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		zipEntries(t, dest, []zipEntry{{name: name, data: tasks}})
 	}
 }
 
@@ -249,21 +282,21 @@ func TestCorpus(t *testing.T) {
 			wantRules: []string{"GAL-AUTOEXEC-001 setup.exe!/.vscode/tasks.json:7", "GAL-ARCHIVE-006 setup.exe:0"},
 		},
 		{
-			name: "archive-nested: the payload sits in a zip inside four zips, beyond the nesting limit (built)",
+			name: "archive-nested: the payload sits in a zip at the nesting limit, so it is not opened (built)",
 			target: builtFile("deep.zip", func(t *testing.T, dest string) {
-				nestedZips(t, dest, 5, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+				nestedZips(t, dest, nestingLimit+1, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
 			}),
 			wantCode:    10,
 			wantSkips:   1,
 			wantSummary: []string{"part of the input could not be analyzed"},
 		},
 		{
-			name: "archive-nested within the limit: the payload sits in a zip inside three zips (built)",
+			name: "archive-nested within the limit: the payload sits in a zip one level above the limit (built)",
 			target: builtFile("deep.zip", func(t *testing.T, dest string) {
-				nestedZips(t, dest, 4, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+				nestedZips(t, dest, nestingLimit, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
 			}),
 			wantCode:  20,
-			wantRules: []string{"GAL-AUTOEXEC-001 deep.zip!/next.zip!/next.zip!/next.zip!/.vscode/tasks.json:7"},
+			wantRules: []string{"GAL-AUTOEXEC-001 deep.zip" + strings.Repeat("!/next.zip", nestingLimit-1) + "!/.vscode/tasks.json:7"},
 		},
 		{
 			name: "archive-name-mismatch: the local header names the task file, the central directory a harmless name (built)",
@@ -281,6 +314,73 @@ func TestCorpus(t *testing.T) {
 			}),
 			wantCode:  20,
 			wantRules: []string{"GAL-ARCHIVE-007 mismatch.zip!/_vscode/tasks.json:0", "GAL-AUTOEXEC-001 mismatch.zip!/.vscode/tasks.json:7"},
+		},
+
+		{
+			name: "archive-flood: thousands of backslash names do not push the payload findings out (built)",
+			target: builtFile("flood.zip", func(t *testing.T, dest string) {
+				var entries []zipEntry
+				for i := range 2100 {
+					entries = append(entries, zipEntry{name: fmt.Sprintf(`docs\page%04d.txt`, i), data: []byte("page\n")})
+				}
+				zipEntries(t, dest, append(entries, dirEntries(t, corpus(t, "p1-folderopen-curl"), "")...))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 flood.zip!/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 flood.zip!/.vscode/tasks.json:7", `GAL-ARCHIVE-005 flood.zip!/docs\page0000.txt:0`},
+		},
+		{
+			name: "archive-fake-header: a decoy local header in the extra field hides the real local name (built)",
+			target: builtFile("decoy.zip", func(t *testing.T, dest string) {
+				tasks, err := os.ReadFile(filepath.Join(corpus(t, "p1-folderopen-curl"), ".vscode", "tasks.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				const name = "_vscode/tasks.json"
+				fake := make([]byte, 30)
+				copy(fake, "PK\x03\x04")
+				fake[26] = byte(len(name))
+				fake = append(fake, name...)
+				h := &zip.FileHeader{Name: name, Method: zip.Store, Extra: append([]byte{0x66, 0x66, byte(len(fake)), 0}, fake...)}
+				var buf bytes.Buffer
+				zw := zip.NewWriter(&buf)
+				w, err := zw.CreateHeader(h)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.Write(tasks); err != nil {
+					t.Fatal(err)
+				}
+				if err := zw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				writeBytes(t, dest, bytes.Replace(buf.Bytes(), []byte(name), []byte(".vscode/tasks.json"), 1))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-ARCHIVE-007 decoy.zip!/_vscode/tasks.json:0", "GAL-AUTOEXEC-001 decoy.zip!/.vscode/tasks.json:7"},
+		},
+		{
+			name:      "archive-name-doubled-backslash: .vscode\\tasks.json is the same path (built)",
+			target:    builtFile("doubled.zip", payloadAs(`.vscode\\tasks.json`)),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 doubled.zip!/.vscode/tasks.json:7"},
+		},
+		{
+			name:      "archive-name-dot-backslash: .vscode\\.\\tasks.json is the same path (built)",
+			target:    builtFile("dotted.zip", payloadAs(`.vscode\.\tasks.json`)),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 dotted.zip!/.vscode/tasks.json:7"},
+		},
+		{
+			name:      "archive-name-double-slash: .vscode//tasks.json is the same path (built)",
+			target:    builtFile("slashes.zip", payloadAs(".vscode//tasks.json")),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 slashes.zip!/.vscode/tasks.json:7"},
+		},
+		{
+			name:      "archive-name-dot-segment: .vscode/./tasks.json is the same path (built)",
+			target:    builtFile("segment.zip", payloadAs(".vscode/./tasks.json")),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 segment.zip!/.vscode/tasks.json:7"},
 		},
 
 		// Benign twins (P7).
@@ -344,6 +444,20 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "benign-archive: zip of benign-go-cli (built)",
 			target: builtFile("benign.zip", zipOfBenignCLI), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:   "benign-python-lib with a 40 MiB data file: too large to read, but not a verdict (built)",
+			target: corpusWithBig("benign-python-lib", "weights.bin", 40<<20), wantCode: 0, wantQuiet: true, wantSkips: 1,
+		},
+		{
+			name: "benign-docx with a document.xml over 16 MiB (built)",
+			target: builtFile("big.docx", func(t *testing.T, dest string) {
+				entries := benignDocxEntries()
+				entries[1].data = append(entries[1].data[:len(entries[1].data)-len("</w:body></w:document>")], append(bytes.Repeat([]byte(" "), 17<<20), "</w:body></w:document>"...)...)
+				zipEntries(t, dest, entries)
+			}),
+			wantCode: 0, wantQuiet: true, wantSkips: 1,
+			wantIOCs: []string{"https://docs.sinkhole.test/guide"},
 		},
 		{
 			name:   "built galahad binary: a normal Go executable",

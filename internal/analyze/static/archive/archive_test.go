@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"io/fs"
 	"math/rand/v2"
 	"slices"
@@ -25,6 +27,8 @@ type entry struct {
 	mode fs.FileMode
 	flag uint16
 	raw  []byte // when set, written instead of data, with the stored method
+	// extra is written as the extra field of the local header and the central directory record
+	extra []byte
 }
 
 func zipOf(t *testing.T, entries ...entry) []byte {
@@ -32,7 +36,7 @@ func zipOf(t *testing.T, entries ...entry) []byte {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for _, e := range entries {
-		h := &zip.FileHeader{Name: e.name, Method: zip.Deflate, Flags: e.flag}
+		h := &zip.FileHeader{Name: e.name, Method: zip.Deflate, Flags: e.flag, Extra: e.extra}
 		if e.mode != 0 {
 			h.SetMode(e.mode)
 		}
@@ -154,6 +158,94 @@ func mismatched(t *testing.T, from, to string) []byte {
 	return bytes.Replace(zipOf(t, entry{name: from, data: "payload"}), []byte(from), []byte(to), 1)
 }
 
+// fakeHeader is an extra field block that holds a well-formed local file header for name.
+func fakeHeader(name string) []byte {
+	h := make([]byte, 30)
+	copy(h, "PK\x03\x04")
+	h[26] = byte(len(name))
+	h = append(h, name...)
+	return append([]byte{0x66, 0x66, byte(len(h)), 0}, h...)
+}
+
+// rawZip assembles a stored zip by hand: n central directory records that all point at one local
+// header named "a" with the data "x" and the given local extra field. With zip64 the records
+// keep their offset in a zip64 extra field and the directory ends with the zip64 records.
+func rawZip(n int, extra []byte, zip64 bool) []byte {
+	le := binary.LittleEndian
+	crc := crc32.ChecksumIEEE([]byte("x"))
+	b := []byte("PK\x03\x04")
+	b = le.AppendUint16(b, 20)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint32(b, 0)
+	b = le.AppendUint32(b, crc)
+	b = le.AppendUint32(b, 1)
+	b = le.AppendUint32(b, 1)
+	b = le.AppendUint16(b, 1)
+	b = le.AppendUint16(b, uint16(len(extra)))
+	b = append(b, 'a')
+	b = append(b, extra...)
+	b = append(b, 'x')
+	dirAt := len(b)
+	for range n {
+		b = append(b, "PK\x01\x02"...)
+		b = le.AppendUint16(b, 20)
+		b = le.AppendUint16(b, 20)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint32(b, crc)
+		b = le.AppendUint32(b, 1)
+		b = le.AppendUint32(b, 1)
+		b = le.AppendUint16(b, 1)
+		offset := uint32(0)
+		if zip64 {
+			b = le.AppendUint16(b, 12)
+			offset = 1<<32 - 1
+		} else {
+			b = le.AppendUint16(b, 0)
+		}
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint32(b, offset)
+		b = append(b, 'a')
+		if zip64 {
+			b = le.AppendUint16(b, 1)
+			b = le.AppendUint16(b, 8)
+			b = le.AppendUint64(b, 0)
+		}
+	}
+	dirSize, dirOff := uint32(len(b)-dirAt), uint32(dirAt)
+	if zip64 {
+		end := len(b)
+		b = append(b, "PK\x06\x06"...)
+		b = le.AppendUint64(b, 44)
+		b = le.AppendUint16(b, 45)
+		b = le.AppendUint16(b, 45)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint64(b, uint64(n))
+		b = le.AppendUint64(b, uint64(n))
+		b = le.AppendUint64(b, uint64(dirSize))
+		b = le.AppendUint64(b, uint64(dirAt))
+		b = append(b, "PK\x06\x07"...)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint64(b, uint64(end))
+		b = le.AppendUint32(b, 1)
+		dirOff = 1<<32 - 1
+	}
+	b = append(b, "PK\x05\x06"...)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint16(b, uint16(n))
+	b = le.AppendUint16(b, uint16(n))
+	b = le.AppendUint32(b, dirSize)
+	b = le.AppendUint32(b, dirOff)
+	return le.AppendUint16(b, 0)
+}
+
 const oleMagic = "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 func TestAnalyze(t *testing.T) {
@@ -163,6 +255,20 @@ func TestAnalyze(t *testing.T) {
 	for i := range archive.MaxEntries + 1 {
 		many = append(many, entry{name: fmt.Sprintf("f%d", i)})
 	}
+	crowded := make([]string, archive.MaxEntries)
+	for i := range crowded {
+		crowded[i] = "a"
+	}
+	// A 64 KiB extra field full of local header signatures, which a scan for the header would trip over.
+	decoys := bytes.Repeat([]byte("PK\x03\x04"), 1<<14-1)
+	withGap := func() []byte {
+		z := zipOf(t, entry{name: "a.txt", data: "a"})
+		end := bytes.LastIndex(z, []byte("PK\x05\x06"))
+		return slices.Concat(z[:end], []byte("junk!"), z[end:])
+	}()
+	// The second local header loses the last byte of its signature.
+	badLocal := zipOf(t, entry{name: "a.txt", data: "a"}, entry{name: "b.txt", data: "b"})
+	badLocal[bytes.LastIndex(badLocal[:bytes.Index(badLocal, []byte("PK\x01\x02"))], []byte("PK\x03\x04"))+3] = 5
 	iso := make([]byte, 0x8100)
 	copy(iso[0x8001:], "CD001")
 
@@ -228,6 +334,10 @@ func TestAnalyze(t *testing.T) {
 				return names
 			}(),
 			wantSkips: []string{"in.zip budget"}},
+		{name: "many backslash names give one finding for the first", file: "in.zip",
+			data:         zipOf(t, entry{name: `a\1`}, entry{name: `a\2`}, entry{name: `a\3`}),
+			wantChildren: []string{`a\1`, `a\2`, `a\3`},
+			wantFindings: []string{`GAL-ARCHIVE-005 in.zip!/a\1`}},
 		{name: "parent segment", file: "in.zip", data: zipOf(t, entry{name: "../../evil.sh", data: "x"}),
 			wantFindings: []string{"GAL-ARCHIVE-001 in.zip!/../../evil.sh"}},
 		{name: "absolute path", file: "in.zip", data: zipOf(t, entry{name: "/etc/cron.d/x", data: "x"}),
@@ -249,9 +359,30 @@ func TestAnalyze(t *testing.T) {
 		{name: "local name differs from the central name", file: "in.zip", data: mismatched(t, "a.txt", "b.txt"),
 			wantChildren: []string{"a.txt", "b.txt"},
 			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/a.txt"}},
+		{name: "many local names that differ give one finding for the first", file: "in.zip",
+			data: bytes.Replace(
+				bytes.Replace(zipOf(t, entry{name: "a.txt", data: "a"}, entry{name: "c.txt", data: "c"}), []byte("a.txt"), []byte("b.txt"), 1),
+				[]byte("c.txt"), []byte("d.txt"), 1),
+			wantChildren: []string{"a.txt", "b.txt", "c.txt", "d.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/a.txt"}},
 		{name: "local name that escapes is reported and not unpacked", file: "in.zip", data: mismatched(t, "abcdefg", "../evil"),
 			wantChildren: []string{"abcdefg"},
-			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/abcdefg", "GAL-ARCHIVE-001 in.zip!/../evil"}},
+			wantFindings: []string{"GAL-ARCHIVE-001 in.zip!/../evil", "GAL-ARCHIVE-007 in.zip!/abcdefg"}},
+		{name: "fake local header in the extra field does not hide the real local name", file: "in.zip",
+			data: bytes.Replace(zipOf(t, entry{name: "_vscode/tasks.json", data: "{}", extra: fakeHeader("_vscode/tasks.json")}),
+				[]byte("_vscode/tasks.json"), []byte(".vscode/tasks.json"), 1),
+			wantChildren: []string{"_vscode/tasks.json", ".vscode/tasks.json"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/_vscode/tasks.json"}},
+		{name: "local header that is not where the directory says is reported", file: "in.zip",
+			data:         badLocal,
+			wantChildren: []string{"a.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip"}, wantSkips: []string{"in.zip!/b.txt parse_error"}},
+		{name: "many entries sharing one local header with decoy signatures", file: "in.zip",
+			data: rawZip(archive.MaxEntries, decoys, false), wantChildren: crowded},
+		{name: "zip64 central directory records are followed", file: "in.zip",
+			data: rawZip(2, nil, true), wantChildren: []string{"a", "a"}},
+		{name: "gap before the end record does not shift the offsets", file: "in.zip",
+			data: withGap, wantChildren: []string{"a.txt"}},
 		{name: "local name that only differs by separator is reported once", file: "in.zip", data: mismatched(t, "a/b.txt", `a\b.txt`),
 			wantChildren: []string{"a/b.txt"},
 			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/a/b.txt"}},
@@ -274,7 +405,7 @@ func TestAnalyze(t *testing.T) {
 				entry{name: "[Content_Types].xml.bak", data: "x"}, entry{name: "wordy/run.xml", data: "x"}, entry{name: "word", data: "x"},
 				entry{name: `word\theme.xml`, data: "<t/>"}, entry{name: `word\vbaProject.bin`, data: "x"}),
 			wantChildren: []string{"extra/.vscode/tasks.json", "run.js", "[Content_Types].xml.bak", "wordy/run.xml", "word", `word\theme.xml`, `word\vbaProject.bin`},
-			wantFindings: []string{`GAL-ARCHIVE-005 in.docx!/word\theme.xml`, `GAL-ARCHIVE-005 in.docx!/word\vbaProject.bin`}},
+			wantFindings: []string{`GAL-ARCHIVE-005 in.docx!/word\theme.xml`}},
 		{name: "ooxml unpacks payloads below the package folders", file: "in.docx",
 			data: zipOf(t,
 				entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/.vscode/tasks.json", data: "{}"},
@@ -409,9 +540,9 @@ func TestAnalyzeRuleMetadata(t *testing.T) {
 	}{
 		{name: "zip slip", data: zipOf(t, entry{name: "../x"}), wantRule: "GAL-ARCHIVE-001", wantSeverity: "high", wantSnippet: "../x"},
 		{name: "encrypted entry", data: zipOf(t, entry{name: "s", flag: 1}), wantRule: "GAL-ARCHIVE-004", wantSeverity: "medium", wantAttack: "T1027.013", wantSnippet: "encrypted entry"},
-		{name: "backslash name", data: zipOf(t, entry{name: `a\b`}), wantRule: "GAL-ARCHIVE-005", wantSeverity: "low", wantSnippet: `a\b`},
+		{name: "backslash name", data: zipOf(t, entry{name: `a\b`}), wantRule: "GAL-ARCHIVE-005", wantSeverity: "low", wantSnippet: `1 in this archive, first: a\b`},
 		{name: "appended zip", data: sfx(t, zipOf(t, entry{name: "a"})...), wantRule: "GAL-ARCHIVE-006", wantSeverity: "low", wantSnippet: "1 zip entries after the executable"},
-		{name: "name mismatch", data: mismatched(t, "a.txt", "b.txt"), wantRule: "GAL-ARCHIVE-007", wantSeverity: "medium", wantSnippet: "central: a.txt, local: b.txt"},
+		{name: "name mismatch", data: mismatched(t, "a.txt", "b.txt"), wantRule: "GAL-ARCHIVE-007", wantSeverity: "medium", wantSnippet: "1 in this archive, first: central: a.txt, local: b.txt"},
 		{name: "link target is shown", data: tarOf(t, tarEntry{name: "l", link: "/etc/passwd", typeflag: tar.TypeSymlink}), wantRule: "GAL-ARCHIVE-002", wantSeverity: "medium", wantSnippet: "l -> /etc/passwd"},
 	}
 	for _, tt := range tests {

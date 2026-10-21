@@ -7,7 +7,7 @@ const (
 	MaxFileSize   = 32 << 20 // bytes given to analyzers
 	MaxTotalBytes = 1 << 30  // read plus unpacked bytes per job
 	MaxFiles      = 20000    // files analyzed per job, members included
-	MaxNesting    = 4        // container depth
+	MaxNesting    = 6        // container depth
 	MaxDirDepth   = 64
 	MaxLineScan   = 1 << 20 // bytes per line scanned by line heuristics
 	MaxConfigSize = 1 << 20 // JSON, JSONC and YAML-ish config files

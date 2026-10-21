@@ -114,6 +114,10 @@ func Apply(res *protocol.Result) {
 		reasons = append(reasons, "part of the input could not be analyzed")
 	}
 
+	if verdict == protocol.VerdictClean && res.Coverage.Truncated {
+		reasons = append(reasons, "a limit cut the analysis short")
+	}
+
 	agree := len(analyzers) >= 2
 	if agree {
 		names := make([]string, 0, len(analyzers))
@@ -133,9 +137,14 @@ func Apply(res *protocol.Result) {
 	default:
 		a := 1.0
 		switch {
-		case verdict == protocol.VerdictClean && hasLow:
-			a = 0.9
-		case verdict != protocol.VerdictClean && !agree:
+		case verdict == protocol.VerdictClean:
+			if hasLow {
+				a = 0.9
+			}
+			if res.Coverage.Truncated {
+				a *= 0.5
+			}
+		case !agree:
 			a = 0.75
 		}
 		conf = int(math.Round(100 * cov * a))
