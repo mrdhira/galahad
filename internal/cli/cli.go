@@ -11,6 +11,8 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/mrdhira/galahad/internal/config"
+	"github.com/mrdhira/galahad/internal/images"
 	"github.com/mrdhira/galahad/internal/sandbox"
 )
 
@@ -34,6 +36,8 @@ const usage = `Usage: galahad <command> [flags]
 Commands:
   scan      Scan a local file or folder in the sandbox: galahad scan [flags] <path>
               --image core|re  --timeout <duration>  --cpus <n>  --memory <MiB>  --no-network
+  setup     Download and verify the pinned Firecracker and guest images: galahad setup [--image core|re]
+  doctor    Check that this host can run scans, and say how to fix what is wrong
   report    Show the report of a past scan: galahad report <id> [--json]
   jobs      List past scans, or remove them: galahad jobs [rm <id>...]
   version   Print version information
@@ -49,6 +53,20 @@ type Env struct {
 	Now func() time.Time
 	// Backend returns the sandbox backend. Nil means sandbox.Select.
 	Backend func() (sandbox.Backend, error)
+	// Pins returns the pinned images and Firecracker for setup and doctor. Nil means images.Load.
+	Pins func() (images.Pins, error)
+	// Downloader fetches the assets for setup. Nil means images.NewDownloader.
+	Downloader *images.Downloader
+	// GOOS and GOARCH name the platform that setup and doctor check. Empty means the running one.
+	GOOS, GOARCH string
+	// KVM is the device doctor opens. Empty means /dev/kvm.
+	KVM string
+	// Exe is the path of this executable, next to which doctor looks for the agent. Empty means
+	// os.Executable.
+	Exe string
+	// FreeBytes returns the space available to this user on the file system that holds dir. Nil
+	// means the system call (Linux only).
+	FreeBytes func(dir string) (uint64, error)
 }
 
 // Run executes the command in args (without the program name) and returns the exit code.
@@ -72,12 +90,16 @@ func RunWithEnv(args []string, stdout, stderr io.Writer, env Env) int {
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitClean
+	case "doctor":
+		return runDoctor(args[1:], stdout, stderr, env)
 	case "jobs":
 		return runJobs(args[1:], stdout, stderr, env)
 	case "report":
 		return runReport(args[1:], stdout, stderr, env)
 	case "scan":
 		return runScan(args[1:], stdout, stderr, env)
+	case "setup":
+		return runSetup(args[1:], stdout, stderr, env)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:
@@ -134,4 +156,40 @@ func buildCommit() string {
 		}
 	}
 	return "unknown"
+}
+
+// home returns the galahad state directory.
+func (e Env) home() (string, error) {
+	if e.Home != "" {
+		return e.Home, nil
+	}
+	return config.Home()
+}
+
+// pins returns the pinned images.
+func (e Env) pins() (images.Pins, error) {
+	if e.Pins != nil {
+		return e.Pins()
+	}
+	return images.Load()
+}
+
+// platform returns the name of this system, and what is wrong with it when setup and doctor do
+// not support it.
+func (e Env) platform() (name, problem string) {
+	goos, goarch := runtime.GOOS, runtime.GOARCH
+	if e.GOOS != "" {
+		goos = e.GOOS
+	}
+	if e.GOARCH != "" {
+		goarch = e.GOARCH
+	}
+	name = goos + "/" + goarch
+	switch {
+	case goos != "linux":
+		return name, "Linux only until M5"
+	case goarch != "amd64":
+		return name, "Linux amd64 only until M5"
+	}
+	return name, ""
 }

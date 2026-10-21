@@ -93,6 +93,15 @@ for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galah
     exit 1
   fi
 done
+# The setup test hooks (GALAHAD_TEST_PINS, GALAHAD_TEST_IMAGES_URL) exist only in galahadtest builds.
+if ! go list -tags galahadtest -f '{{join .GoFiles " "}}' ./internal/images | grep -F -q testhooks_galahadtest.go; then
+  echo "internal/images/testhooks_galahadtest.go is not part of a galahadtest build" >&2
+  exit 1
+fi
+if go list -f '{{join .GoFiles " "}}' ./internal/images | grep -F -q testhooks_galahadtest.go; then
+  echo "a build without tags must not contain the setup test hooks" >&2
+  exit 1
+fi
 # The P8 probe flag exists only in galahadtest builds.
 probe_dir="$(mktemp -d)"
 exe=""
