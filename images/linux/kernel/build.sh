@@ -15,10 +15,9 @@ WORK=/tmp/galahad-kernel
 
 KERNEL_VERSION=6.1.190
 KERNEL_URL=https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VERSION.tar.xz
-# PLACEHOLDER: replace with the line for linux-$KERNEL_VERSION.tar.xz in
-# https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc. Until then the build fails and prints
-# the hash it computed, which must be compared with kernel.org's list before it is pinned here.
-KERNEL_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+# The pin must also match kernel.org's published list, which the build checks below.
+KERNEL_SHA256=8aa50daca0412a3d0a61a87af3744f39773d40b3132635fb7bc9be652cdb7b0c
+KERNEL_SUMS=https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
 
 MAX_VMLINUX_MIB=40
 MAX_GZ_MIB=15
@@ -47,6 +46,8 @@ if [ "$got" != "$KERNEL_SHA256" ]; then
 	rm -f "$tarball"
 	fail "linux-$KERNEL_VERSION.tar.xz has sha256 $got, pinned $KERNEL_SHA256"
 fi
+published=$(curl -fsSL --retry 5 "$KERNEL_SUMS" | awk -v f="linux-$KERNEL_VERSION.tar.xz" '$2 == f {print $1}')
+[ "$published" = "$KERNEL_SHA256" ] || fail "kernel.org lists linux-$KERNEL_VERSION.tar.xz with sha256 '$published', pinned $KERNEL_SHA256"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
