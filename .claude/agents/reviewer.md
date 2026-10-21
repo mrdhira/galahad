@@ -23,6 +23,6 @@ A finding blocks the PR only when it meets the bar in "Scope" in `CLAUDE.md`: a 
 
 Output exactly one of:
 - `APPROVE` plus at most 3 optional notes and any follow-ups.
-- `CHANGES REQUIRED` plus a numbered list of blocking findings. Each item names the file and line, the problem, which part of the bar it meets and the expected fix.
+- `CHANGES REQUIRED` plus a numbered list of blocking findings. Each item names the file and line, the problem, which part of the bar or which Hard rule it meets and the expected fix.
 
 Only list real defects. Style preferences that `gofmt` and the linter accept are not defects.
