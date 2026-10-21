@@ -8,7 +8,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/mrdhira/galahad/internal/config"
 	"github.com/mrdhira/galahad/internal/images"
@@ -86,7 +89,7 @@ func (e Env) doctorHost() []finding {
 	out := []finding{e.checkHome(home), e.checkKVM()}
 	out = append(out, checkFirecracker(fcPath, pins.Firecracker))
 	out = append(out, checkImages(filepath.Join(config.ImagesDir(home), pins.Version), pins)...)
-	out = append(out, e.checkAgent(), e.checkDisk(home))
+	out = append(out, e.checkSignatures(home), e.checkAgent(), e.checkDisk(home))
 	return out
 }
 
@@ -163,7 +166,15 @@ func checkImages(dir string, pins images.Pins) []finding {
 	return out
 }
 
-// checkAgent looks for galahad-agent next to this executable, where the sandbox expects it.
+// Limits of the check of the agent: it only has to print its version.
+const (
+	agentVersionTimeout = 10 * time.Second
+	maxAgentVersionText = 4 << 10
+)
+
+// checkAgent looks for galahad-agent next to this executable, where the sandbox expects it, runs
+// "galahad-agent version" and compares the version with this program. A dev build of this program
+// takes any agent version, as the job runner does.
 func (e Env) checkAgent() finding {
 	exe := e.Exe
 	if exe == "" {
@@ -176,7 +187,86 @@ func (e Env) checkAgent() finding {
 	if st, err := os.Stat(agent); err != nil || !st.Mode().IsRegular() {
 		return finding{fail, "galahad-agent", agent + " is missing", "put galahad-agent in the directory of galahad ('make build' writes both to bin/)"}
 	}
-	return finding{pass, "galahad-agent", agent, ""}
+	got, err := agentVersion(agent)
+	if err != nil {
+		return finding{fail, "galahad-agent", agent + ": " + err.Error(), "put the galahad-agent of this release next to galahad ('make build' writes both to bin/)"}
+	}
+	if want := e.version(); want != "dev" && got != want {
+		return finding{fail, "galahad-agent", fmt.Sprintf("%s is version %s, galahad is %s", agent, got, want),
+			"put the galahad-agent of this release next to galahad ('make build' writes both to bin/)"}
+	}
+	return finding{pass, "galahad-agent", fmt.Sprintf("%s (version %s)", agent, got), ""}
+}
+
+// agentVersion runs the agent with "version" and returns the version it prints in its first line,
+// "galahad-agent <version> (...)". The run has a time limit and the output is capped.
+func agentVersion(agent string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), agentVersionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, agent, "version") // #nosec G204 -- the agent next to this executable
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("cannot run: %w", err)
+	}
+	text, _ := io.ReadAll(io.LimitReader(out, maxAgentVersionText+1)) // a failed read shows up as unexpected output
+	if len(text) > maxAgentVersionText {
+		cancel() // it would block on a full pipe until the time limit
+		_ = cmd.Wait()
+		return "", fmt.Errorf("version prints more than %d bytes", maxAgentVersionText)
+	}
+	if err := cmd.Wait(); err != nil {
+		return "", fmt.Errorf("version failed: %w", err)
+	}
+	first, _, _ := strings.Cut(string(text), "\n")
+	fields := strings.Fields(first)
+	if len(fields) < 2 || fields[0] != "galahad-agent" {
+		return "", fmt.Errorf("version printed %q, want \"galahad-agent <version> ...\"", protocol.CleanPath(first))
+	}
+	return fields[1], nil
+}
+
+// signaturesMaxAge is how old the signatures may get before doctor warns. ClamAV publishes daily.
+const signaturesMaxAge = 7 * 24 * time.Hour
+
+// maxStampBytes is how much of the stamp file is read.
+const maxStampBytes = 64
+
+// checkSignatures reads the stamp the host writes after a good update. The signatures image is
+// written by the guest, so the host never reads it. A missing or old stamp is only a warning:
+// scans still run, and the report says which tools were left out.
+func (e Env) checkSignatures(home string) finding {
+	const fix = "run galahad setup"
+	stamp := config.SignaturesStamp(home)
+	f, err := os.Open(stamp) // #nosec G304 -- a fixed name in the state directory
+	if errors.Is(err, fs.ErrNotExist) {
+		return finding{warn, "signatures", stamp + " is missing; ClamAV and YARA are left out of scans", fix}
+	}
+	if err != nil {
+		return finding{warn, "signatures", err.Error(), fix}
+	}
+	text, err := io.ReadAll(io.LimitReader(f, maxStampBytes))
+	_ = f.Close() // read-only
+	if err != nil {
+		return finding{warn, "signatures", err.Error(), fix}
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(string(text)))
+	if err != nil {
+		return finding{warn, "signatures", stamp + " does not hold a time", fix}
+	}
+	if st, err := os.Stat(config.SignaturesPath(home)); err != nil || !st.Mode().IsRegular() {
+		return finding{warn, "signatures", config.SignaturesPath(home) + " is missing", fix}
+	}
+	age := e.Now().Sub(at)
+	switch {
+	case age < 0:
+		return finding{warn, "signatures", "the update time " + at.Format(time.RFC3339) + " is in the future", fix}
+	case age > signaturesMaxAge:
+		return finding{warn, "signatures", fmt.Sprintf("updated %d days ago, at %s", int(age.Hours()/24), at.Format(time.RFC3339)), fix}
+	}
+	return finding{pass, "signatures", "updated " + at.Format(time.RFC3339), ""}
 }
 
 // checkDisk wants minFreeBytes free where the state directory is, or would be.

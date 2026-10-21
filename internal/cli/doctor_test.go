@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrdhira/galahad/internal/cli"
 	"github.com/mrdhira/galahad/internal/images"
@@ -29,6 +30,10 @@ func TestDoctor(t *testing.T) {
 		omit        string // a file the host lacks: firecracker, vmlinux, core.ext4, re.ext4, agent
 		corrupt     string // a file with other content than the pins: core.ext4, re.ext4
 		fcScript    string // "" = the pinned version
+		agentScript string // "" = an agent that prints the version of galahad
+		version     string // of galahad; "" = v1.2.3
+		stamp       string // content of signatures.stamp; "" = one hour before the clock; "none" = no file
+		noSigImage  bool   // signatures.img is missing
 		kvm         string // "" = a file that can be opened; "missing", "dir", "denied"
 		free        uint64 // 0 = 10 GiB
 		freeErr     bool
@@ -44,7 +49,8 @@ func TestDoctor(t *testing.T) {
 			wantCode: cli.ExitClean,
 			wantStdout: []string{
 				"PASS  platform: linux/amd64", "PASS  state directory:", "(0700)", "kvm: readable and writable", "PASS  firecracker: v1.17.0",
-				"PASS  vmlinux:", "PASS  core.ext4:", "PASS  re.ext4:", "PASS  galahad-agent:", "PASS  disk space: 10.0 GiB free",
+				"PASS  vmlinux:", "PASS  core.ext4:", "PASS  re.ext4:", "PASS  signatures: updated 2026-10-21T11:30:12Z",
+				"PASS  galahad-agent:", "(version v1.2.3)", "PASS  disk space: 10.0 GiB free",
 			},
 			wantAbsent: []string{"FAIL", "WARN", "fix:"},
 		},
@@ -53,6 +59,66 @@ func TestDoctor(t *testing.T) {
 			wantCode:   cli.ExitClean,
 			wantStdout: []string{"WARN  re.ext4:", "is missing; scan --image re needs it", "fix: run galahad setup --image re"},
 			wantAbsent: []string{"FAIL"},
+		},
+		{
+			name: "signatures updated six days ago pass", stamp: "2026-10-15T12:30:12Z\n", skipWindows: true,
+			wantCode:   cli.ExitClean,
+			wantStdout: []string{"PASS  signatures: updated 2026-10-15T12:30:12Z"},
+			wantAbsent: []string{"WARN"},
+		},
+		{
+			name: "signatures older than seven days are a warning", stamp: "2026-10-14T12:30:11Z\n", skipWindows: true,
+			wantCode:   cli.ExitClean,
+			wantStdout: []string{"WARN  signatures: updated 7 days ago, at 2026-10-14T12:30:11Z", "fix: run galahad setup"},
+			wantAbsent: []string{"FAIL"},
+		},
+		{
+			name: "signatures that were never updated are a warning", stamp: "none", skipWindows: true,
+			wantCode:   cli.ExitClean,
+			wantStdout: []string{"WARN  signatures:", "signatures.stamp is missing; ClamAV and YARA are left out of scans", "fix: run galahad setup"},
+			wantAbsent: []string{"FAIL"},
+		},
+		{
+			name: "a stamp that holds no time is a warning", stamp: "yesterday\n", skipWindows: true,
+			wantCode:   cli.ExitClean,
+			wantStdout: []string{"WARN  signatures:", "does not hold a time"},
+		},
+		{
+			name: "a stamp in the future is a warning", stamp: "2026-10-22T12:30:12Z\n", skipWindows: true,
+			wantCode:   cli.ExitClean,
+			wantStdout: []string{"WARN  signatures: the update time 2026-10-22T12:30:12Z is in the future"},
+		},
+		{
+			name: "a stamp without the image is a warning", noSigImage: true, skipWindows: true,
+			wantCode:   cli.ExitClean,
+			wantStdout: []string{"WARN  signatures:", "signatures.img is missing", "fix: run galahad setup"},
+		},
+		{
+			name: "an agent of another version fails", agentScript: "#!/bin/sh\necho 'galahad-agent v1.0.0 (abc, go1.27.3, linux/amd64)'\n", skipWindows: true,
+			wantCode:   cli.ExitError,
+			wantStdout: []string{"FAIL  galahad-agent:", "is version v1.0.0, galahad is v1.2.3", "fix: put the galahad-agent of this release next to galahad"},
+		},
+		{
+			name: "a dev galahad takes any agent version", version: "dev", agentScript: "#!/bin/sh\necho 'galahad-agent v1.0.0 (abc, go1.27.3, linux/amd64)'\n", skipWindows: true,
+			wantCode:   cli.ExitClean,
+			wantStdout: []string{"PASS  galahad-agent:", "(version v1.0.0)"},
+			wantAbsent: []string{"FAIL"},
+		},
+		{
+			name: "an agent that does not run fails", agentScript: "#!/bin/sh\nexit 3\n", skipWindows: true,
+			wantCode:   cli.ExitError,
+			wantStdout: []string{"FAIL  galahad-agent:", "version failed: exit status 3"},
+		},
+		{
+			name: "an agent that prints something else fails", agentScript: "#!/bin/sh\necho 'hello\\033[2J'\n", skipWindows: true,
+			wantCode:   cli.ExitError,
+			wantStdout: []string{"FAIL  galahad-agent:", `version printed "hello`},
+			wantAbsent: []string{"\x1b"},
+		},
+		{
+			name: "an agent that prints a lot is cut", agentScript: "#!/bin/sh\nyes galahad-agent | head -c 1000000\n", skipWindows: true,
+			wantCode:   cli.ExitError,
+			wantStdout: []string{"FAIL  galahad-agent:", "version prints more than 4096 bytes"},
 		},
 		{name: "an extra argument", args: []string{"now"}, wantCode: cli.ExitUsage},
 		{
@@ -178,7 +244,19 @@ func TestDoctor(t *testing.T) {
 				}
 			}
 			if tt.omit != "agent" {
-				write(filepath.Join(base, "bin", "galahad-agent"), []byte("agent"), 0o755)
+				write(filepath.Join(base, "bin", "galahad-agent"), []byte(orDefault(tt.agentScript, "#!/bin/sh\necho 'galahad-agent v1.2.3 (abc, go1.27.3, linux/amd64)'\n")), 0o755)
+			}
+			now := time.Date(2026, 10, 21, 12, 30, 12, 0, time.UTC)
+			if !tt.noHome && !tt.homeIsFile {
+				if !tt.noSigImage {
+					write(filepath.Join(home, "signatures.img"), []byte("sig"), 0o600)
+				}
+				if tt.stamp != "none" {
+					write(filepath.Join(home, "signatures.stamp"), []byte(orDefault(tt.stamp, now.Add(-time.Hour).Format(time.RFC3339)+"\n")), 0o600)
+				}
+				if err := os.Chmod(home, orMode(tt.homeMode, 0o700)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			kvm := filepath.Join(base, "kvm")
 			switch tt.kvm {
@@ -199,6 +277,7 @@ func TestDoctor(t *testing.T) {
 			}
 			env := cli.Env{
 				Home: home, GOOS: orDefault(tt.goos, "linux"), GOARCH: orDefault(tt.goarch, "amd64"), KVM: kvm, Exe: exe,
+				Version: orDefault(tt.version, "v1.2.3"), Now: func() time.Time { return now },
 				Pins: func() (images.Pins, error) {
 					if tt.pinsErr {
 						return images.Pins{}, errors.New("bad pins")

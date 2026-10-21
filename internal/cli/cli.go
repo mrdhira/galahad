@@ -39,7 +39,7 @@ Commands:
               --allow-host <host>  (repeatable: let the sandbox reach one more host)
               --timeout 0, or no --timeout, means the default of the image: 10m for core, 20m for re
               --git  (clone an https link as a Git repository)  --submodules  (also fetch the submodules of a Git repository)
-  setup     Download and verify the pinned Firecracker and guest images: galahad setup [--image core|re]
+  setup     Download and verify the pinned Firecracker and guest images, then fill the ClamAV and YARA signatures: galahad setup [--image core|re] [--skip-signatures]
   doctor    Check that this host can run scans, and say how to fix what is wrong
   report    Show the report of a past scan: galahad report <id> [--json]
   jobs      List past scans, or remove them: galahad jobs [rm <id>...]
@@ -64,6 +64,9 @@ type Env struct {
 	GOOS, GOARCH string
 	// KVM is the device doctor opens. Empty means /dev/kvm.
 	KVM string
+	// Version is the version of this program, which the agent next to it must report too. Empty
+	// means the version of this build.
+	Version string
 	// Exe is the path of this executable, next to which doctor looks for the agent. Empty means
 	// os.Executable.
 	Exe string
@@ -167,6 +170,14 @@ func (e Env) home() (string, error) {
 		return e.Home, nil
 	}
 	return config.Home()
+}
+
+// version returns the version of this program.
+func (e Env) version() string {
+	if e.Version != "" {
+		return e.Version
+	}
+	return version
 }
 
 // pins returns the pinned images.

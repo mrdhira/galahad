@@ -59,6 +59,7 @@ type fakeBackend struct {
 
 	mu      sync.Mutex
 	ports   []uint32      // the ports of the last Start
+	spec    sandbox.Spec  // the spec of the last Start
 	proxyL  *pipeListener // the proxy listener of the last Start
 	starts  int
 	kills   int
@@ -90,7 +91,7 @@ func (b *fakeBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine,
 	pl := &pipeListener{conns: make(chan net.Conn, 1), closed: make(chan struct{})}
 	b.proxyL = pl
 	m := &fakeMachine{b: b, l: l, pl: pl, killed: make(chan struct{})}
-	b.ports = s.Ports
+	b.ports, b.spec = s.Ports, s
 	b.done = make(chan struct{})
 	go func() {
 		defer close(b.done)

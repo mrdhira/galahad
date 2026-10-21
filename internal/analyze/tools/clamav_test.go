@@ -114,7 +114,19 @@ func TestClamAV(t *testing.T) {
 			wantNote:     "not a hit",
 		},
 		{name: "a crash", fake: fakeRun{exit: 2, err: "ERROR: Can't open database\nmore"}, wantErr: "exited with code 2: ERROR: Can't open database"},
-		{name: "a hit is not trusted when the exit code says error", fake: fakeRun{out: "%ROOT%/a: Sig.One-1 FOUND\n", exit: 2}, wantErr: "exited with code 2"},
+		{
+			name:         "a hit that comes with file errors is reported",
+			fake:         fakeRun{out: "%ROOT%/a: Sig.One-1 FOUND\n", exit: 2, err: "ERROR: Can't open file\n"},
+			wantFindings: []string{"GAL-AV-001 a Sig.One-1"},
+			wantNote:     "exit 2: some files could not be scanned",
+		},
+		{
+			name:         "a hit that comes with file errors keeps its note when other output does not parse",
+			fake:         fakeRun{out: "%ROOT%/a: Sig.One-1 FOUND\nWARNING: odd\n", exit: 2},
+			wantFindings: []string{"GAL-AV-001 a Sig.One-1"},
+			wantNote:     "does not end in FOUND",
+		},
+		{name: "exit 2 with output that is not a hit is an error", fake: fakeRun{out: "WARNING: odd\n", exit: 2}, wantErr: "exited with code 2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

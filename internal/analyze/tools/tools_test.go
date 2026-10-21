@@ -312,3 +312,47 @@ func TestAll(t *testing.T) {
 		})
 	}
 }
+
+func TestExec(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		fake    fakeRun
+		program string // clamscan when empty
+		limit   time.Duration
+		args    []string
+		// expectations
+		wantOut  string
+		wantErr  string
+		wantCode int
+		wantLog  string // stderr of the program
+	}{
+		{
+			name: "a program that ran gives its output and arguments", fake: fakeRun{out: "done\n", err: "warn\n"}, args: []string{"--a", "b"},
+			wantOut: "done\n", wantLog: "warn\n",
+		},
+		{name: "a non-zero exit is a code and not an error", fake: fakeRun{out: "x\n", exit: 3}, wantOut: "x\n", wantCode: 3},
+		{name: "a program that is not installed", fake: fakeRun{}, program: "freshclam", wantErr: "freshclam is not installed"},
+		{name: "output over the cap kills the program", fake: fakeRun{mode: "flood"}, wantErr: "output is over"},
+		{name: "a hang ends at the limit", fake: fakeRun{mode: "hang"}, limit: 300 * time.Millisecond, wantErr: "timed out"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argsFile := useFake(t, tt.fake)
+
+			out, stderr, code, err := tools.Exec(context.Background(), cmp.Or(tt.limit, time.Minute), cmp.Or(tt.program, "clamscan"), tt.args...)
+
+			if (err != nil) != (tt.wantErr != "") || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+			if string(out) != tt.wantOut || code != tt.wantCode || stderr != tt.wantLog {
+				t.Errorf("stdout = %q, stderr = %q, code = %d, want %q, %q, %d", out, stderr, code, tt.wantOut, tt.wantLog, tt.wantCode)
+			}
+			if tt.args != nil {
+				if got, _ := os.ReadFile(argsFile); string(got) != strings.Join(tt.args, "\n") {
+					t.Errorf("arguments = %q, want %q", got, tt.args)
+				}
+			}
+		})
+	}
+}

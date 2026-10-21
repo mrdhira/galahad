@@ -38,7 +38,8 @@ type entry struct {
 // plan is what the host sends for one target. The host walks the tree but never reads
 // what is in the files, except to copy it. A link has no entries: the guest downloads it.
 type plan struct {
-	source  string // protocol.SourceLocal, SourceURL, SourceDrive or SourceGit
+	source  string // protocol.SourceLocal, SourceURL, SourceDrive or SourceGit; empty for an update
+	update  bool   // the update job: no target and no input, and the update policy
 	url     string // the link of a url, drive or git target
 	probe   string // the address of a net-probe job, which galahadtest builds can ask for; empty otherwise
 	name    string // base name of the target, the single top-level element of the tar stream
@@ -48,7 +49,9 @@ type plan struct {
 }
 
 // remote reports whether the guest downloads the target.
-func (p *plan) remote() bool { return p.source != protocol.SourceLocal }
+func (p *plan) remote() bool {
+	return p.source == protocol.SourceURL || p.source == protocol.SourceDrive || p.source == protocol.SourceGit
+}
 
 // newPlan plans the target of a job. For a link, which only the guest ever fetches, it checks the
 // length and nothing else.
@@ -73,6 +76,8 @@ func newPlan(source, target string) (*plan, error) {
 func (p *plan) policy(allowHosts []string) (proxy.Policy, error) {
 	in := proxy.Input{Kind: protocol.KindScan, Source: p.source, AllowHosts: allowHosts}
 	switch {
+	case p.update: // only the ClamAV mirror and the YARA-Forge release host
+		in = proxy.Input{Kind: protocol.KindUpdate}
 	case p.remote():
 		in.Target = p.url
 	case p.probe != "":
@@ -185,7 +190,7 @@ func (p *plan) send(conn net.Conn, job protocol.Job, endSent *atomic.Bool) sent 
 	}
 	cw := &chunkWriter{conn: conn, h: sha256.New()}
 	var fileSHA string
-	if !p.remote() { // a link has no stream, and the End frame says so
+	if !p.remote() && !p.update { // a link and an update have no stream, and the End frame says so
 		var err error
 		if fileSHA, err = p.writeTar(cw); err != nil {
 			return sent{err: err}

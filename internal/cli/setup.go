@@ -13,15 +13,19 @@ import (
 
 	"github.com/mrdhira/galahad/internal/config"
 	"github.com/mrdhira/galahad/internal/images"
+	"github.com/mrdhira/galahad/internal/job"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
-// runSetup installs the pinned Firecracker and the pinned guest image files. Everything is checked
-// against the pins, and a file that already verifies is left alone.
+// runSetup installs the pinned Firecracker and the pinned guest image files, and then fills the
+// signatures through the update VM. Everything downloaded here is checked against the pins, and a
+// file that already verifies is left alone. The signatures are always fetched again, since they
+// change daily; --skip-signatures leaves them out.
 func runSetup(args []string, stdout, stderr io.Writer, env Env) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	image := fs.String("image", "core", "guest image: core or re")
+	skipSignatures := fs.Bool("skip-signatures", false, "install the images only, without the ClamAV and YARA signatures")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -81,6 +85,48 @@ func runSetup(args []string, stdout, stderr io.Writer, env Env) int {
 		}
 		fmt.Fprintf(stdout, "%s: %s\n", a.File, installedText(installed))
 	}
+	if *skipSignatures {
+		return ExitClean
+	}
+	return updateSignatures(ctx, *image, home, stdout, stderr, env)
+}
+
+// updateSignatures runs the update VM that fills signatures.img. A failure keeps the old image.
+func updateSignatures(ctx context.Context, image, home string, stdout, stderr io.Writer, env Env) int {
+	backend, err := env.Backend()
+	if err != nil {
+		fmt.Fprintf(stderr, "galahad setup: signatures: %s\n", protocol.CleanPath(err.Error()))
+		return ExitError
+	}
+	fmt.Fprintln(stdout, "signatures: updating in a VM, this downloads about 300 MB")
+	out, err := job.RunUpdate(ctx, backend, job.UpdateSpec{
+		JobsDir:    config.JobsDir(home),
+		Now:        env.Now,
+		Version:    env.version(),
+		Timeout:    job.UpdateTimeout,
+		Image:      image,
+		Signatures: config.SignaturesPath(home),
+		Stamp:      config.SignaturesStamp(home),
+		Progress: func(stage string) {
+			switch stage {
+			case protocol.StageClamAV:
+				fmt.Fprintln(stdout, "signatures: ClamAV databases")
+			case protocol.StageYARA:
+				fmt.Fprintln(stdout, "signatures: YARA-Forge core rules")
+			}
+		},
+	})
+	if err != nil {
+		// The error can carry text from the guest, which is untrusted.
+		msg := protocol.CleanPath(err.Error())
+		if out.Job.ID != "" {
+			fmt.Fprintf(stderr, "galahad setup: signatures: %s (job %s; the previous signatures, if any, are kept)\n", msg, out.Job.ID)
+		} else {
+			fmt.Fprintf(stderr, "galahad setup: signatures: %s\n", msg)
+		}
+		return ExitError
+	}
+	fmt.Fprintln(stdout, "signatures: updated")
 	return ExitClean
 }
 

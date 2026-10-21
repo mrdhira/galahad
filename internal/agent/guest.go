@@ -31,7 +31,7 @@ const (
 
 // runGuest is the guest side of one job: dial the host, take the job and its tar stream,
 // analyze the input and send back a Result, or an Error. With --proxy it also runs the relay
-// that guest tools reach the network through. T2.6b adds the update kinds.
+// that guest tools reach the network through. An update job downloads the signatures instead of taking a target.
 func runGuest(args []string, _, stderr io.Writer, env Env) int {
 	fs := flag.NewFlagSet("guest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -135,13 +135,14 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	local := job.Kind == protocol.KindScan && job.Source == protocol.SourceLocal
 	probe := job.Kind == protocol.KindNetProbe && netProbeEnabled
 	// A url, drive or git job has no input of its own: the host sends an empty stream, and the guest
-	// fetches job.URL itself and, for a link to a file, names the file.
+	// fetches job.URL itself and, for a link to a file, names the file. An update job gets an empty stream as well.
 	remote := job.Kind == protocol.KindScan && (job.Source == protocol.SourceURL || job.Source == protocol.SourceDrive || job.Source == protocol.SourceGit)
 	clone := remote && job.Source == protocol.SourceGit
-	if !local && !probe && !remote {
+	update := job.Kind == protocol.KindUpdate
+	if !local && !probe && !remote && !update {
 		return fail(protocol.CodeProtocol, "job kind %q with source %q is not supported", job.Kind, job.Source)
 	}
-	if !remote && (job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name) {
+	if !remote && !update && (job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name) {
 		return fail(protocol.CodeProtocol, "job name %q is not a single path element", protocol.CleanPath(job.Name))
 	}
 	relay, err := startRelay(dialProxy, unsafeHost, env.Setenv)
@@ -151,6 +152,9 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	defer relay.close()
 	if remote && relay == nil {
 		return fail(protocol.CodeIngest, "a %s job needs the network, and this job has none", job.Source)
+	}
+	if update && relay == nil {
+		return fail(protocol.CodeIngest, "an update job needs the network, and this job has none")
 	}
 	start := time.Now()
 	jobTime := time.Duration(job.Timeouts.Job) * time.Second
@@ -180,6 +184,10 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	}
 	if err := stream.Verify(*in.end); err != nil {
 		return fail(protocol.CodeIngest, "ingest: %w", err)
+	}
+
+	if update {
+		return runUpdate(host, relay.addr, dir, unsafeHost, start.Add(max(jobTime-analysisMargin, 0)))
 	}
 
 	var downloaded ingest.File
