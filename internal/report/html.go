@@ -23,6 +23,7 @@ type htmlData struct {
 	Reasons               []string
 	TargetName            string
 	Target                targetInfo
+	FindingsHeading       string
 	Findings              []htmlGroup
 	IOCHeading            string
 	IOCs                  []htmlIOC
@@ -60,6 +61,7 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 		Meta:            metaLine(res),
 		TargetName:      clean(res.Target.Name),
 		Target:          describeTarget(res.Target),
+		FindingsHeading: findingsHeading(res, all),
 		Findings:        cleanGroups(hosts, all),
 		IOCHeading:      iocHeading(res),
 		CoverageLine:    coverageLine(res.Coverage),

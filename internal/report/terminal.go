@@ -83,7 +83,7 @@ func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
 		}
 	}
 	if len(all) > 0 {
-		fmt.Fprintf(w, "\nFindings (%d):\n", len(all))
+		fmt.Fprintf(w, "\n%s:\n", findingsHeading(res, all))
 	}
 	for i, g := range all {
 		if i == termMaxFindings {

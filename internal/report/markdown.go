@@ -90,7 +90,7 @@ func renderMarkdown(res *protocol.Result) string {
 		}
 	}
 
-	w("\n## Findings (%d)\n\n", len(all))
+	w("\n## %s\n\n", findingsHeading(res, all))
 	mdFindings(&b, hosts, all, mdMaxFindings)
 
 	w("\n## %s\n\n", iocHeading(res))

@@ -186,18 +186,27 @@ func (g group) join(sep string, get func(entry) string) string {
 	return strings.Join(vals, sep)
 }
 
+// findingsHeading is the Findings heading: the number of findings, and the number of locations
+// when that differs, so it agrees with the meta line.
+func findingsHeading(res *protocol.Result, gs []group) string {
+	if len(gs) == len(res.Findings) {
+		return fmt.Sprintf("Findings (%d)", len(res.Findings))
+	}
+	return fmt.Sprintf("Findings (%d, at %s)", len(res.Findings), plural(len(gs), "location"))
+}
+
 // maxWhy is how many reasons the verdict header lists.
 const maxWhy = 3
 
 // why returns the first maxWhy groups whose most severe finding is critical or high. Without
-// any, a suspicious verdict falls back to the medium ones. A title that repeats at another
+// any, a suspicious verdict falls back to the medium ones; a malicious one always has some. A title that repeats at another
 // location is listed once, so the reasons differ. A clean verdict has no reasons.
 func why(v protocol.Verdict, gs []group) []group {
 	if v == protocol.VerdictClean {
 		return nil
 	}
 	top := pick(gs, protocol.SeverityCritical, protocol.SeverityHigh)
-	if len(top) == 0 {
+	if len(top) == 0 && v == protocol.VerdictSuspicious {
 		top = pick(gs, protocol.SeverityMedium)
 	}
 	return top

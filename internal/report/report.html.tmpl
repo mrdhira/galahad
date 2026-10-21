@@ -70,7 +70,7 @@ footer{margin-top:32px;border-top:1px solid var(--line)}
 {{end}}</ul>
 </section>
 {{end}}<section aria-labelledby="findings">
-<h2 id="findings">Findings ({{len .Findings}})</h2>
+<h2 id="findings">{{.FindingsHeading}}</h2>
 {{if .Findings}}<ol class="findings">
 {{range .Findings}}<li>
 {{range .Entries}}<div class="fh"><span class="sev sev-{{.Severity}}">{{.Severity}}</span><h3>{{.Title}}</h3>{{if .Auto}}<span class="tag">runs automatically</span>{{end}}<span class="rid">{{.Rule}}{{if .Attack}} · ATT&amp;CK {{.Attack}}{{end}}</span></div>

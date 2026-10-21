@@ -222,7 +222,7 @@ func TestWriteContent(t *testing.T) {
 					{Path: "a.js", Line: 1, Snippet: "x"}, {Path: "b.js", Line: 2, Snippet: "y"}, {Path: "c.js", Line: 3, Snippet: "z"},
 				}}}
 			},
-			wantBoth:       []string{" · 1 finding · "},
+			wantBoth:       []string{" · 1 finding · ", "Findings (1, at 3 locations)"},
 			wantNeitherHas: []string{"3 findings"},
 		},
 		{
@@ -369,7 +369,7 @@ func TestWriteContent(t *testing.T) {
 					{RuleID: "GAL-C-001", Severity: protocol.SeverityLow, Title: "Elsewhere", Analyzer: "c", Evidence: []protocol.Evidence{{Path: "setup.js", Line: 6, Snippet: "eval(x)"}}},
 				}
 			},
-			wantBoth: []string{"Findings (2)"},
+			wantBoth: []string{"Findings (3, at 2 locations)", " · 3 findings · "},
 			wantMD:   []string{"| critical | GAL-B-001, GAL-A-001 | Second title; First title | T1204, T1059 | setup.js:5 | eval\\(x\\) |"},
 			wantHTML: []string{
 				`<ol class="findings">`,
@@ -708,6 +708,44 @@ func TestTerminal(t *testing.T) {
 			wantAbsent: []string{"\x1b["},
 		},
 		{
+			name:        "color adds escape codes",
+			color:       true,
+			wantContain: []string{"\x1b[31m", "Known test signature"},
+		},
+		{
+			name:        "suspicious verdict is yellow",
+			mutate:      func(r *protocol.Result) { r.Verdict, r.Findings = protocol.VerdictSuspicious, nil },
+			color:       true,
+			wantContain: []string{"Verdict: \x1b[1m\x1b[33mSUSPICIOUS", "Treat with caution. Review the findings below before you open, install or run it."},
+			wantAbsent:  []string{"Why:", "Runs automatically", "Findings ("},
+		},
+		{
+			name:        "clean verdict is green",
+			mutate:      func(r *protocol.Result) { r.Verdict, r.Findings = protocol.VerdictClean, nil },
+			color:       true,
+			wantContain: []string{"\x1b[32mCLEAN", "No known-bad patterns found. This is not a guarantee."},
+		},
+		{
+			name:        "skipped items get a warning",
+			wantContain: []string{"Warning: 1 item was not analyzed; the verdict does not cover it"},
+		},
+		{
+			name:       "no skips no warning",
+			mutate:     func(r *protocol.Result) { r.Coverage.Skipped = nil },
+			wantAbsent: []string{"Warning"},
+		},
+		{
+			name: "why lists three items and runs automatically is cut at ten",
+			mutate: func(r *protocol.Result) {
+				r.Findings = nil
+				for i := 0; i < 13; i++ {
+					r.Findings = append(r.Findings, protocol.Finding{RuleID: "GAL-AUTOEXEC-001", Severity: protocol.SeverityHigh, Title: fmt.Sprintf("Auto %d", i), Evidence: []protocol.Evidence{{Path: "a", Line: i + 1}}})
+				}
+			},
+			wantContain: []string{"Why:\n  HIGH Auto 0 in a:1\n  HIGH Auto 1 in a:2\n  HIGH Auto 2 in a:3\n\n", "Runs automatically (13):", "  ... 3 more in report.json"},
+			wantAbsent:  []string{"HIGH Auto 3 in a:4\n\n"},
+		},
+		{
 			name: "findings sharing location and snippet are one line with every rule and title",
 			mutate: func(r *protocol.Result) {
 				ev := []protocol.Evidence{{Path: "s.js", Line: 2, Snippet: "x"}}
@@ -716,12 +754,7 @@ func TestTerminal(t *testing.T) {
 					{RuleID: "GAL-B-001", Severity: protocol.SeverityCritical, Title: "Second", Evidence: ev},
 				}
 			},
-			wantContain: []string{"Findings (1):", "CRITICAL GAL-B-001, GAL-A-001 s.js:2 Second; First"},
-		},
-		{
-			name:        "color adds escape codes",
-			color:       true,
-			wantContain: []string{"\x1b[31m", "Known test signature"},
+			wantContain: []string{"Findings (2, at 1 location):", "CRITICAL GAL-B-001, GAL-A-001 s.js:2 Second; First"},
 		},
 		{
 			name: "untrusted text is defanged and stripped of control characters",
@@ -741,15 +774,6 @@ func TestTerminal(t *testing.T) {
 			wantContain: []string{"... 5 more in report.json"},
 		},
 		{
-			name:        "skipped items get a warning",
-			wantContain: []string{"Warning: 1 item was not analyzed; the verdict does not cover it"},
-		},
-		{
-			name:       "no skips no warning",
-			mutate:     func(r *protocol.Result) { r.Coverage.Skipped = nil },
-			wantAbsent: []string{"Warning"},
-		},
-		{
 			name: "IOC domains are defanged in titles",
 			mutate: func(r *protocol.Result) {
 				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test"})
@@ -757,30 +781,6 @@ func TestTerminal(t *testing.T) {
 			},
 			wantContain: []string{"Beacon to collect[.]sinkhole[.]test"},
 			wantAbsent:  []string{"collect.sinkhole.test"},
-		},
-		{
-			name:        "suspicious verdict is yellow",
-			mutate:      func(r *protocol.Result) { r.Verdict, r.Findings = protocol.VerdictSuspicious, nil },
-			color:       true,
-			wantContain: []string{"Verdict: \x1b[1m\x1b[33mSUSPICIOUS", "Treat with caution. Review the findings below before you open, install or run it."},
-			wantAbsent:  []string{"Why:", "Runs automatically", "Findings ("},
-		},
-		{
-			name:        "clean verdict is green",
-			mutate:      func(r *protocol.Result) { r.Verdict, r.Findings = protocol.VerdictClean, nil },
-			color:       true,
-			wantContain: []string{"\x1b[32mCLEAN", "No known-bad patterns found. This is not a guarantee."},
-		},
-		{
-			name: "why lists three items and runs automatically is cut at ten",
-			mutate: func(r *protocol.Result) {
-				r.Findings = nil
-				for i := 0; i < 13; i++ {
-					r.Findings = append(r.Findings, protocol.Finding{RuleID: "GAL-AUTOEXEC-001", Severity: protocol.SeverityHigh, Title: fmt.Sprintf("Auto %d", i), Evidence: []protocol.Evidence{{Path: "a", Line: i + 1}}})
-				}
-			},
-			wantContain: []string{"Why:\n  HIGH Auto 0 in a:1\n  HIGH Auto 1 in a:2\n  HIGH Auto 2 in a:3\n\n", "Runs automatically (13):", "  ... 3 more in report.json"},
-			wantAbsent:  []string{"HIGH Auto 3 in a:4\n\n"},
 		},
 	}
 	for _, tt := range tests {
