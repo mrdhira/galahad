@@ -4,9 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +22,8 @@ import (
 
 	"github.com/mrdhira/galahad/internal/cli"
 	"github.com/mrdhira/galahad/internal/images"
+	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/sandbox"
 )
 
 const fakeFirecrackerScript = "#!/bin/sh\necho 'Firecracker v1.17.0'\n"
@@ -100,6 +105,69 @@ func (r *release) serve(t *testing.T) (*images.Downloader, *atomic.Int32) {
 	return &images.Downloader{Client: images.NewClient(srv.Client().Transport, 10*time.Second), BaseURL: srv.URL}, &requests
 }
 
+// updateBackend runs a guest for the update job: it takes the Job and End frames, reports the two stages,
+// writes "new" to the signatures drive it got, and ends with the empty Result, or with the Error failure.
+type updateBackend struct {
+	failure string
+	spec    *sandbox.Spec // gets the spec of the machine
+}
+
+func (updateBackend) Name() string { return "update" }
+
+func (b updateBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine, error) {
+	*b.spec = s
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	pl, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = l.Close() // the listen error is the one to report
+		return nil, err
+	}
+	m := &cleanMachine{l: l, pl: pl, done: make(chan struct{})}
+	go func() {
+		defer close(m.done)
+		conn, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }() // the guest is gone
+		send := func(t protocol.FrameType, v any) {
+			data, _ := json.Marshal(v)
+			_ = protocol.WriteFrame(conn, t, data)
+		}
+		send(protocol.FrameHello, protocol.Hello{Protocol: protocol.ProtocolVersion, AgentVersion: "dev"})
+		for {
+			t, _, err := protocol.ReadFrame(conn)
+			if err != nil {
+				return
+			}
+			if t == protocol.FrameEnd {
+				break
+			}
+		}
+		send(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageClamAV})
+		send(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageYARA})
+		if b.failure != "" {
+			send(protocol.FrameError, protocol.Error{Code: protocol.CodeInternal, Message: b.failure})
+			return
+		}
+		_ = os.WriteFile(s.Signatures, []byte("new"), 0o600)
+		now := time.Now().UTC()
+		send(protocol.FrameResult, protocol.Result{
+			SchemaVersion: protocol.SchemaVersion,
+			Tool:          protocol.Tool{Name: "galahad-agent", Version: "dev"},
+			Target:        protocol.Target{Name: "signatures", Kind: protocol.TargetDir},
+			StartedAt:     now, FinishedAt: now,
+			Files: []protocol.FileInfo{}, Findings: []protocol.Finding{}, IOCs: []protocol.IOC{},
+			Coverage: protocol.Coverage{Skipped: []protocol.Skip{}, Analyzers: []string{}},
+			Reasons:  []string{},
+		})
+	}()
+	return m, nil
+}
+
 func TestSetup(t *testing.T) {
 	tests := []struct {
 		name string
@@ -113,6 +181,9 @@ func TestSetup(t *testing.T) {
 		drop        string // a URL path the server does not have
 		tamper      string // a URL path whose content is replaced by other bytes of the same size
 		skipWindows bool   // the fake Firecracker is a shell script
+		failure     string // the update guest fails with this message
+		noBackend   bool   // no sandbox backend on this system
+		oldImage    bool   // signatures.img and its stamp exist before the run
 		// expectations
 		wantCode     int
 		wantStdout   []string
@@ -120,9 +191,12 @@ func TestSetup(t *testing.T) {
 		wantFiles    []string // under the state directory
 		wantNoFiles  []string // under the state directory
 		wantRequests int      // of the last run
+		wantImage    string   // content of signatures.img; empty means no such file
+		wantStamp    bool     // signatures.stamp exists
+		wantSpec     bool     // the machine got the writable new image
 	}{
 		{
-			name: "the core image: Firecracker, the kernel and core.ext4", skipWindows: true,
+			name: "the core image: Firecracker, the kernel and core.ext4", args: []string{"--skip-signatures"}, skipWindows: true,
 			wantCode:     cli.ExitClean,
 			wantStdout:   []string{"firecracker v1.17.0: installed", "vmlinux: installed", "core.ext4: installed"},
 			wantFiles:    []string{"bin/firecracker", "images/0.0.1/vmlinux", "images/0.0.1/core.ext4"},
@@ -130,7 +204,7 @@ func TestSetup(t *testing.T) {
 			wantRequests: 3,
 		},
 		{
-			name: "the re image: the kernel and re.ext4", args: []string{"--image", "re"}, skipWindows: true,
+			name: "the re image: the kernel and re.ext4", args: []string{"--image", "re", "--skip-signatures"}, skipWindows: true,
 			wantCode:     cli.ExitClean,
 			wantStdout:   []string{"firecracker v1.17.0: installed", "vmlinux: installed", "re.ext4: installed"},
 			wantFiles:    []string{"bin/firecracker", "images/0.0.1/vmlinux", "images/0.0.1/re.ext4"},
@@ -138,10 +212,52 @@ func TestSetup(t *testing.T) {
 			wantRequests: 3,
 		},
 		{
-			name: "a second run downloads nothing", first: []string{}, skipWindows: true,
+			name: "a second run downloads nothing", args: []string{"--skip-signatures"}, first: []string{"--skip-signatures"}, skipWindows: true,
 			wantCode:     cli.ExitClean,
 			wantStdout:   []string{"firecracker v1.17.0: already installed", "vmlinux: already installed", "core.ext4: already installed"},
 			wantRequests: 0,
+		},
+		{
+			name: "the update VM fills the signatures and the stamp is written", skipWindows: true,
+			wantCode:     cli.ExitClean,
+			wantStdout:   []string{"core.ext4: installed", "signatures: updating", "signatures: ClamAV databases", "signatures: YARA-Forge core rules", "signatures: updated"},
+			wantFiles:    []string{"signatures.stamp"},
+			wantImage:    "new",
+			wantSpec:     true,
+			wantRequests: 3,
+		},
+		{
+			name: "a new update replaces the old image", oldImage: true, skipWindows: true,
+			wantCode:     cli.ExitClean,
+			wantStdout:   []string{"signatures: updated"},
+			wantImage:    "new",
+			wantStamp:    true,
+			wantSpec:     true,
+			wantRequests: 3,
+		},
+		{
+			name: "a failed update keeps the old image", oldImage: true, failure: "freshclam exited with code 52", skipWindows: true,
+			wantCode:     cli.ExitError,
+			wantStderr:   []string{"galahad setup: signatures: ", "the guest failed (internal): freshclam exited with code 52", "(job ", "the previous signatures, if any, are kept"},
+			wantImage:    "old",
+			wantStamp:    true,
+			wantSpec:     true,
+			wantRequests: 3,
+		},
+		{
+			name: "a failed first update leaves no image", failure: "yarac exited with code 1", skipWindows: true,
+			wantCode:     cli.ExitError,
+			wantStderr:   []string{"signatures: ", "yarac exited with code 1"},
+			wantNoFiles:  []string{"signatures.img", "signatures.stamp"},
+			wantSpec:     true,
+			wantRequests: 3,
+		},
+		{
+			name: "no sandbox for the update", noBackend: true, skipWindows: true,
+			wantCode:     cli.ExitError,
+			wantStdout:   []string{"core.ext4: installed"},
+			wantStderr:   []string{"galahad setup: signatures: sandbox not supported"},
+			wantRequests: 3,
 		},
 		{name: "-h prints usage", args: []string{"-h"}, wantCode: cli.ExitClean, wantStdout: []string{"Commands:"}},
 		{name: "an unknown flag", args: []string{"--nope"}, wantCode: cli.ExitUsage, wantStderr: []string{"flag provided but not defined", "Usage:"}},
@@ -187,14 +303,31 @@ func TestSetup(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			var machine sandbox.Spec
 			env := cli.Env{
 				Home: home, GOOS: orDefault(tt.goos, "linux"), GOARCH: orDefault(tt.goarch, "amd64"), Downloader: d,
+				Backend: func() (sandbox.Backend, error) {
+					if tt.noBackend {
+						return nil, sandbox.ErrUnsupported
+					}
+					return updateBackend{failure: tt.failure, spec: &machine}, nil
+				},
 				Pins: func() (images.Pins, error) {
 					if tt.pinsErr {
 						return images.Pins{}, errors.New("bad pins")
 					}
 					return rel.pins, nil
 				},
+			}
+			if tt.oldImage {
+				for name, content := range map[string]string{"signatures.img": "old", "signatures.stamp": "2026-01-01T00:00:00Z\n"} {
+					if err := os.MkdirAll(home, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(home, name), []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			if tt.first != nil {
 				var o, e bytes.Buffer
@@ -232,6 +365,15 @@ func TestSetup(t *testing.T) {
 			}
 			if n := int(requests.Load()); n != tt.wantRequests {
 				t.Errorf("requests = %d, want %d", n, tt.wantRequests)
+			}
+			if got, _ := os.ReadFile(filepath.Join(home, "signatures.img")); string(got) != tt.wantImage {
+				t.Errorf("signatures.img = %q, want %q", got, tt.wantImage)
+			}
+			if _, err := os.Stat(filepath.Join(home, "signatures.stamp")); (err == nil) != (tt.wantStamp || tt.wantImage == "new") {
+				t.Errorf("signatures.stamp exists = %v, want %v", err == nil, tt.wantStamp || tt.wantImage == "new")
+			}
+			if tt.wantSpec && (machine.Signatures != filepath.Join(home, "signatures.img.new") || !machine.SignaturesWritable || machine.Image != "core") {
+				t.Errorf("machine spec = %+v, want the writable new image and the core image", machine)
 			}
 			if tt.wantCode == cli.ExitError {
 				// A failed run leaves no partial file behind, under any name.

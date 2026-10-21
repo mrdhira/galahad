@@ -69,6 +69,16 @@ func (c clamav) Run(ctx context.Context, target string) (Result, error) {
 		}
 		fs = append(fs, ruleAV.Finding(protocol.Evidence{Path: protocol.CleanPath(filepath.Base(root)), Snippet: "unparsed clamscan hit"}))
 		return Result{Findings: fs, Note: err.Error()}, nil
+	case 2: // some files could not be scanned. With --infected stdout holds hits only, so a hit that came with the errors is not dropped.
+		fs, err := parseClamAV(out.stdout, root)
+		if len(fs) == 0 {
+			return Result{}, exitError(out)
+		}
+		note := "exit 2: some files could not be scanned"
+		if err != nil {
+			note += "; " + err.Error()
+		}
+		return Result{Findings: fs, Note: note}, nil
 	}
 	return Result{}, exitError(out)
 }

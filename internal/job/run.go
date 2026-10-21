@@ -65,6 +65,9 @@ type Spec struct {
 	AllowHosts []string
 	// Submodules asks the guest to update the submodules of a Git target.
 	Submodules bool
+	// Signatures is the signatures image: a scan attaches it read-only, and the update job fills it. Empty
+	// means the machine gets no signatures drive.
+	Signatures string
 	// Progress is called with each stage the guest reports. It may be nil.
 	Progress func(stage string)
 }
@@ -83,19 +86,32 @@ type Outcome struct {
 // The error says why the job did not end in the state done; job.json has that state. The
 // machine is always killed before Run returns.
 func Run(ctx context.Context, backend sandbox.Backend, spec Spec, target string) (Outcome, error) {
-	if spec.Timeout < MinTimeout {
-		return Outcome{}, fmt.Errorf("the timeout %s is shorter than the minimum %s", spec.Timeout, MinTimeout)
+	if err := checkTimeout(spec.Timeout); err != nil {
+		return Outcome{}, err
 	}
 	in, err := newPlan(spec.Source, target)
 	if err != nil {
 		return Outcome{}, err
 	}
-	pol, err := in.policy(spec.AllowHosts)
+	return execute(ctx, backend, spec, in, in.jobTarget(target), spec.AllowHosts)
+}
+
+func checkTimeout(d time.Duration) error {
+	if d < MinTimeout {
+		return fmt.Errorf("the timeout %s is shorter than the minimum %s", d, MinTimeout)
+	}
+	return nil
+}
+
+// execute runs the job of plan in a machine of backend. It makes the job directory and the proxy policy, and
+// leaves the state of the job in job.json.
+func execute(ctx context.Context, backend sandbox.Backend, spec Spec, in *plan, target Target, allowHosts []string) (Outcome, error) {
+	pol, err := in.policy(allowHosts)
 	if err != nil {
 		return Outcome{}, err
 	}
 	now := spec.Now()
-	j, err := Create(spec.JobsDir, now, in.jobTarget(target), spec.Image, backend.Name())
+	j, err := Create(spec.JobsDir, now, target, spec.Image, backend.Name())
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -109,8 +125,10 @@ func Run(ctx context.Context, backend sandbox.Backend, spec Spec, target string)
 	switch {
 	case runErr == nil:
 		out.Job.State = StateDone
-		out.Job.ExitCode = out.Result.Verdict.ExitCode()
-		out.Job.Verdict, out.Job.Score = string(out.Result.Verdict), out.Result.Score
+		if out.Result != nil { // an update has no Result to report
+			out.Job.ExitCode = out.Result.Verdict.ExitCode()
+			out.Job.Verdict, out.Job.Score = string(out.Result.Verdict), out.Result.Score
+		}
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		out.Job.State = StateTimeout
 		runErr = fmt.Errorf("timed out: %w", runErr)
@@ -166,7 +184,10 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	if !r.spec.NoNetwork {
 		ports = append(ports, proxyPort)
 	}
-	m, err := r.backend.Start(ctx, sandbox.Spec{JobDir: r.jobDir, Image: r.spec.Image, CPUs: r.spec.CPUs, MemoryMiB: r.spec.MemoryMiB, Ports: ports})
+	m, err := r.backend.Start(ctx, sandbox.Spec{
+		JobDir: r.jobDir, Image: r.spec.Image, CPUs: r.spec.CPUs, MemoryMiB: r.spec.MemoryMiB, Ports: ports,
+		Signatures: r.spec.Signatures, SignaturesWritable: r.in.update, // only the update job writes the drive
+	})
 	if err != nil {
 		return fmt.Errorf("start the sandbox: %w", err)
 	}
@@ -236,6 +257,9 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	}
 	if probe != "" { // a net-probe job takes the input like a local scan and also asks for the URL
 		job.Kind, job.Source = protocol.KindNetProbe, ""
+	}
+	if r.in.update {
+		job.Kind, job.Source = protocol.KindUpdate, ""
 	}
 	var endSent atomic.Bool
 	sentCh := make(chan sent, 1)
@@ -371,6 +395,13 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 	}
 	if r.spec.Version != "dev" && res.Tool.Version != r.spec.Version {
 		return fmt.Errorf("the result is from version %q, this program is %q", protocol.CleanPath(res.Tool.Version), protocol.CleanPath(r.spec.Version))
+	}
+	if r.in.update {
+		// There is nothing to report: the Result of an update only says that it went through.
+		if _, err := r.px.stop(); err != nil {
+			return fmt.Errorf("the proxy: %w", err)
+		}
+		return nil
 	}
 	wantKind := protocol.TargetDir
 	if !r.in.isDir {
@@ -513,7 +544,7 @@ func (r *runner) deniedText() string {
 	}
 	d := events[last]
 	text := fmt.Sprintf("CONNECT %s:%d denied: %s", d.Host, d.Port, d.Reason)
-	if _, err := proxy.NewPolicy(proxy.Input{AllowHosts: []string{d.Host}}); err == nil && d.Reason == proxy.ReasonHostNotAllowed {
+	if _, err := proxy.NewPolicy(proxy.Input{AllowHosts: []string{d.Host}}); err == nil && d.Reason == proxy.ReasonHostNotAllowed && !r.in.update {
 		text += fmt.Sprintf("; if you trust %s, rerun with --allow-host %s", d.Host, d.Host)
 	}
 	return text

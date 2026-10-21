@@ -137,8 +137,9 @@ func TestRunScan(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		args    []string
-		backend func() (sandbox.Backend, error)
+		args       []string
+		backend    func() (sandbox.Backend, error)
+		signatures bool // home holds signatures.img from setup
 		// expectations
 		wantCode    int
 		wantStdout  string // substring
@@ -150,6 +151,10 @@ func TestRunScan(t *testing.T) {
 	}{
 		{
 			name: "a clean file", args: []string{file}, backend: clean, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantStderr: "galahad: analyze", wantJob: true,
+			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024, 1025}}, wantTimeout: 600,
+		},
+		{
+			name: "the signatures of setup are attached read-only", args: []string{file}, backend: clean, signatures: true, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantJob: true,
 			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024, 1025}}, wantTimeout: 600,
 		},
 		{
@@ -208,6 +213,11 @@ func TestRunScan(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
+			if tt.signatures {
+				if err := os.WriteFile(filepath.Join(home, "signatures.img"), []byte("sig"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			seen = spy{}
 			env := cli.Env{Home: home, Backend: tt.backend, Now: time.Now}
 			var out, errb bytes.Buffer
@@ -241,6 +251,13 @@ func TestRunScan(t *testing.T) {
 				defer seen.mu.Unlock()
 				if got := seen.spec; got.Image != tt.wantSpec.Image || got.CPUs != tt.wantSpec.CPUs || got.MemoryMiB != tt.wantSpec.MemoryMiB || !slices.Equal(got.Ports, tt.wantSpec.Ports) {
 					t.Errorf("machine spec = %+v, want image %q, %d CPUs, %d MiB, ports %v", got, tt.wantSpec.Image, tt.wantSpec.CPUs, tt.wantSpec.MemoryMiB, tt.wantSpec.Ports)
+				}
+				wantSig := ""
+				if tt.signatures {
+					wantSig = filepath.Join(home, "signatures.img")
+				}
+				if got := seen.spec; got.Signatures != wantSig || got.SignaturesWritable {
+					t.Errorf("signatures drive = %q (writable %v), want %q, read-only", got.Signatures, got.SignaturesWritable, wantSig)
 				}
 				// The guest sees what is left of the timeout, a moment after the start.
 				if seen.jobTimeout > tt.wantTimeout || seen.jobTimeout < tt.wantTimeout-5 {

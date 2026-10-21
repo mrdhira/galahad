@@ -2,8 +2,9 @@ name: vm
 
 # Boots the real Firecracker backend, which the development session cannot do: there is no KVM there.
 # It installs the pinned Firecracker and the pinned kernel and core image, builds galahad and
-# galahad-agent, and scans two corpus fixtures through a microVM. Each failure prints ::error::
-# lines, which show up as annotations without reading the job log.
+# galahad-agent, fills the signatures through the update VM (cached for a week), and scans corpus
+# fixtures and a test-time EICAR file through a microVM. Each failure prints ::error:: lines, which
+# show up as annotations without reading the job log.
 
 on:
   pull_request:
@@ -40,8 +41,11 @@ jobs:
       - name: Check the scripts
         run: shellcheck -x scripts/vm/*.sh
 
+      # Private, as galahad setup makes it: doctor refuses a state directory others can read.
       - name: Set up the state directory
-        run: echo "GALAHAD_HOME=$RUNNER_TEMP/galahad" >> "$GITHUB_ENV"
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/galahad"
+          echo "GALAHAD_HOME=$RUNNER_TEMP/galahad" >> "$GITHUB_ENV"
 
       # Hosted runners have /dev/kvm, but only root can use it until this udev rule is in place.
       - name: Set up KVM
@@ -125,9 +129,47 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$IMAGE_DIR"
           scripts/vm/images.sh "$IMAGE_DIR"
 
+      # The update VM downloads the ClamAV databases and the YARA-Forge core rules onto signatures.img.
+      # The files are cached for a week (the ISO week is the key), so most runs skip the download. The
+      # checks below read the files either way.
+      - name: Name the week
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - id: sigcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GALAHAD_HOME }}/signatures.img
+            ${{ env.GALAHAD_HOME }}/signatures.stamp
+          key: signatures-${{ steps.week.outputs.week }}
+
+      - name: Fill the signatures through the update VM
+        if: steps.sigcache.outputs.cache-hit != 'true'
+        run: scripts/vm/signatures.sh
+
+      # Saved right away, so a failure of a later step does not cost the download.
+      - name: Save the signatures
+        if: steps.sigcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GALAHAD_HOME }}/signatures.img
+            ${{ env.GALAHAD_HOME }}/signatures.stamp
+          key: signatures-${{ steps.week.outputs.week }}
+
+      - name: Doctor shows the signatures as PASS
+        run: scripts/vm/doctor.sh
+
       # The agent is found next to the galahad binary: bin/galahad-agent.
-      - name: Scan a benign project (exit 0)
-        run: scripts/vm/scan.sh testdata/corpus/benign-go-cli 0
+      - name: Scan the benign fixtures (exit 0, ClamAV and YARA covered)
+        run: |
+          for fixture in testdata/corpus/benign-*; do
+            WANT_ANALYZERS="clamav yara" scripts/vm/scan.sh "$fixture" 0
+          done
+
+      - name: Scan an EICAR file built here (exit 20, GAL-SIG-001 and GAL-AV-001)
+        run: scripts/vm/eicar.sh
 
       - name: Scan a project that runs curl when its folder is opened (exit 20)
         run: scripts/vm/scan.sh testdata/corpus/p1-folderopen-curl 20

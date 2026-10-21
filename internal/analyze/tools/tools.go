@@ -135,6 +135,19 @@ func execute(ctx context.Context, limit time.Duration, path string, args ...stri
 	return output{stdout: out.buf.Bytes(), stderr: errb.buf.String()}, nil
 }
 
+// Exec runs the program called name, found on PATH, with the arguments args, under the time limit
+// and the output caps of the scanners. It returns what the program wrote and its exit code, which
+// is -1 when a signal ended it. A program that is missing, over its time or over its output cap is an
+// error; one that exits non-zero is not.
+func Exec(ctx context.Context, limit time.Duration, name string, args ...string) (stdout []byte, stderr string, code int, err error) {
+	bin, err := exec.LookPath(name)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("%s is not installed: %w", name, err)
+	}
+	out, err := execute(ctx, limit, bin, args...)
+	return out.stdout, out.stderr, out.code, err
+}
+
 // capped keeps the first max bytes written to it and drops the rest. It always reports the whole
 // write as done, so the copy from the tool never stops early and the tool never gets a broken
 // pipe. When more than max arrives and stop is set, it calls stop, which kills the tool, and

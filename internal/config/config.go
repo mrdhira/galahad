@@ -27,3 +27,10 @@ func ImagesDir(home string) string { return filepath.Join(home, "images") }
 
 // BinDir returns the directory that holds downloaded helper binaries.
 func BinDir(home string) string { return filepath.Join(home, "bin") }
+
+// SignaturesPath returns the signatures image. Scan jobs attach it read-only, and only the update job writes it.
+func SignaturesPath(home string) string { return filepath.Join(home, "signatures.img") }
+
+// SignaturesStamp returns the file with the time of the last good update. The host writes it after
+// the update job succeeded, and never reads the image the guest wrote.
+func SignaturesStamp(home string) string { return filepath.Join(home, "signatures.stamp") }

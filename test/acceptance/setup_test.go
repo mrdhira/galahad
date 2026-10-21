@@ -59,6 +59,7 @@ func TestSetupAndDoctor(t *testing.T) {
 		drop      string     // a URL path the server does not have
 		tamper    string     // a URL path whose content is replaced by other bytes of the same size
 		onlyOther bool       // runs on hosts that are not Linux amd64
+		update    string     // runs the update job on the fake sandbox: "no-drive", or "foreign-host" for a stub freshclam and rules on another host
 		// expectations
 		wantCode     int
 		wantStdout   []string
@@ -76,7 +77,7 @@ func TestSetupAndDoctor(t *testing.T) {
 		},
 		{
 			name:         "setup installs Firecracker and the core image",
-			args:         [][]string{{"setup"}},
+			args:         [][]string{{"setup", "--skip-signatures"}},
 			wantCode:     0,
 			wantStdout:   []string{"firecracker v1.17.0: installed", "vmlinux: installed", "core.ext4: installed"},
 			wantFiles:    []string{"bin/firecracker", "images/0.0.1/vmlinux", "images/0.0.1/core.ext4"},
@@ -85,7 +86,7 @@ func TestSetupAndDoctor(t *testing.T) {
 		},
 		{
 			name:         "setup --image re installs the re image",
-			args:         [][]string{{"setup", "--image", "re"}},
+			args:         [][]string{{"setup", "--image", "re", "--skip-signatures"}},
 			wantCode:     0,
 			wantStdout:   []string{"re.ext4: installed"},
 			wantFiles:    []string{"images/0.0.1/vmlinux", "images/0.0.1/re.ext4"},
@@ -94,20 +95,20 @@ func TestSetupAndDoctor(t *testing.T) {
 		},
 		{
 			name:         "a second setup downloads nothing",
-			args:         [][]string{{"setup"}, {"setup"}},
+			args:         [][]string{{"setup", "--skip-signatures"}, {"setup", "--skip-signatures"}},
 			wantCode:     0,
 			wantStdout:   []string{"firecracker v1.17.0: already installed", "vmlinux: already installed", "core.ext4: already installed"},
 			wantRequests: 0,
 		},
 		{
 			name:       "doctor after setup passes Firecracker and the image checks",
-			args:       [][]string{{"setup"}, {"doctor"}},
-			wantStdout: []string{"PASS  platform: linux/amd64", "PASS  firecracker: v1.17.0", "PASS  vmlinux:", "PASS  core.ext4:", "PASS  galahad-agent:", "WARN  re.ext4:"},
+			args:       [][]string{{"setup", "--skip-signatures"}, {"doctor"}},
+			wantStdout: []string{"PASS  platform: linux/amd64", "PASS  firecracker: v1.17.0", "PASS  vmlinux:", "PASS  core.ext4:", "PASS  galahad-agent:", "(version " + stampedVersion + ")", "WARN  signatures:", "WARN  re.ext4:"},
 			wantNoFail: true,
 		},
 		{
 			name:         "a release that is not published is named",
-			args:         [][]string{{"setup"}},
+			args:         [][]string{{"setup", "--skip-signatures"}},
 			drop:         "/vmlinux.gz",
 			wantCode:     1,
 			wantStderr:   []string{"vmlinux.gz: not published yet", "images/linux/build.sh"},
@@ -116,7 +117,7 @@ func TestSetupAndDoctor(t *testing.T) {
 		},
 		{
 			name:         "an image that does not match the pins installs nothing",
-			args:         [][]string{{"setup"}},
+			args:         [][]string{{"setup", "--skip-signatures"}},
 			tamper:       "/core.ext4.gz",
 			wantCode:     1,
 			wantStderr:   []string{"core.ext4.gz: does not match the sha256"},
@@ -124,8 +125,28 @@ func TestSetupAndDoctor(t *testing.T) {
 			wantRequests: 3,
 		},
 		{
+			name:         "the update job without a signatures drive fails and leaves nothing",
+			args:         [][]string{{"setup"}},
+			update:       "no-drive",
+			wantCode:     1,
+			wantStdout:   []string{"core.ext4: installed", "signatures: updating"},
+			wantStderr:   []string{"galahad setup: signatures:", "the guest failed (internal): an update job needs the signatures drive of the VM", "the previous signatures, if any, are kept"},
+			wantNoFiles:  []string{"signatures.img", "signatures.img.new", "signatures.stamp"},
+			wantRequests: 3,
+		},
+		{
+			name:         "the update policy refuses a host that is not the rules host",
+			args:         [][]string{{"setup"}},
+			update:       "foreign-host",
+			wantCode:     1,
+			wantStdout:   []string{"signatures: ClamAV databases", "signatures: YARA-Forge core rules"},
+			wantStderr:   []string{"CONNECT rules.example.test:80 denied: host not allowed"},
+			wantNoFiles:  []string{"signatures.img", "signatures.img.new", "signatures.stamp"},
+			wantRequests: 3,
+		},
+		{
 			name:       "setup is Linux only for now",
-			args:       [][]string{{"setup"}},
+			args:       [][]string{{"setup", "--skip-signatures"}},
 			onlyOther:  true,
 			wantCode:   1,
 			wantStderr: []string{"Linux only until M5"},
@@ -193,6 +214,26 @@ func TestSetupAndDoctor(t *testing.T) {
 			t.Setenv("GALAHAD_TEST_PINS", pinsFile)
 			t.Setenv("GALAHAD_TEST_IMAGES_URL", srv.URL)
 			t.Setenv("SSL_CERT_FILE", certFile)
+
+			if tt.update != "" {
+				t.Setenv("GALAHAD_SANDBOX", "fake")
+				stubs := t.TempDir()
+				sigs := filepath.Join(dir, "sig")
+				// The guest runs on the machine of the test with this freshclam, which writes the two databases the
+				// guest wants, and no yarac: the rules download is what the policy ends.
+				stub := "#!/bin/sh\nconf=${1#--config-file=}\ndb=$(sed -n 's/^DatabaseDirectory //p' \"$conf\")\necho db >\"$db/main.cvd\"\necho db >\"$db/daily.cvd\"\n"
+				if err := os.WriteFile(filepath.Join(stubs, "freshclam"), []byte(stub), 0o700); err != nil { //nolint:gosec // a test script
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(sigs, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", stubs+string(os.PathListSeparator)+os.Getenv("PATH"))
+				if tt.update == "foreign-host" {
+					t.Setenv("GALAHAD_TEST_SIG_DIR", sigs)
+					t.Setenv("GALAHAD_TEST_YARA_URL", "http://rules.example.test/core.zip")
+				}
+			}
 
 			var stdout, stderr string
 			var code int

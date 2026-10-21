@@ -43,6 +43,8 @@ func TestDirs(t *testing.T) {
 		{name: "jobs", got: config.JobsDir(home), want: filepath.Join(home, "jobs")},
 		{name: "images", got: config.ImagesDir(home), want: filepath.Join(home, "images")},
 		{name: "bin", got: config.BinDir(home), want: filepath.Join(home, "bin")},
+		{name: "signatures image", got: config.SignaturesPath(home), want: filepath.Join(home, "signatures.img")},
+		{name: "signatures stamp", got: config.SignaturesStamp(home), want: filepath.Join(home, "signatures.stamp")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

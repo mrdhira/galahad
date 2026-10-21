@@ -100,6 +100,12 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		}
 	}
 
+	// The signatures from setup are attached read-only. Without them the tools are left out and the report says so.
+	signatures := config.SignaturesPath(home)
+	if st, err := os.Stat(signatures); err != nil || !st.Mode().IsRegular() {
+		signatures = ""
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	out, err := job.Run(ctx, backend, job.Spec{
@@ -115,6 +121,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		Source:     tgt.source,
 		AllowHosts: allowHosts,
 		Submodules: *submodules,
+		Signatures: signatures,
 		Progress: func(stage string) {
 			fmt.Fprintf(stderr, "galahad: %s\n", stage)
 		},

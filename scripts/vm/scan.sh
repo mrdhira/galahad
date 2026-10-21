@@ -2,7 +2,9 @@
 # Runs "galahad scan" on a fixture in a real VM and checks the exit code, that no firecracker process
 # is left, and that the job directory holds no transient files. Used by .github/workflows/vm.yml.
 # Failures print ::error:: lines, which GitHub shows as annotations (at most 10 per step).
-#   GALAHAD_HOME=DIR scripts/vm/scan.sh FIXTURE WANT_EXIT_CODE
+#   GALAHAD_HOME=DIR [WANT_ANALYZERS="clamav yara"] [WANT_RULES="GAL-SIG-001 GAL-AV-001"] scripts/vm/scan.sh FIXTURE WANT_EXIT_CODE
+# WANT_ANALYZERS names the analyzers that the report must list as covered, which shows that the tools
+# found their signatures. WANT_RULES names the rules that must be among the findings.
 set -euo pipefail
 
 : "${GALAHAD_HOME:?GALAHAD_HOME is not set}"
@@ -29,6 +31,12 @@ fail() {
 	if [ -s "$out/stderr" ]; then
 		tail -n 3 "$out/stderr" | while IFS= read -r line; do annotate "stderr: " "$line"; done
 	fi
+	if [ -n "$job" ] && [ -s "$job/report.json" ]; then
+		annotate "findings: " "$(jq -r '[.findings[] | "\(.rule_id) \(.evidence[0].path)"] | unique | .[:8] | join("; ")' "$job/report.json" 2>&1)"
+	fi
+	if [ -n "$job" ] && [ -s "$job/artifacts/tools.log" ]; then
+		tail -n 4 "$job/artifacts/tools.log" | while IFS= read -r line; do annotate "tools.log: " "$line"; done
+	fi
 	if [ -n "$job" ] && [ -s "$job/console.log" ]; then
 		tail -n 4 "$job/console.log" | while IFS= read -r line; do annotate "console: " "$line"; done
 	fi
@@ -54,4 +62,10 @@ left=$(find "$job" \( -name 'fc.sock*' -o -name 'v.sock*' -o -name scratch.img -
 
 [ "$(jq -r '.state' "$job/job.json")" = "done" ] || fail "job.json does not say state done"
 [ -s "$job/report.json" ] || fail "the job has no report.json"
+for name in ${WANT_ANALYZERS:-}; do
+	jq -e --arg n "$name" ".coverage.analyzers | index(\$n)" "$job/report.json" >/dev/null || fail "the report of $fixture does not list the analyzer $name as covered"
+done
+for rule in ${WANT_RULES:-}; do
+	jq -e --arg r "$rule" "[.findings[].rule_id] | index(\$r)" "$job/report.json" >/dev/null || fail "the report of $fixture has no finding $rule"
+done
 echo "scan $fixture: verdict $(jq -r '.verdict' "$job/job.json"), no firecracker process, no transient files"
