@@ -131,6 +131,11 @@ func TestScanNetwork(t *testing.T) {
 			fakeResult: "network",
 			wantCode:   1, wantStderr: "the result has network data", wantEvents: -1, wantNoReport: true,
 		},
+		{
+			name:       "a result with a GAL-NET-001 finding of its own is refused",
+			fakeResult: "forged-finding",
+			wantCode:   1, wantStderr: "only the host adds it", wantEvents: -1, wantNoReport: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

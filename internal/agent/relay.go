@@ -135,6 +135,8 @@ func (r *Relay) tunnel(ctx context.Context, req request) (net.Conn, int, string)
 		_ = up.Close()
 		return nil, 502, "bad gateway"
 	}
+	stop := context.AfterFunc(ctx, func() { _ = up.Close() }) // a shutdown ends the wait for the reply
+	defer stop()
 	_ = up.SetDeadline(time.Now().Add(r.Handshake))
 	if err := protocol.WriteFrame(up, protocol.FrameConnect, data); err != nil {
 		_ = up.Close()

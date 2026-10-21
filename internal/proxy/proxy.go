@@ -36,10 +36,11 @@ const (
 
 // A guest can fill the log and the event list with requests that do not matter before it asks for
 // a blocked address, so part of both is kept for the blocked decisions. Other decisions stop
-// short of the whole size, and a blocked decision may use all of it.
+// short of the whole size; a blocked decision may use the whole of it, which leaves at least the
+// reserve for blocked decisions.
 const (
 	maxEvents     = 200 // the most events, as in protocol.MaxNetEvents
-	blockedEvents = 50  // of them, the ones that only a blocked decision may fill
+	blockedEvents = 50  // of them, the last ones, which only a blocked decision may fill
 	// A tenth of the log lines is kept for blocked decisions.
 	logReserveDiv = 10
 )
@@ -86,11 +87,10 @@ type Proxy struct {
 	up     budget
 	down   budget
 
-	mu       sync.Mutex
-	lines    int
-	dropped  int
-	events   []Event
-	nBlocked int // events with Blocked set
+	mu      sync.Mutex
+	lines   int
+	dropped int
+	events  []Event
 }
 
 // New returns a proxy that enforces p and writes one JSON line per decision to log.
@@ -123,8 +123,8 @@ func defaultDial(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
 }
 
 // Events returns the aggregated decisions so far, at most 200 entries. A decision for a new
-// host, port and decision beyond that is not listed, except that 50 entries are kept for
-// blocked decisions: once the other 150 are full, a blocked one is still listed.
+// host, port and decision beyond that is not listed, except that the last 50 entries are kept
+// for blocked decisions: once 150 are full, a blocked one is still listed.
 func (p *Proxy) Events() []Event {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -454,17 +454,18 @@ func (p *Proxy) addEvent(d decision, verdict string) {
 		if e := &p.events[i]; e.Host == d.host && e.Port == d.port && e.Decision == verdict {
 			e.Count++
 			// A refusal for a non-public address must not be hidden by an earlier one.
-			if d.blocked && !e.Blocked && p.nBlocked < blockedEvents {
+			if d.blocked && !e.Blocked {
 				e.Blocked, e.Reason = true, d.reason
-				p.nBlocked++
 			}
 			return
 		}
 	}
-	switch {
-	case d.blocked && p.nBlocked < blockedEvents:
-		p.nBlocked++
-	case d.blocked || len(p.events)-p.nBlocked >= maxEvents-blockedEvents:
+	// Only a blocked decision may take one of the last blockedEvents places.
+	limit := maxEvents - blockedEvents
+	if d.blocked {
+		limit = maxEvents
+	}
+	if len(p.events) >= limit {
 		return
 	}
 	p.events = append(p.events, Event{Host: d.host, Port: d.port, Decision: verdict, Reason: d.reason, Blocked: d.blocked, Count: 1})

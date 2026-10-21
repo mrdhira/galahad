@@ -40,7 +40,7 @@ func (g *guest) connect(host string, port int) (protocol.ConnectReply, bool) {
 
 // connectRetry is connect, tried again while the proxy is over its tunnel cap.
 func (g *guest) connectRetry(host string, port int) protocol.ConnectReply {
-	for range 5000 {
+	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); {
 		if reply, ok := g.connect(host, port); ok {
 			return reply
 		}
@@ -146,6 +146,15 @@ func TestRunNetwork(t *testing.T) {
 			},
 			wantPorts: []uint32{1024, 1025}, wantEvidence: []string{metadataSnippet}, wantVerdict: protocol.VerdictSuspicious,
 			wantLog: true, wantFindings: protocol.MaxFindings,
+		},
+		{
+			name: "the result has a finding only the host may add",
+			edit: func(res *protocol.Result) {
+				res.Findings = []protocol.Finding{ruleNetFinding()}
+			},
+			wantErr:   "the result has a GAL-NET-001 finding",
+			wantLog:   true,
+			wantPorts: []uint32{1024, 1025},
 		},
 		{
 			name:      "no network serves no proxy port",
@@ -256,4 +265,10 @@ func TestRunNetwork(t *testing.T) {
 			}
 		})
 	}
+}
+
+func ruleNetFinding() protocol.Finding {
+	f := protocol.Rule{ID: "GAL-NET-001", Severity: protocol.SeverityHigh, Title: "forged"}.Finding(protocol.Evidence{Path: "(network)", Snippet: "CONNECT x.test:443 denied: private"})
+	f.Analyzer = "network"
+	return f
 }

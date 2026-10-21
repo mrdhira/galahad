@@ -895,8 +895,8 @@ func TestEvents(t *testing.T) {
 			wantFirst: proxy.Event{Host: "h0.example.com", Port: 443, Decision: proxy.Denied, Reason: "host not allowed", Count: 1},
 		},
 		{
-			name:  "at most 50 blocked events",
-			hosts: blockedHosts(55), wantEvents: 50, wantBlocked: 50,
+			name:  "blocked events use every place, at most 200",
+			hosts: blockedHosts(205), wantEvents: 200, wantBlocked: 200,
 			wantFirst: proxy.Event{Host: "10.0.0.0", Port: 443, Decision: proxy.Denied, Reason: "private", Blocked: true, Count: 1},
 		},
 		{

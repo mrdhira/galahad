@@ -378,6 +378,11 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 	if res.Network != nil {
 		return errors.New("the result has network data; only the host writes it")
 	}
+	for _, f := range res.Findings {
+		if f.RuleID == ruleNetBlocked.ID {
+			return fmt.Errorf("the result has a %s finding; only the host adds it", ruleNetBlocked.ID)
+		}
+	}
 	// The proxy is stopped first, so the decisions are final. They are the host's own: nothing
 	// the guest says about the network is used.
 	events, err := r.px.stop()
