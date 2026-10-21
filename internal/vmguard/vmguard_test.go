@@ -1,6 +1,7 @@
 package vmguard_test
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -54,6 +55,50 @@ func TestFromSignals(t *testing.T) {
 			}
 			if !strings.Contains(reason, tt.wantReason) {
 				t.Errorf("reason %q missing %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// newlines yields endless newline bytes, so a test can build input over the limit without storing it.
+type newlines struct{}
+
+func (newlines) Read(p []byte) (int, error) {
+	return copy(p, newlineBlock), nil
+}
+
+var newlineBlock = []byte(strings.Repeat("\n", 64<<10))
+
+func TestWindowsMounts(t *testing.T) {
+	const limit = 16 << 20
+	tests := []struct {
+		name string
+		// inputs
+		mounts string
+		extra  int // newline bytes appended after mounts
+		// expectations
+		want bool
+	}{
+		{name: "wsl 9p drvfs mount at /mnt/c", mounts: `C:\134 /mnt/c 9p rw,noatime,dirsync,aname=drvfs;path=C:\;uid=1000 0 0`, want: true},
+		{name: "input over the limit", extra: limit + 1, want: true},
+		{name: "short line is skipped", mounts: "C:\\134 /mnt/c\n\nnonsense\n", want: false},
+		{name: "drive letter source", mounts: `C:\134 /data fuseblk rw 0 0`, want: true},
+		{name: "drive letter source with a space in the path", mounts: `D:\134My\040Files /data fuseblk rw 0 0`, want: true},
+		{name: "type drvfs", mounts: "drvfs /data drvfs rw 0 0", want: true},
+		{name: "9p with aname drvfs outside /mnt", mounts: "share /srv/win 9p rw,aname=drvfs;path=E:\\ 0 0", want: true},
+		{name: "9p at /mnt/x", mounts: "share /mnt/x 9p rw 0 0", want: true},
+		{name: "virtiofs at /mnt/c", mounts: "share /mnt/c virtiofs rw 0 0", want: true},
+		{name: "9p drivers share stays false", mounts: "drivers /usr/lib/wsl/drivers 9p ro,aname=drivers 0 0", want: false},
+		{name: "virtiofs at /mnt/data stays false", mounts: "share /mnt/data virtiofs rw 0 0", want: false},
+		{name: "plain ext4 stays false", mounts: "/dev/vda1 / ext4 rw 0 0", want: false},
+		{name: "nfs export stays false", mounts: "host:/export /mnt/nfs nfs4 rw 0 0", want: false},
+		{name: "empty input", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := io.MultiReader(strings.NewReader(tt.mounts), io.LimitReader(newlines{}, int64(tt.extra)))
+			if got := vmguard.WindowsMounts(r); got != tt.want {
+				t.Errorf("WindowsMounts() = %v, want %v", got, tt.want)
 			}
 		})
 	}

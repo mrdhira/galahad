@@ -15,7 +15,7 @@ v0.1 ships `galahad-agent`, a static analyzer. It reads a folder, a repo checkou
 The analyzer parses untrusted bytes, so run it inside a VM, not on your real machine:
 
 - macOS: a UTM or Parallels VM.
-- Windows: a Hyper-V VM.
+- Windows: a Hyper-V VM (on Windows Home, which has no Hyper-V, use VirtualBox or VMware Workstation).
 - Any OS: a cloud VM or a throwaway Linux VM.
 
 Do not use WSL. All WSL2 distributions and Docker Desktop share one kernel, and WSL can reach your Windows files and start Windows programs, so a bug in the analyzer could reach your Windows account. Turning off automount and interop in `/etc/wsl.conf` does not make it a real boundary. Galahad refuses to run in WSL; use a Hyper-V VM instead. `--unsafe-host` is the only way to run there, at your own risk.
