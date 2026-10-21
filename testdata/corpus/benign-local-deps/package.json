@@ -1,0 +1,11 @@
+{
+  "name": "local-deps",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "dep": "./dep",
+    "vendored": "file:./vendor/pkg.tgz",
+    "sibling": "link:./packages/app",
+    "app": "workspace:*"
+  }
+}

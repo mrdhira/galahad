@@ -17,6 +17,20 @@ func lnkLike(command string) []byte {
 	return b
 }
 
+// writeFiles writes a harmless JavaScript file at each slash-separated path under dir.
+func writeFiles(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("'use strict';\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // rlo is the right-to-left override character.
 const rlo = "\u202e"
 
@@ -39,6 +53,46 @@ func TestFilenameTricks(t *testing.T) {
 			},
 			wantCode: 20,
 			wantAt:   []string{"GAL-NAME-001 invoice.zip!/invoice.pdf.lnk:0", "GAL-LNK-001 invoice.zip!/invoice.pdf.lnk:0", "GAL-NAME-003 invoice.zip!/invoice.pdf.lnk:0"},
+		},
+		{
+			name: "p5-pdf-js at the top of the target is critical",
+			build: func(t *testing.T, dir string) string {
+				p := filepath.Join(dir, "invoice.pdf.js")
+				if err := os.WriteFile(p, []byte("console.log('harmless');\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return p
+			},
+			wantCode: 20,
+			wantAt:   []string{"GAL-NAME-001 invoice.pdf.js:0"},
+		},
+		{
+			name: "p5-pdf-js in the tests folder of an archive is critical",
+			build: func(t *testing.T, dir string) string {
+				p := filepath.Join(dir, "mail.zip")
+				zipEntries(t, p, []zipEntry{{name: "tests/invoice.pdf.js", data: []byte("console.log('harmless');\n")}})
+				return p
+			},
+			wantCode: 20,
+			wantAt:   []string{"GAL-NAME-001 mail.zip!/tests/invoice.pdf.js:0"},
+		},
+		{
+			name: "p7-json-js test file named after an API is not flagged",
+			build: func(t *testing.T, dir string) string {
+				writeFiles(t, dir, "test/express.json.js", "test/res.json.js", "playground/resolve/exact-extension/file.json.js")
+				return dir
+			},
+			wantCode:   0,
+			wantAbsent: []string{"GAL-NAME-001"},
+		},
+		{
+			name: "p7-png-js in a test folder of a source tree is graded medium",
+			build: func(t *testing.T, dir string) string {
+				writeFiles(t, dir, "test/e2e/image-optimizer/test.png.js")
+				return dir
+			},
+			wantCode: 10,
+			wantAt:   []string{"GAL-NAME-001 test/e2e/image-optimizer/test.png.js:0"},
 		},
 		{
 			name: "p5-rtlo-name flags the bidi control with an escaped path",

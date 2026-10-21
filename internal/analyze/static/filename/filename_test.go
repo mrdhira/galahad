@@ -1,6 +1,7 @@
 package filename_test
 
 import (
+	"cmp"
 	"context"
 	"slices"
 	"testing"
@@ -29,8 +30,10 @@ func TestAnalyze(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		file string
-		data []byte
+		file   string
+		data   []byte
+		dir    string // folder of the file; "dir" when empty
+		member bool   // the file is a member of a container
 		// expectations
 		wantRules   []string
 		wantSnippet string // snippet of the first finding
@@ -40,6 +43,19 @@ func TestAnalyze(t *testing.T) {
 		{name: "whitespace padding before the last dot", file: "photo.jpg   .scr", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
 		{name: "trailing dot after the executable extension", file: "invoice.pdf.exe.", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
 		{name: "trailing dots and spaces", file: "invoice.pdf.exe. . ", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
+		{name: "data and markup types are not decoys for js", file: "express.json.js", data: []byte("x")},
+		{name: "html and xml are not decoys for js", file: "page.html.js", data: []byte("x")},
+		{name: "csv decoy then exe", file: "statement.csv.exe", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
+		{name: "html decoy then scr", file: "invoice.html.scr", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
+		{name: "json decoy then bat", file: "report.json.bat", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
+		{name: "xml decoy then jse", file: "data.xml.jse", data: []byte("x"), wantRules: []string{"GAL-NAME-001", "GAL-NAME-003"}},
+		{name: "source types are not decoys", file: "index.d.ts.js", data: []byte("x")},
+		{name: "mov decoy then exe", file: "holiday.mov.exe", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
+		{name: "rar decoy then vbs", file: "backup.rar.vbs", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
+		{name: "decoy then jar", file: "invoice.pdf.jar", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
+		{name: "script in a test folder is still reported", file: "test.png.js", data: []byte("'use strict'\n"), dir: "test/e2e/image", wantRules: []string{"GAL-NAME-001"}, wantSnippet: "test.png.js"},
+		{name: "test folder name is matched ignoring case", file: "invoice.pdf.js", data: []byte("x"), dir: "app/Examples", wantRules: []string{"GAL-NAME-001"}},
+		{name: "script member of a container in a test folder is reported", file: "invoice.pdf.js", data: []byte("x"), dir: "mail.eml!/tests", member: true, wantRules: []string{"GAL-NAME-001"}},
 		{name: "lnk with a trailing dot", file: "x.lnk.", data: []byte("x"), wantRules: []string{"GAL-NAME-003"}},
 		{name: "zero width space padding", file: "invoice.pdf" + string(rune(0x200B)) + ".exe", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
 		{name: "hangul filler padding", file: "invoice.pdf" + string(rune(0x3164)) + ".exe", data: []byte("x"), wantRules: []string{"GAL-NAME-001"}},
@@ -58,7 +74,11 @@ func TestAnalyze(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := filename.New()
-			f := analyze.File{Path: "dir/" + tt.file, Name: tt.file, Kind: ident.Identify(tt.file, tt.data), Data: tt.data}
+			dir := cmp.Or(tt.dir, "dir")
+			f := analyze.File{Path: dir + "/" + tt.file, Name: tt.file, Kind: ident.Identify(tt.file, tt.data), Data: tt.data}
+			if tt.member {
+				f.Member = "tests/" + tt.file
+			}
 
 			out, err := a.Analyze(context.Background(), f)
 
@@ -87,6 +107,8 @@ func TestRuleMetadata(t *testing.T) {
 		name       string
 		file       string
 		data       []byte
+		dir        string
+		member     bool
 		wantSev    map[string]string
 		wantAttack map[string]string
 	}{
@@ -94,6 +116,36 @@ func TestRuleMetadata(t *testing.T) {
 			name: "double extension and lnk", file: "a.pdf.lnk", data: lnkBlob([]byte("mshta http://x.test/a")),
 			wantSev:    map[string]string{"GAL-NAME-001": "critical", "GAL-NAME-003": "medium", "GAL-LNK-001": "high"},
 			wantAttack: map[string]string{"GAL-NAME-001": "T1036.007", "GAL-NAME-003": "T1204.002", "GAL-LNK-001": "T1059"},
+		},
+		{
+			name: "text script in a test folder is graded lower", file: "test.png.js", data: []byte("'use strict'\n"), dir: "test/e2e",
+			wantSev:    map[string]string{"GAL-NAME-001": "medium"},
+			wantAttack: map[string]string{"GAL-NAME-001": "T1036.007"},
+		},
+		{
+			name: "top-level script is critical", file: "invoice.pdf.js", data: []byte("x"),
+			wantSev:    map[string]string{"GAL-NAME-001": "critical"},
+			wantAttack: map[string]string{"GAL-NAME-001": "T1036.007"},
+		},
+		{
+			name: "script in a container is critical", file: "invoice.pdf.js", data: []byte("x"), dir: "mail.eml!/tests", member: true,
+			wantSev:    map[string]string{"GAL-NAME-001": "critical"},
+			wantAttack: map[string]string{"GAL-NAME-001": "T1036.007"},
+		},
+		{
+			name: "script that is not text is critical in a test folder", file: "invoice.pdf.js", data: lnkBlob([]byte("x")), dir: "tests",
+			wantSev:    map[string]string{"GAL-NAME-001": "critical", "GAL-NAME-003": "medium"},
+			wantAttack: map[string]string{"GAL-NAME-001": "T1036.007", "GAL-NAME-003": "T1204.002"},
+		},
+		{
+			name: "csv, html and json decoys are critical", file: "statement.csv.exe", data: []byte("x"), dir: "tests",
+			wantSev:    map[string]string{"GAL-NAME-001": "critical"},
+			wantAttack: map[string]string{"GAL-NAME-001": "T1036.007"},
+		},
+		{
+			name: "binary executable in a test folder is critical", file: "invoice.pdf.exe", data: []byte("x"), dir: "tests",
+			wantSev:    map[string]string{"GAL-NAME-001": "critical"},
+			wantAttack: map[string]string{"GAL-NAME-001": "T1036.007"},
 		},
 		{
 			name: "bidi", file: "a\u200fb.txt", data: []byte("x"),
@@ -104,6 +156,12 @@ func TestRuleMetadata(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := analyze.File{Path: tt.file, Name: tt.file, Kind: ident.Identify(tt.file, tt.data), Data: tt.data}
+			if tt.dir != "" {
+				f.Path = tt.dir + "/" + tt.file
+			}
+			if tt.member {
+				f.Member = "tests/" + tt.file
+			}
 
 			out, err := filename.New().Analyze(context.Background(), f)
 

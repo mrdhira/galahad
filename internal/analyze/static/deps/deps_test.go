@@ -189,6 +189,17 @@ func TestAnalyze(t *testing.T) {
 			data: "{\n\"dependencies\": {\n\"expresss\": \"file:../x\",\n\"lodahs\": \"workspace:*\",\n\"reactt\": \"link:../r\"\n}\n}",
 		},
 		{
+			name: "local path dependencies inside the target are ignored",
+			file: "package.json",
+			data: "{\n\"dependencies\": {\n\"dep\": \"./dep\",\n\"shared\": \"../shared\",\n\"a-one\": \"file:./pkg.tgz\",\n\"b-two\": \"link:../l\",\n\"c-three\": \"portal:./p\",\n\"d-four\": \"workspace:^\",\n\"e-five\": \"FILE:../up\"\n}\n}",
+		},
+		{
+			name:         "local path dependencies outside the target stay flagged",
+			file:         "package.json",
+			data:         "{\n\"dependencies\": {\n\"a-one\": \"file:../../x\",\n\"b-two\": \"link:/opt/b\",\n\"c-three\": \"file:///etc/c\",\n\"d-four\": \"portal:~/d\",\n\"e-five\": \"../../../e\",\n\"f-six\": \"file:C:\\\\f\",\n\"g-seven\": \"file:..\\\\..\\\\g\"\n}\n}",
+			wantFindings: []string{"GAL-DEPS-002@3", "GAL-DEPS-002@4", "GAL-DEPS-002@5", "GAL-DEPS-002@6", "GAL-DEPS-002@7", "GAL-DEPS-002@8", "GAL-DEPS-002@9"},
+		},
+		{
 			name:         "git, github shorthand and tarball specs",
 			file:         "package.json",
 			data:         "{\n\"dependencies\": {\n\"a-one\": \"git+https://git.example.test/a.git\",\n\"b-two\": \"someone/utils#v1\",\n\"c-three\": \"https://dl.example.test/c.tgz\",\n\"d-four\": \"^1.2.3\",\n\"e-five\": \"npm:other@1.0.0\",\n\"@scope/f-six\": \"1.0.0\"\n}\n}",
@@ -232,6 +243,12 @@ func TestAnalyze(t *testing.T) {
 			file:         "package.json",
 			data:         "{\n\"dependencies\": {\n" + manyGit.String() + "\"x\": \"1\"\n}\n}\n",
 			wantFindings: wantManyGit,
+		},
+		{
+			name:         "a byte order mark does not hide the dependencies",
+			file:         "package.json",
+			data:         "\xef\xbb\xbf{\n\"dependencies\": {\n\"expresss\": \"1\",\n\"my-utils\": \"github:someone/utils\"\n}\n}",
+			wantFindings: []string{"GAL-DEPS-001@3", "GAL-DEPS-002@4"},
 		},
 		{name: "malformed json keeps what was read and skips the rest", file: "package.json", data: "{\n\"dependencies\": {\n\"expresss\": \"1\",\n", wantFindings: []string{"GAL-DEPS-001@3"}, wantSkip: "parse_error"},
 		{name: "deeply nested json is skipped", file: "package.json", data: deep, wantSkip: "depth"},

@@ -12,6 +12,10 @@ const (
 	MaxLineScan   = 1 << 20 // bytes per line scanned by line heuristics
 	MaxConfigSize = 1 << 20 // JSON, JSONC and YAML-ish config files
 
+	// Files an analyzer reads through File.Open, per job.
+	MaxNeighborReads = 4096
+	MaxNeighborBytes = 32 << 20
+
 	// Extra files: auto-run files past MaxFiles or MaxTotalBytes are still read,
 	// from this allowance, so padding a repository cannot hide them.
 	MaxExtraFiles = 2000

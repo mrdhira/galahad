@@ -7,6 +7,7 @@ import (
 	"context"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -17,9 +18,12 @@ import (
 
 var (
 	ruleDouble = protocol.Rule{ID: "GAL-NAME-001", Severity: protocol.SeverityCritical, Title: "Decoy double extension ending in an executable type", Attack: "T1036.007"}
-	ruleBidi   = protocol.Rule{ID: "GAL-NAME-002", Severity: protocol.SeverityCritical, Title: "Bidi control character in the filename", Attack: "T1036.002"}
-	ruleShort  = protocol.Rule{ID: "GAL-NAME-003", Severity: protocol.SeverityMedium, Title: "Windows shortcut or script-host file", Attack: "T1204.002"}
-	ruleLNK    = protocol.Rule{ID: "GAL-LNK-001", Severity: protocol.SeverityHigh, Title: "Shortcut launches a script interpreter or URL", Attack: "T1059"}
+	// ruleDoubleSource has the ID of ruleDouble with a lower severity, for a plain JavaScript file in a test
+	// or example folder of a source tree. The scorer counts an ID once, at its highest severity.
+	ruleDoubleSource = protocol.Rule{ID: "GAL-NAME-001", Severity: protocol.SeverityMedium, Title: "Decoy double extension ending in a script, in a test or example folder", Attack: "T1036.007"}
+	ruleBidi         = protocol.Rule{ID: "GAL-NAME-002", Severity: protocol.SeverityCritical, Title: "Bidi control character in the filename", Attack: "T1036.002"}
+	ruleShort        = protocol.Rule{ID: "GAL-NAME-003", Severity: protocol.SeverityMedium, Title: "Windows shortcut or script-host file", Attack: "T1204.002"}
+	ruleLNK          = protocol.Rule{ID: "GAL-LNK-001", Severity: protocol.SeverityHigh, Title: "Shortcut launches a script interpreter or URL", Attack: "T1059"}
 )
 
 // maxLNKScan bounds how much of a shortcut is searched for strings.
@@ -29,9 +33,14 @@ const maxLNKScan = 64 << 10
 const minString = 4
 
 var (
+	// decoyExts are the document, image, media, data and archive types that people open by double-click.
+	// dataExts are the data and markup types among them: source trees are full of names such as
+	// express.json.js, so they are decoys for every executable type except js.
 	decoyExts = setOf("txt", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "csv", "odt", "ods",
-		"jpg", "jpeg", "png", "gif", "bmp", "ico", "mp3", "mp4", "wav", "zip", "json", "xml", "html", "htm")
-	execExts     = setOf("exe", "scr", "com", "pif", "bat", "cmd", "lnk", "js", "jse", "vbs", "vbe", "wsf", "hta", "ps1", "msi")
+		"jpg", "jpeg", "png", "gif", "bmp", "ico", "mp3", "mp4", "mov", "wav", "zip", "rar", "json", "xml", "html", "htm")
+	dataExts     = setOf("csv", "json", "xml", "html", "htm")
+	execExts     = setOf("exe", "scr", "com", "pif", "bat", "cmd", "lnk", "js", "jse", "vbs", "vbe", "wsf", "hta", "ps1", "msi", "jar")
+	sourceDirs   = setOf("test", "tests", "__tests__", "fixtures", "playground", "examples", "e2e")
 	shortcutExts = setOf("lnk", "url", "scf", "hta", "wsf", "vbe", "jse")
 
 	interpreter = regexp.MustCompile(`(?i)\b(powershell|cmd|mshta|wscript|cscript|rundll32|regsvr32)(\.exe)?\b`)
@@ -59,7 +68,11 @@ func (analyzer) Analyze(_ context.Context, f analyze.File) (analyze.Output, erro
 		out.Findings = append(out.Findings, r.Finding(protocol.Evidence{Path: f.Path, Snippet: protocol.Snippet(snippet)}))
 	}
 	if isDoubleExt(f.Name) {
-		add(ruleDouble, f.Name)
+		r := ruleDouble
+		if isSourceFixture(f) {
+			r = ruleDoubleSource
+		}
+		add(r, f.Name)
 	}
 	if hasBidi(f.Name) {
 		add(ruleBidi, f.Name)
@@ -96,11 +109,25 @@ func lastExt(name string) string {
 func isDoubleExt(name string) bool {
 	name = strings.TrimRightFunc(name, isTrailing)
 	i := strings.LastIndexByte(name, '.')
-	if i < 0 || !execExts[strings.ToLower(name[i+1:])] {
+	exec := strings.ToLower(name[i+1:])
+	if i < 0 || !execExts[exec] {
 		return false
 	}
-	stem := strings.TrimRightFunc(name[:i], isPadding)
-	return decoyExts[lastExt(stem)]
+	decoy := lastExt(strings.TrimRightFunc(name[:i], isPadding))
+	return decoyExts[decoy] && (exec != "js" || !dataExts[decoy])
+}
+
+// isSourceFixture reports a plain JavaScript file on disk below a test or example
+// folder, such as test/e2e/image/test.png.js in a source tree. A file named like
+// that in an archive or an email is an attack, and so is a file at the top of
+// the target or one that is not text: only a script that sits in a folder meant
+// for tests is graded lower.
+func isSourceFixture(f analyze.File) bool {
+	if f.Member != "" || f.Kind != ident.Text || lastExt(f.Name) != "js" {
+		return false
+	}
+	dirs := strings.Split(strings.ToLower(f.Path), "/")
+	return slices.ContainsFunc(dirs[:len(dirs)-1], func(d string) bool { return sourceDirs[d] })
 }
 
 func hasBidi(name string) bool {

