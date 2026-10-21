@@ -35,6 +35,18 @@ PLAN -> CODE -> QUALITY GATE -> CODE REVIEW -> TEST (QA) -> DONE
 
 At most 3 fix loops per task. After that, escalate to opus with high effort, then to the repository owner.
 
+## Scope
+- Each release has a written definition of done before work starts: the problems it must answer, the repos it must keep clean, and the known gaps it may ship with. Work outside that list waits for the next release.
+- One PR has one purpose. A finding outside that purpose becomes a backlog item, not a new commit on the PR.
+- A review finding blocks a PR only when it is one of these:
+  1. a regression against `main`;
+  2. a bypass of exactly what the PR claims to fix;
+  3. a false alarm on a common, popular repo;
+  4. a crash or a hang.
+  Everything else is a follow-up in the backlog.
+- PRs that touch the same files merge one at a time. The next one merges `main` and runs `make gate` before its review.
+- Run the false-positive sweep on popular repos before tuning detection, so the fixes target real false alarms.
+
 ## Quality gate
 `make gate` runs, in order: `gofmt -l`, `go vet`, `golangci-lint run`, cross-build for linux/darwin/windows x amd64/arm64, `govulncheck`, `gosec`, `go test -race -count=1 -cover ./...`, `go mod verify` plus the dependency allowlist, and the acceptance smoke tests. CI runs the same target. On a pull request that only changes docs (Markdown under `docs/` and `.claude/`, skill `LICENSE` files, top-level Markdown, `LICENSE`, `.gitignore` or the Dependabot config), the `gate` and `test` jobs skip their steps but still report, so the required checks pass quickly. If the change detection fails, everything runs. Pushes to `main` always run in full.
 

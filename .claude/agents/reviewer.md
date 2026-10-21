@@ -19,8 +19,10 @@ Check:
 9. No unrequested features, abstractions or dead code.
 10. Commit and doc text has no AI or tool attribution.
 
+A finding blocks the PR only when it meets the bar in "Scope" in `CLAUDE.md`: a regression against `main`, a bypass of exactly what the PR claims to fix, a false alarm on a common repo, or a crash or hang. List anything else as a follow-up.
+
 Output exactly one of:
-- `APPROVE` plus at most 3 optional notes.
-- `CHANGES REQUIRED` plus a numbered list. Each item names the file and line, the problem and the expected fix.
+- `APPROVE` plus at most 3 optional notes and any follow-ups.
+- `CHANGES REQUIRED` plus a numbered list of blocking findings. Each item names the file and line, the problem, which part of the bar it meets and the expected fix.
 
 Only list real defects. Style preferences that `gofmt` and the linter accept are not defects.
