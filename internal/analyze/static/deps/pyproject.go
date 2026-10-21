@@ -18,8 +18,8 @@ const (
 	valueSourceString // git or url of a dependency source
 )
 
-// Limits of the TOML reader. A value nested deeper than maxTOMLDepth, or an
-// inline table key whose path grows past maxTOMLPath bytes, stops the read with
+// Limits of the TOML reader. A value nested deeper than maxTOMLDepth, or a table
+// name or key whose path grows past maxTOMLPath bytes, stops the read with
 // errDepth, so the file is reported as a skip that may hide content.
 const (
 	maxTOMLDepth = 32
@@ -111,10 +111,18 @@ func (t *toml) line(line string, off int) {
 	case s[0] == '[':
 		name, _, _ := strings.Cut(strings.TrimLeft(s, "[ "), "]")
 		name = strings.ToLower(strings.NewReplacer(`"`, "", "'", "", " ", "", "\t", "").Replace(name))
+		if len(name) > maxTOMLPath {
+			t.err = errDepth
+			return
+		}
 		t.section = strings.TrimPrefix(t.prefix+"."+name, ".")
 	default:
 		key, rest, ok := cutKey(s)
 		if !ok {
+			return
+		}
+		if len(t.section)+1+len(key) > maxTOMLPath {
+			t.err = errDepth
 			return
 		}
 		t.base = strings.TrimPrefix(t.section+"."+key, ".")

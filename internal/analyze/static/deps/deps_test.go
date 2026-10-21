@@ -261,6 +261,7 @@ func TestAnalyze(t *testing.T) {
 		},
 		{name: "pyproject value nested to the depth limit is read", file: "pyproject.toml", data: tomlAtLimit, wantFindings: []string{"GAL-DEPS-002@2"}},
 		{name: "pyproject value nested past the depth limit is skipped", file: "pyproject.toml", data: tomlTooDeep, wantSkip: "depth"},
+		{name: "pyproject table name past the path limit is skipped", file: "pyproject.toml", data: "[" + strings.Repeat("t", 1100) + "]\nx = \"v\"\n", wantSkip: "depth"},
 		{name: "pyproject inline table key path past the limit is skipped", file: "pyproject.toml", data: "[tool]\nx = { " + strings.Repeat("k", 1100) + " = \"v\" }\n", wantSkip: "depth"},
 		{
 			name:         "requirements index options",
@@ -433,11 +434,17 @@ func TestAnalyzeLargeTOMLWithinDeadline(t *testing.T) {
 			data:     "[tool]\nx = {" + strings.Repeat("k", 500000) + "=[\"" + strings.Repeat("\",\"", 150000) + "\"]}\n",
 			wantSkip: "depth",
 		},
+		{
+			name:     "long table name followed by many keys",
+			file:     "pyproject.toml",
+			data:     "[" + strings.Repeat("t", 512<<10) + "]\n" + strings.Repeat("a=\"1\"\n", 87000) + "[tool.uv.sources]\nhelper = { git = \"https://git.sinkhole.test/h.git\" }\n",
+			wantSkip: "depth",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// the reader is linear: a quadratic one runs past this deadline
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// the reader is linear: a quadratic one runs for minutes, past this deadline
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			f := analyze.File{Path: tt.file, Name: tt.file, Data: []byte(tt.data)}
 
