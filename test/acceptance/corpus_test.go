@@ -159,23 +159,27 @@ func payloadAs(name string) func(t *testing.T, dest string) {
 	}
 }
 
-// TestCorpus is the single regression list for corpus v1 (docs/milestones/M1.md section 5).
+// corpusCase is one row of the corpus table: a fixture and what the analysis of it must show.
+// TestCorpus runs the table through galahad-agent analyze, and TestScanCorpus through galahad scan.
+type corpusCase struct {
+	name string
+	// inputs
+	target func(t *testing.T) string // returns the file or directory to analyze
+	// expectations
+	wantCode     int      // exit code; the verdict must match it (0 clean, 10 suspicious, 20 malicious)
+	wantRules    []string // "RULE path:line" that must be present
+	wantSnippets []string // each must appear in the snippet of some evidence
+	wantIOCs     []string // url IOCs that must be reported (undefanged in report.json)
+	wantSummary  []string // each must appear in summary.md
+	wantSkips    int      // coverage skips; when zero, files_analyzed must equal files_seen
+	wantQuiet    bool     // only info findings and the auto-execution inventory (GAL-AUTOEXEC-006 to 008)
+}
+
+// corpusCases is the single regression list for corpus v1 (docs/milestones/M1.md section 5).
 // Cases follow the order of the two tables there: malicious and suspicious imitations first,
 // then the benign twins (P7).
-func TestCorpus(t *testing.T) {
-	tests := []struct {
-		name string
-		// inputs
-		target func(t *testing.T) string // returns the file or directory to analyze
-		// expectations
-		wantCode     int      // exit code; the verdict must match it (0 clean, 10 suspicious, 20 malicious)
-		wantRules    []string // "RULE path:line" that must be present
-		wantSnippets []string // each must appear in the snippet of some evidence
-		wantIOCs     []string // url IOCs that must be reported (undefanged in report.json)
-		wantSummary  []string // each must appear in summary.md
-		wantSkips    int      // coverage skips; when zero, files_analyzed must equal files_seen
-		wantQuiet    bool     // only info findings and the auto-execution inventory (GAL-AUTOEXEC-006 to 008)
-	}{
+func corpusCases() []corpusCase {
+	return []corpusCase{
 		// Malicious or suspicious imitations.
 		{
 			name:   "fake-interview-repo: folderOpen task and postinstall script exfiltrate .env",
@@ -662,82 +666,92 @@ func TestCorpus(t *testing.T) {
 			target: func(*testing.T) string { return binPath }, wantCode: 0, wantQuiet: true,
 		},
 	}
-	verdicts := map[int]string{0: "clean", 10: "suspicious", 20: "malicious"}
-	for _, tt := range tests {
+}
+
+func TestCorpus(t *testing.T) {
+	for _, tt := range corpusCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			// Given a fixture, committed or built at test time
 			target := tt.target(t)
 			// When the agent analyzes it
 			rep, out := analyzeOut(t, target, tt.wantCode)
-			// Then the verdict, the findings at their lines and the coverage match
-			if rep.Verdict != verdicts[tt.wantCode] {
-				t.Errorf("verdict = %q, want %q", rep.Verdict, verdicts[tt.wantCode])
-			}
-			for _, want := range tt.wantRules {
-				rule, at, _ := strings.Cut(want, " ")
-				if !hasFinding(rep, rule, at) {
-					t.Errorf("no %s at %s in %+v", rule, at, rep.Findings)
-				}
-			}
-			for _, want := range tt.wantSnippets {
-				found := false
-				for _, f := range rep.Findings {
-					for _, e := range f.Evidence {
-						found = found || strings.Contains(e.Snippet, want)
-					}
-				}
-				if !found {
-					t.Errorf("no evidence snippet contains %q in %+v", want, rep.Findings)
-				}
-			}
-			var iocs []string
-			for _, i := range rep.IOCs {
-				if i.Type == "url" {
-					iocs = append(iocs, i.Value)
-				}
-			}
-			for _, want := range tt.wantIOCs {
-				if !slices.Contains(iocs, want) {
-					t.Errorf("url iocs %q lack %q", iocs, want)
-				}
-			}
-			if tt.wantQuiet {
-				quiet := otherFindings(rep)
-				for _, f := range rep.Findings {
-					if f.Severity != "info" && slices.Contains(quiet, f.RuleID) {
-						t.Errorf("benign fixture has a %s finding %s", f.Severity, f.RuleID)
-					}
-				}
-			}
-			if len(rep.Coverage.Skipped) != tt.wantSkips {
-				t.Errorf("skips = %+v, want %d", rep.Coverage.Skipped, tt.wantSkips)
-			}
-			if tt.wantSkips == 0 && rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen {
-				t.Errorf("files_analyzed/files_seen = %d/%d, want all analyzed", rep.Coverage.FilesAnalyzed, rep.Coverage.FilesSeen)
-			}
-			summary := readFile(t, filepath.Join(out, "summary.md"))
-			for _, want := range tt.wantSummary {
-				if !strings.Contains(summary, want) {
-					t.Errorf("summary.md lacks %q:\n%s", want, summary)
-				}
-			}
-			// And the target line matches its kind: a file shows its SHA-256, a folder its file count
-			switch rep.Target.Kind {
-			case "file":
-				if rep.Target.SHA256 == "" || !strings.Contains(summary, "- SHA-256: "+rep.Target.SHA256) {
-					t.Errorf("file target sha256 %q is not in summary.md:\n%s", rep.Target.SHA256, summary)
-				}
-			default:
-				if !strings.Contains(summary, "- Kind: folder, ") || strings.Contains(summary, "SHA-256") {
-					t.Errorf("summary.md of a folder target is wrong:\n%s", summary)
-				}
-			}
-			for _, name := range []string{"summary.md", "report.html"} {
-				if m := liveLink.FindString(readFile(t, filepath.Join(out, name))); m != "" {
-					t.Errorf("%s has a live link %q", name, m)
-				}
-			}
-			checkHTMLPage(t, readFile(t, filepath.Join(out, "report.html")), rep.Verdict)
+			checkCorpus(t, tt, rep, out)
 		})
 	}
+}
+
+// checkCorpus checks a report and the files next to it against a corpus case: the verdict, the findings at
+// their lines, the coverage and the rendered reports. out is the directory with summary.md and report.html.
+func checkCorpus(t *testing.T, tt corpusCase, rep report, out string) {
+	t.Helper()
+	verdicts := map[int]string{0: "clean", 10: "suspicious", 20: "malicious"}
+	// Then the verdict, the findings at their lines and the coverage match
+	if rep.Verdict != verdicts[tt.wantCode] {
+		t.Errorf("verdict = %q, want %q", rep.Verdict, verdicts[tt.wantCode])
+	}
+	for _, want := range tt.wantRules {
+		rule, at, _ := strings.Cut(want, " ")
+		if !hasFinding(rep, rule, at) {
+			t.Errorf("no %s at %s in %+v", rule, at, rep.Findings)
+		}
+	}
+	for _, want := range tt.wantSnippets {
+		found := false
+		for _, f := range rep.Findings {
+			for _, e := range f.Evidence {
+				found = found || strings.Contains(e.Snippet, want)
+			}
+		}
+		if !found {
+			t.Errorf("no evidence snippet contains %q in %+v", want, rep.Findings)
+		}
+	}
+	var iocs []string
+	for _, i := range rep.IOCs {
+		if i.Type == "url" {
+			iocs = append(iocs, i.Value)
+		}
+	}
+	for _, want := range tt.wantIOCs {
+		if !slices.Contains(iocs, want) {
+			t.Errorf("url iocs %q lack %q", iocs, want)
+		}
+	}
+	if tt.wantQuiet {
+		quiet := otherFindings(rep)
+		for _, f := range rep.Findings {
+			if f.Severity != "info" && slices.Contains(quiet, f.RuleID) {
+				t.Errorf("benign fixture has a %s finding %s", f.Severity, f.RuleID)
+			}
+		}
+	}
+	if len(rep.Coverage.Skipped) != tt.wantSkips {
+		t.Errorf("skips = %+v, want %d", rep.Coverage.Skipped, tt.wantSkips)
+	}
+	if tt.wantSkips == 0 && rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen {
+		t.Errorf("files_analyzed/files_seen = %d/%d, want all analyzed", rep.Coverage.FilesAnalyzed, rep.Coverage.FilesSeen)
+	}
+	summary := readFile(t, filepath.Join(out, "summary.md"))
+	for _, want := range tt.wantSummary {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary.md lacks %q:\n%s", want, summary)
+		}
+	}
+	// And the target line matches its kind: a file shows its SHA-256, a folder its file count
+	switch rep.Target.Kind {
+	case "file":
+		if rep.Target.SHA256 == "" || !strings.Contains(summary, "- SHA-256: "+rep.Target.SHA256) {
+			t.Errorf("file target sha256 %q is not in summary.md:\n%s", rep.Target.SHA256, summary)
+		}
+	default:
+		if !strings.Contains(summary, "- Kind: folder, ") || strings.Contains(summary, "SHA-256") {
+			t.Errorf("summary.md of a folder target is wrong:\n%s", summary)
+		}
+	}
+	for _, name := range []string{"summary.md", "report.html"} {
+		if m := liveLink.FindString(readFile(t, filepath.Join(out, name))); m != "" {
+			t.Errorf("%s has a live link %q", name, m)
+		}
+	}
+	checkHTMLPage(t, readFile(t, filepath.Join(out, "report.html")), rep.Verdict)
 }

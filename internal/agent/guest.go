@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mrdhira/galahad/internal/analyze"
@@ -180,6 +181,11 @@ func guestJob(host *hostConn, unsafeHost bool) error {
 		return fmt.Errorf("analyze: %w", err)
 	}
 	res.Tool = protocol.Tool{Name: "galahad-agent", Version: version}
+	if stream.TooDeep > 0 && len(res.Coverage.Skipped) < protocol.MaxSkipped {
+		// The extractor dropped entries the analyzer never saw. A full list already ends with a budget skip.
+		shallowest := protocol.CleanPath(strings.TrimPrefix(stream.Shallowest, job.Name+"/"))
+		res.Coverage.Skipped = append(res.Coverage.Skipped, protocol.Skip{Path: shallowest, Reason: protocol.SkipDepth})
+	}
 	scoring.Apply(&res)
 	if err := res.Validate(); err != nil {
 		return fmt.Errorf("invalid result: %w", err)
@@ -188,7 +194,7 @@ func guestJob(host *hostConn, unsafeHost bool) error {
 	if err != nil {
 		return fmt.Errorf("encode result: %w", err)
 	}
-	if err := host.send(protocol.FrameResult, data); err != nil {
+	if err := sendResult(host, data); err != nil {
 		return fmt.Errorf("send result: %w", err)
 	}
 	return nil

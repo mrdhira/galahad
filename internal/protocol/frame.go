@@ -171,6 +171,9 @@ func (o *Order) Accept(t FrameType) error {
 	return fmt.Errorf("%s frame after %s", t, o.last)
 }
 
+// Allowed returns the frame types that may come next.
+func (o *Order) Allowed() []FrameType { return o.next[o.last] }
+
 // Complete reports whether the sequence has ended: no frame may follow the last one.
 func (o *Order) Complete() bool {
 	return o.last != 0 && len(o.next[o.last]) == 0

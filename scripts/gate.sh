@@ -80,6 +80,18 @@ if go list -f '{{join .GoFiles " "}}' ./internal/proxy | grep -F -q testhooks_fa
   echo "a build without tags must not contain the proxy test hooks" >&2
   exit 1
 fi
+# The P8 probe flag exists only in galahadtest builds.
+probe_dir="$(mktemp -d)"
+exe=""
+if [ "$(go env GOOS)" = windows ]; then exe=.exe; fi
+go build -o "$probe_dir/galahad$exe" ./cmd/galahad
+probe_code=0
+probe_out="$("$probe_dir/galahad$exe" scan --p8-probe 2>&1)" || probe_code=$?
+rm -rf "$probe_dir"
+if [ "$probe_code" != 2 ] || ! printf '%s\n' "$probe_out" | grep -q "flag provided but not defined"; then
+  echo "a build without tags must reject 'galahad scan --p8-probe' as an unknown flag (exit $probe_code)" >&2
+  exit 1
+fi
 
 step vuln
 if [ "${SKIP_VULN:-}" = "1" ]; then

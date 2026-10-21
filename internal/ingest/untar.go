@@ -26,11 +26,15 @@ const (
 	maxDepth = 64   // path elements, the same as the analyzers walk
 )
 
+// errTooDeep marks an entry name with more than maxDepth elements. Extract skips such an
+// entry instead of failing, as the analyzers do for a directory that is too deep.
+var errTooDeep = errors.New("path too deep")
+
 // Errors Extract and Verify return, wrapped with detail. Test for them with errors.Is.
 var (
 	// ErrTooLarge means the input has more entries or bytes than the caps allow.
 	ErrTooLarge = errors.New("input too large")
-	// ErrUnsafePath means an entry name is absolute, has "..", is deeper than 64 elements, or is otherwise not a plain relative path.
+	// ErrUnsafePath means an entry name is absolute, has "..", or is otherwise not a plain relative path.
 	ErrUnsafePath = errors.New("unsafe path in input")
 	// ErrMismatch means the stream is not the one the End frame describes.
 	ErrMismatch = errors.New("input does not match its end frame")
@@ -40,6 +44,11 @@ var (
 type Stream struct {
 	Bytes  int64
 	SHA256 string
+	// TooDeep counts the entries skipped for having more than 64 path elements, and
+	// Shallowest is the clean path of the one with the fewest elements, the first of them
+	// on a tie. Shallowest is empty when TooDeep is 0.
+	TooDeep    int
+	Shallowest string
 }
 
 // Verify checks the stream against the End frame the host sent.
@@ -59,7 +68,8 @@ func (s Stream) Verify(end protocol.End) error {
 // All writes go through an os.Root, so no path can leave dir, and a symlink that was
 // extracted earlier is never followed out of it. Entries are regular files,
 // directories and symlinks; a symlink is created as a link and never followed. Other
-// types (hard links, devices, FIFOs) are skipped. Absolute names and ".." are refused.
+// types (hard links, devices, FIFOs) are skipped, and so is an entry with more than 64
+// path elements, which Stream reports. Absolute names and ".." are refused.
 // At most protocol.MaxInputEntries entries and protocol.MaxInputBytes bytes of stream,
 // and of file content, are accepted. Extract reads r to its end, so that the returned
 // Stream covers every byte.
@@ -74,6 +84,7 @@ func Extract(ctx context.Context, r io.Reader, dir string) (Stream, error) {
 	tr := tar.NewReader(sr)
 	entries := 0
 	var content int64
+	var res Stream // the skip counts; Bytes and SHA256 are set at the end
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -100,6 +111,10 @@ func Extract(ctx context.Context, r io.Reader, dir string) (Stream, error) {
 		case tar.TypeSymlink:
 			werr = symlink(root, hdr)
 		}
+		if errors.Is(werr, errTooDeep) {
+			res.skip(path.Clean(hdr.Name))
+			werr = nil
+		}
 		if werr != nil {
 			return Stream{}, werr
 		}
@@ -107,7 +122,15 @@ func Extract(ctx context.Context, r io.Reader, dir string) (Stream, error) {
 	if _, err := io.Copy(io.Discard, sr); err != nil {
 		return Stream{}, fmt.Errorf("read tar: %w", err)
 	}
-	return Stream{Bytes: sr.n, SHA256: hex.EncodeToString(sr.h.Sum(nil))}, nil
+	res.Bytes, res.SHA256 = sr.n, hex.EncodeToString(sr.h.Sum(nil))
+	return res, nil
+}
+
+// skip records an entry that is too deep.
+func (s *Stream) skip(name string) {
+	if s.TooDeep++; s.Shallowest == "" || strings.Count(name, "/") < strings.Count(s.Shallowest, "/") {
+		s.Shallowest = name
+	}
 }
 
 // streamReader hashes and counts the bytes it passes on, and stops at the byte cap.
@@ -145,7 +168,7 @@ func relName(name string) (string, error) {
 		return "", fmt.Errorf("%w: %q", ErrUnsafePath, name)
 	}
 	if n := strings.Count(rel, "/") + 1; n > maxDepth {
-		return "", fmt.Errorf("%w: %d elements deep, max %d", ErrUnsafePath, n, maxDepth)
+		return "", fmt.Errorf("%w: %d elements deep, max %d", errTooDeep, n, maxDepth)
 	}
 	return rel, nil
 }

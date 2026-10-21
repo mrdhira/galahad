@@ -70,11 +70,13 @@ func TestExtract(t *testing.T) {
 		// input builds the tar stream; outside is a directory next to the extraction directory.
 		input func(t *testing.T, outside string) io.Reader
 		// want*
-		wantFiles  map[string]string // path to content
-		wantLinks  map[string]string // path to link target
-		wantAbsent []string
-		wantErr    string // substring; empty means success
-		wantIs     error  // sentinel the error wraps
+		wantFiles      map[string]string // path to content
+		wantLinks      map[string]string // path to link target
+		wantAbsent     []string
+		wantTooDeep    int    // Stream.TooDeep
+		wantShallowest string // Stream.Shallowest
+		wantErr        string // substring; empty means success
+		wantIs         error  // sentinel the error wraps
 	}{
 		{
 			name: "files, directories and links",
@@ -160,10 +162,28 @@ func TestExtract(t *testing.T) {
 		{
 			name: "path 65 elements deep",
 			input: func(t *testing.T, _ string) io.Reader {
-				return bytes.NewReader(build(t, file("e/"+deepDir+"f.txt", "x")))
+				return bytes.NewReader(build(t, file("ok.txt", "fine"), file("e/"+deepDir+"f.txt", "x")))
 			},
-			wantAbsent: []string{"e"},
-			wantErr:    "65 elements deep", wantIs: ingest.ErrUnsafePath,
+			wantFiles:   map[string]string{"ok.txt": "fine"},
+			wantAbsent:  []string{"e"},
+			wantTooDeep: 1, wantShallowest: "e/" + deepDir + "f.txt",
+		},
+		{
+			name: "deep entries of every type are skipped and the shallowest is reported",
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, file("ok.txt", "fine"), file("q/r/"+deepDir+"f.txt", "x"),
+					file("x/"+deepDir+"f.txt", "x"), dir("y/"+deepDir+"e"), link("z/"+deepDir+"l", "f.txt")))
+			},
+			wantFiles:   map[string]string{"ok.txt": "fine"},
+			wantAbsent:  []string{"q", "x", "y", "z"},
+			wantTooDeep: 4, wantShallowest: "x/" + deepDir + "f.txt", // ties keep the first
+		},
+		{
+			name: "a path that is both too deep and unsafe is refused",
+			input: func(t *testing.T, _ string) io.Reader {
+				return bytes.NewReader(build(t, file("e/"+deepDir+"../f.txt", "x")))
+			},
+			wantErr: "unsafe path", wantIs: ingest.ErrUnsafePath,
 		},
 		{
 			name: "directory through a symlink",
@@ -234,6 +254,9 @@ func TestExtract(t *testing.T) {
 				if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
 					t.Errorf("error = %v, want it to wrap %v", err, tt.wantIs)
 				}
+			}
+			if stream.TooDeep != tt.wantTooDeep || stream.Shallowest != tt.wantShallowest {
+				t.Errorf("TooDeep, Shallowest = %d, %q; want %d, %q", stream.TooDeep, stream.Shallowest, tt.wantTooDeep, tt.wantShallowest)
 			}
 			for p, want := range tt.wantFiles {
 				got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(p)))
