@@ -71,6 +71,9 @@ func classifyTarget(arg string, forceGit bool) (target, error) {
 		return target{source: protocol.SourceGit, value: u.String()}, nil
 	case protocol.IsDriveHost(u.Hostname()):
 		if _, ok := protocol.DriveFileID(arg); !ok {
+			if strings.EqualFold(u.Hostname(), "docs.google.com") && isDocsPage(u.Path) {
+				return target{}, fmt.Errorf("%q is not a Google Drive file link: Google Docs, Sheets, Slides and Forms pages are not supported yet", shown)
+			}
 			return target{}, fmt.Errorf("%q is not a Google Drive file link; use /file/d/<id>, /open?id=<id> or /uc?id=<id>", shown)
 		}
 		return target{source: protocol.SourceDrive, value: arg}, nil
@@ -96,4 +99,14 @@ func isForgeRepo(u *url.URL) bool {
 		return len(parts) >= 2 && !slices.Contains(parts, "-")
 	}
 	return len(parts) == 2
+}
+
+// isDocsPage reports a path of a Google Docs, Forms, Sheets or Slides page.
+func isDocsPage(p string) bool {
+	for _, prefix := range []string{"/document/", "/forms/", "/spreadsheets/", "/presentation/"} {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }

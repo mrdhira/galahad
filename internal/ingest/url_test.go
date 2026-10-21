@@ -68,6 +68,7 @@ func TestFetcherURL(t *testing.T) {
 		fetcher ingest.Fetcher
 		// expectations
 		wantName string
+		wantRaw  string // the name before cleaning; not checked when empty
 		wantBody string
 		wantErr  string // substring; empty means success
 		wantIs   error
@@ -87,6 +88,13 @@ func TestFetcherURL(t *testing.T) {
 				_, _ = io.WriteString(w, "x")
 			},
 			wantName: "evil", wantBody: "x",
+		},
+		{
+			name: "the raw name keeps the bidi control the file name loses", handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''dir%2Finvoice%E2%80%AEfdp.exe`)
+				_, _ = io.WriteString(w, "x")
+			},
+			wantName: "invoice_u202efdp.exe", wantRaw: "invoice\u202efdp.exe", wantBody: "x",
 		},
 		{
 			name: "five redirects are followed", handler: chain(5),
@@ -178,6 +186,9 @@ func TestFetcherURL(t *testing.T) {
 			}
 			if got.Name != tt.wantName || got.Size != int64(len(tt.wantBody)) || got.SHA256 != sum(tt.wantBody) {
 				t.Errorf("file = %+v, want name %q, %d bytes, sha256 %s", got, tt.wantName, len(tt.wantBody), sum(tt.wantBody))
+			}
+			if tt.wantRaw != "" && got.RawName != tt.wantRaw {
+				t.Errorf("raw name = %q, want %q", got.RawName, tt.wantRaw)
 			}
 			data, err := os.ReadFile(filepath.Join(dir, got.Name))
 			if err != nil || string(data) != tt.wantBody {

@@ -1,16 +1,21 @@
 package agent_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mrdhira/galahad/internal/agent"
+	"github.com/mrdhira/galahad/internal/analyze"
+	"github.com/mrdhira/galahad/internal/analyze/static"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
@@ -34,6 +39,7 @@ func TestGuestRemote(t *testing.T) {
 		wantErrCode string // an Error frame instead of a Result
 		wantMessage string // substring of the Error message
 		wantName    string
+		wantLocal   string // the name findings must be those of a local file with this name, at the cleaned path
 	}{
 		{
 			name: "a url job downloads the file and analyzes it", source: protocol.SourceURL, url: "http://allowed.example.com/dir/report.txt", proxy: "backend",
@@ -43,6 +49,21 @@ func TestGuestRemote(t *testing.T) {
 			name: "a hostile name is written out and the file is still analyzed", source: protocol.SourceURL, url: "http://allowed.example.com/a", proxy: "backend",
 			header:   `attachment; filename*=UTF-8''invoice%E2%80%AEfdp%00%ff.exe`,
 			wantName: `invoice_u202efdp_u0000_xff.exe`,
+		},
+		{
+			name: "a right-to-left override in the name gets the finding of a local file", source: protocol.SourceURL, url: "http://allowed.example.com/a", proxy: "backend",
+			header:   `attachment; filename*=UTF-8''invoice%E2%80%AEfdp.exe`,
+			wantName: `invoice_u202efdp.exe`, wantLocal: "invoice\u202efdp.exe",
+		},
+		{
+			name: "a bidi control that hides a double extension gets the findings of a local file", source: protocol.SourceURL, url: "http://allowed.example.com/a", proxy: "backend",
+			header:   `attachment; filename*=UTF-8''doc.pdf%E2%80%AE.exe`,
+			wantName: `doc.pdf_u202e.exe`, wantLocal: "doc.pdf\u202e.exe",
+		},
+		{
+			name: "a name that cleaning only trims does not repeat a finding", source: protocol.SourceURL, url: "http://allowed.example.com/a", proxy: "backend",
+			header:   `attachment; filename="report.pdf.exe "`,
+			wantName: `report.pdf.exe`, wantLocal: "report.pdf.exe",
 		},
 		{
 			name: "a url job whose host the proxy refuses ends in not_allowed", source: protocol.SourceURL, url: "http://evil.example.com/a.bin", proxy: "host not allowed",
@@ -112,6 +133,58 @@ func TestGuestRemote(t *testing.T) {
 			if tg := got.result.Target; tg.Name != tt.wantName || tg.Kind != protocol.TargetFile || tg.SHA256 != hex.EncodeToString(sum[:]) || tg.Size != int64(len(body)) {
 				t.Errorf("target = %+v, want file %s of %d bytes with sha256 %x", tg, tt.wantName, len(body), sum)
 			}
+			if tt.wantLocal != "" {
+				want := nameFindings(t, tt.wantLocal)
+				got := nameFindingsOf(got.result.Findings)
+				if len(want) == 0 || !equalFindings(got, want) {
+					t.Errorf("name findings = %+v, want those of a local file %q: %+v", got, tt.wantLocal, want)
+				}
+				for _, f := range got {
+					if f.Evidence[0].Path != tt.wantName {
+						t.Errorf("%s evidence path = %q, want %q", f.RuleID, f.Evidence[0].Path, tt.wantName)
+					}
+				}
+			}
 		})
 	}
+}
+
+// nameFindings analyzes a local file called name and returns its name findings.
+func nameFindings(t *testing.T, name string) []protocol.Finding {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte("hello from backend"), 0o600); err != nil {
+		t.Skipf("filesystem rejects the file name: %v", err)
+	}
+	res, err := analyze.Run(context.Background(), p, static.All())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return nameFindingsOf(res.Findings)
+}
+
+// nameFindingsOf returns the findings of the GAL-NAME rules.
+func nameFindingsOf(fs []protocol.Finding) []protocol.Finding {
+	var out []protocol.Finding
+	for _, f := range fs {
+		if strings.HasPrefix(f.RuleID, "GAL-NAME-") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// equalFindings compares rule, severity, title and snippet. The paths differ: a download has the
+// cleaned name.
+func equalFindings(a, b []protocol.Finding) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].RuleID != b[i].RuleID || a[i].Severity != b[i].Severity || a[i].Title != b[i].Title ||
+			a[i].Evidence[0].Snippet != b[i].Evidence[0].Snippet {
+			return false
+		}
+	}
+	return true
 }
