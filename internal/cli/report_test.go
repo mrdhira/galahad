@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mrdhira/galahad/internal/cli"
 	"github.com/mrdhira/galahad/internal/job"
@@ -53,6 +54,7 @@ func TestRunReport(t *testing.T) {
 		wantStderr   []string
 		wantAbsent   []string
 		wantFileJSON bool // stdout is report.json, byte for byte
+		wantSafe     bool // stdout is valid UTF-8 without C0, DEL or C1 control characters apart from the newline
 	}{
 		{
 			name: "malicious prints the summary and the paths and exits 20",
@@ -79,6 +81,16 @@ func TestRunReport(t *testing.T) {
 			name: "--json after the id",
 			args: []string{idOld, "--json"}, setup: withReport(malicious, nil),
 			wantCode: cli.ExitMalicious, wantFileJSON: true,
+		},
+		{
+			name: "--json does not print invalid UTF-8 that Validate never saw",
+			args: []string{"--json", idOld}, setup: withReport(malicious, replace(`"reasons": []`, "\"reasons\": [\"a\x9b31mRED\x9b0m\"]")),
+			wantCode: cli.ExitMalicious, wantSafe: true,
+		},
+		{
+			name: "--json does not print a duplicate key that Validate never saw",
+			args: []string{"--json", idOld}, setup: withReport(malicious, replace(`"reasons": []`, "\"reasons\": [\"a\xc2\x9b31mRED\x7f\"],\n  \"reasons\": [\"ok\"]")),
+			wantCode: cli.ExitMalicious, wantStdout: []string{`"ok"`}, wantSafe: true,
 		},
 		{name: "-h prints usage", args: []string{"-h"}, wantCode: cli.ExitClean, wantStdout: []string{"Usage: galahad"}},
 		{name: "unknown flag", args: []string{"--nope", idOld}, wantCode: cli.ExitUsage, wantStderr: []string{"flag provided but not defined"}},
@@ -172,6 +184,16 @@ func TestRunReport(t *testing.T) {
 				t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", got, tt.wantCode, out.String(), errb.String())
 			}
 			checkStreams(t, out.String(), errb.String(), tt.wantStdout, tt.wantStderr, tt.wantAbsent)
+			if tt.wantSafe {
+				for _, r := range strings.ReplaceAll(out.String(), "\n", "") {
+					if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+						t.Fatalf("stdout has the control character %U: %q", r, out.String())
+					}
+				}
+				if !utf8.ValidString(out.String()) {
+					t.Fatalf("stdout is not valid UTF-8: %q", out.String())
+				}
+			}
 			if tt.wantFileJSON {
 				want, err := os.ReadFile(filepath.Join(home, "jobs", idOld, "report.json")) // #nosec G304 -- test fixture path under t.TempDir()
 				if err != nil {

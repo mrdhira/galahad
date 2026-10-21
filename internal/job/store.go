@@ -99,11 +99,14 @@ func ReadFile(jobsDir, id, name string, limit int64) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", name)
 	}
-	f, err := root.Open(name)
+	f, err := root.OpenFile(name, readFlags, 0) // without blocking: the file may have become a FIFO since the Lstat
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }() // read-only file
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err

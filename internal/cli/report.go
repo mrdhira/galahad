@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -60,7 +61,14 @@ func runReport(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 
 	if *asJSON {
-		if _, err := stdout.Write(data); err != nil {
+		// The file is not printed as read: the decoder drops what Validate never saw (duplicate keys,
+		// invalid UTF-8). The Result is encoded again, as report.Write does.
+		out, err := json.MarshalIndent(&res, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "galahad report: %v\n", err)
+			return ExitError
+		}
+		if _, err := stdout.Write(append(out, '\n')); err != nil {
 			fmt.Fprintf(stderr, "galahad report: %v\n", err)
 			return ExitError
 		}
