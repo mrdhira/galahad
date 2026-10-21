@@ -75,18 +75,21 @@ func (s *scan) sinkEvidence(d *doc, off, via int) func() []protocol.Evidence {
 // assigned looks back from the call at off for the last assignment "id = ..."
 // and reports whether its right side decodes or downloads. It returns the
 // offset of the assignment. The search reads at most lookback bytes per call
-// and lookbackBudget per file.
+// and lookbackBudget per file, and the bytes it searched are what it is charged.
 func (s *scan) assigned(d *doc, off int, id string) (decoded, download bool, via int) {
-	lo := max(0, off-lookback)
-	if s.looked+off-lo > lookbackBudget {
+	if s.looked >= lookbackBudget {
+		s.limited = true
 		return false, false, -1
 	}
-	s.looked += off - lo
+	lo := max(0, off-lookback)
 	win := d.data[lo:off]
 	name := []byte(id)
-	for end := len(win); end > 0; {
+	end := len(win)
+	defer func() { s.looked += len(win) - end }()
+	for end > 0 {
 		i := bytes.LastIndex(win[:end], name)
 		if i < 0 {
+			end = 0
 			break
 		}
 		end = i

@@ -340,24 +340,32 @@ func (s *scan) scanShell(d *doc, f *found, base, minEnd int, text string) {
 	if !s.spend(len(text)) {
 		return
 	}
-	for _, m := range signals.DownloadExec(text) {
+	dl := signals.DownloadExec(text)
+	dec := signals.DecodeExec(text)
+	tools := signals.NetworkTools(text)
+	s.limited = s.limited || cut(dl) || cut(dec) || cut(tools)
+	for _, m := range dl {
 		off, ok := match(d, base, minEnd, text, m.Start, m.End)
 		// A command has an operator or a URL. A list of PowerShell aliases has neither.
 		if t := text[m.Start:m.End]; ok && len(t) <= maxShellMatch && strings.ContainsAny(t, "|&;($") && !inManifest(d, off) {
 			keep(s, &f.dl, off)
 		}
 	}
-	for _, m := range signals.DecodeExec(text) {
+	for _, m := range dec {
 		if off, ok := match(d, base, minEnd, text, m.Start, m.End); ok && shellDecode(text[m.Start:m.End]) && !inManifest(d, off) {
 			keep(s, &f.dec, off)
 		}
 	}
-	for _, m := range signals.NetworkTools(text) {
+	for _, m := range tools {
 		if off, ok := match(d, base, minEnd, text, m.Start, m.End); ok && !weakWord(text, m.Start, m.End) {
 			keep(s, &f.nets, off)
 		}
 	}
 }
+
+// cut reports whether a signals call hit its limit of matches, which drops the
+// matches that come last in the text.
+func cut(ms []signals.Match) bool { return len(ms) == signals.MaxMatches }
 
 // inManifest reports whether off sits in the "scripts" of a package manifest
 // that was embedded as text. Those commands are data, not code that runs.
@@ -387,7 +395,9 @@ func (s *scan) scanSecrets(d *doc, f *found, base, minEnd int, text string) {
 	if !s.spend(len(text)) {
 		return
 	}
-	for _, m := range signals.SecretRefs(text) {
+	refs := signals.SecretRefs(text)
+	s.limited = s.limited || cut(refs)
+	for _, m := range refs {
 		off, ok := match(d, base, minEnd, text, m.Start, m.End)
 		if !ok {
 			continue

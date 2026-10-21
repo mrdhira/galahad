@@ -77,11 +77,15 @@ func (s *scan) blob(d *doc, start, end int) {
 		return
 	}
 	s.add(d, ruleBlob, start)
-	if d.depth > 0 || s.blobs >= maxBlobs {
+	if d.depth > 0 {
 		return
 	}
 	text := decodeText(run[:min(len(run), maxBlobChars)])
-	if text == nil || s.decoded+len(text) > maxDecodedTotal {
+	if text == nil {
+		return
+	}
+	if s.blobs >= maxBlobs || s.decoded+len(text) > maxDecodedTotal {
+		s.limited = true
 		return
 	}
 	s.blobs++
