@@ -188,7 +188,8 @@ func CleanName(raw string) string {
 	if i := strings.LastIndexAny(raw, `/\`); i >= 0 {
 		raw = raw[i+1:]
 	}
-	name := strings.Trim(protocol.CleanPath(raw), ". ")
+	// CleanPath writes hostile bytes out as \u and \x text; a \ would be a separator on Windows.
+	name := strings.Trim(strings.ReplaceAll(protocol.CleanPath(raw), `\`, "_"), ". ")
 	if len(name) > maxNameBytes {
 		ext := path.Ext(name)
 		if len(ext) > maxExtensionSize {

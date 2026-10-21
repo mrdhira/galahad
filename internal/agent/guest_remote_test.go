@@ -42,7 +42,7 @@ func TestGuestRemote(t *testing.T) {
 		{
 			name: "a hostile name is written out and the file is still analyzed", source: protocol.SourceURL, url: "http://allowed.example.com/a", proxy: "backend",
 			header:   `attachment; filename*=UTF-8''invoice%E2%80%AEfdp%00%ff.exe`,
-			wantName: `invoice\u202efdp\u0000\xff.exe`,
+			wantName: `invoice_u202efdp_u0000_xff.exe`,
 		},
 		{
 			name: "a url job whose host the proxy refuses ends in not_allowed", source: protocol.SourceURL, url: "http://evil.example.com/a.bin", proxy: "host not allowed",
