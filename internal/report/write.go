@@ -214,11 +214,11 @@ func describeTarget(t protocol.Target) targetInfo {
 	return targetInfo{Kind: "file", Size: humanSize(t.Size), SHA256: t.SHA256}
 }
 
-// coverageLine is the coverage sentence. Skipped items are not in FilesSeen, so with skips it
-// says "all files read" instead of 100%.
+// coverageLine is the coverage sentence. Some skipped items are not in FilesSeen, so with skips
+// it names them next to the counts instead of showing 100%.
 func coverageLine(c protocol.Coverage) string {
 	if len(c.Skipped) > 0 && c.FilesSeen > 0 && c.FilesAnalyzed >= c.FilesSeen {
-		return fmt.Sprintf("Files analyzed: %d of %d (all files read, %s skipped)", c.FilesAnalyzed, c.FilesSeen, plural(len(c.Skipped), "item"))
+		return fmt.Sprintf("Files analyzed: %d of %d (%s also skipped)", c.FilesAnalyzed, c.FilesSeen, plural(len(c.Skipped), "item"))
 	}
 	return fmt.Sprintf("Files analyzed: %d of %d (%s)", c.FilesAnalyzed, c.FilesSeen, percent(c.FilesAnalyzed, c.FilesSeen))
 }

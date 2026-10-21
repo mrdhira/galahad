@@ -177,9 +177,9 @@ func TestWriteContent(t *testing.T) {
 				r.Target = protocol.Target{Name: "pack.zip", Kind: protocol.TargetFile, Size: 208896, SHA256: sha, FileCount: 1}
 				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test", Path: "a.txt", Line: 1})
 				r.Reasons = []string{"beacon to collect.sinkhole.test"}
-				r.Coverage = protocol.Coverage{FilesSeen: 3, FilesAnalyzed: 3, Skipped: []protocol.Skip{{Path: "pack.zip!/enc", Reason: "encrypted"}}}
+				r.Coverage = protocol.Coverage{FilesSeen: 3, FilesAnalyzed: 3, Skipped: []protocol.Skip{{Path: "pack.zip!/enc", Reason: "parse_error"}}}
 			},
-			wantMD:         []string{"- beacon to collect[.]sinkhole[.]test", "- Kind: file\n", "- SHA-256: " + sha, "- Size: 204 KiB", "- Files analyzed: 3 of 3 (all files read, 1 item skipped)", "- **Warning:** 1 item was not analyzed; the verdict does not cover it"},
+			wantMD:         []string{"- beacon to collect[.]sinkhole[.]test", "- Kind: file\n", "- SHA-256: " + sha, "- Size: 204 KiB", "- Files analyzed: 3 of 3 (1 item also skipped)", "- **Warning:** 1 item was not analyzed; the verdict does not cover it"},
 			wantHTML:       []string{"beacon to collect[.]sinkhole[.]test", "<td>file</td>", "<td>204 KiB</td>", `<p class="warn">`, `aria-label="Findings"`},
 			wantNeitherHas: []string{"collect.sinkhole.test", "(100%)"},
 		},
@@ -260,10 +260,10 @@ func TestWriteContent(t *testing.T) {
 		{
 			name: "skips next to full analysis never read 100%",
 			mutate: func(r *protocol.Result) {
-				r.Coverage = protocol.Coverage{FilesSeen: 2, FilesAnalyzed: 2, Skipped: []protocol.Skip{{Path: "a.zip!/enc", Reason: "encrypted"}}}
+				r.Coverage = protocol.Coverage{FilesSeen: 2, FilesAnalyzed: 2, Skipped: []protocol.Skip{{Path: "a.zip!/enc", Reason: "parse_error"}}}
 			},
-			wantMD:         []string{"- Files analyzed: 2 of 2 (all files read, 1 item skipped)", "- **Warning:** 1 item was not analyzed; the verdict does not cover it"},
-			wantHTML:       []string{"Files analyzed: 2 of 2 (all files read, 1 item skipped).", `<p class="warn">1 item was not analyzed; the verdict does not cover it.</p>`},
+			wantMD:         []string{"- Files analyzed: 2 of 2 (1 item also skipped)", "- **Warning:** 1 item was not analyzed; the verdict does not cover it"},
+			wantHTML:       []string{"Files analyzed: 2 of 2 (1 item also skipped).", `<p class="warn">1 item was not analyzed; the verdict does not cover it.</p>`},
 			wantNeitherHas: []string{"(100%)"},
 		},
 		{
@@ -271,7 +271,7 @@ func TestWriteContent(t *testing.T) {
 			mutate: func(r *protocol.Result) {
 				r.Coverage = protocol.Coverage{FilesSeen: 3, FilesAnalyzed: 3, Skipped: []protocol.Skip{{Path: "a", Reason: "encrypted"}, {Path: "b", Reason: "depth"}}}
 			},
-			wantBoth:       []string{"all files read, 2 items skipped", "2 items were not analyzed; the verdict does not cover them"},
+			wantBoth:       []string{"(2 items also skipped)", "2 items were not analyzed; the verdict does not cover them"},
 			wantNeitherHas: []string{"(100%)"},
 		},
 		{

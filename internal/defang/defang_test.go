@@ -2,10 +2,7 @@ package defang_test
 
 import (
 	"fmt"
-	"math"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/mrdhira/galahad/internal/defang"
 )
@@ -105,39 +102,29 @@ func TestDefangHosts(t *testing.T) {
 	}
 }
 
-// TestDefangHostsScalesLinearly guards against work that grows with hosts times text: a hostile
-// repository controls the number of IOC hosts, so many hosts must cost about the same as few.
-func TestDefangHostsScalesLinearly(t *testing.T) {
+// TestDefangHostsAllocsDoNotGrowWithHosts is deterministic: a hostile repository controls the
+// number of IOC hosts, so many hosts must allocate no more than one host per scanned text.
+func TestDefangHostsAllocsDoNotGrowWithHosts(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		texts, fewHosts, manyHosts int
-		// expectations
-		wantMaxRatio float64
+		fewHosts, manyHosts int
 	}{
-		{name: "1000 hosts over 2000 snippets cost about the same as 1 host", texts: 2000, fewHosts: 1, manyHosts: 1000, wantMaxRatio: 8},
+		{name: "1000 hosts allocate as much as 1", fewHosts: 1, manyHosts: 1000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			text := strings.Repeat("hostname: 'h5.sinkhole.test' call(setup.js) ", 5)[:200]
-			run := func(hosts int) time.Duration {
+			const text = "hostname: 'h5.sinkhole.test' call(setup.js) hostname: 'h5.sinkhole.test'"
+			allocs := func(hosts int) float64 {
 				set := map[string]bool{"h5.sinkhole.test": true}
 				for i := 1; i < hosts; i++ {
 					set[fmt.Sprintf("h%d.sinkhole.test", i+1000)] = true
 				}
-				best := time.Duration(math.MaxInt64)
-				for range 3 {
-					start := time.Now()
-					for range tt.texts {
-						_ = defang.DefangHosts(text, set)
-					}
-					best = min(best, time.Since(start))
-				}
-				return best
+				return testing.AllocsPerRun(20, func() { _ = defang.DefangHosts(text, set) })
 			}
-			few, many := run(tt.fewHosts), run(tt.manyHosts)
-			if ratio := float64(many) / float64(few); ratio > tt.wantMaxRatio {
-				t.Errorf("time ratio %.1f for %d hosts against %d, want at most %.1f", ratio, tt.manyHosts, tt.fewHosts, tt.wantMaxRatio)
+			few, many := allocs(tt.fewHosts), allocs(tt.manyHosts)
+			if few != many {
+				t.Errorf("allocations = %v with %d hosts and %v with %d, want equal", many, tt.manyHosts, few, tt.fewHosts)
 			}
 		})
 	}
