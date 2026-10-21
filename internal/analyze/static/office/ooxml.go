@@ -44,6 +44,9 @@ func (s *scan) ooxml(f analyze.File) error {
 		return err
 	}
 	budget := int64(maxBudget)
+	if b, ok := analyze.Budget(s.ctx); ok {
+		budget = min(budget, b)
+	}
 	for i, zf := range zr.File {
 		if err := s.ctx.Err(); err != nil {
 			return err

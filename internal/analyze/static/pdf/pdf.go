@@ -70,7 +70,11 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if f.Kind != ident.PDF {
 		return analyze.Output{}, nil
 	}
-	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}}
+	maxDecoded := int64(MaxFileBytes)
+	if b, ok := analyze.Budget(ctx); ok {
+		maxDecoded = min(maxDecoded, b)
+	}
+	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, maxDecoded: int(maxDecoded)}
 	return s.run()
 }
 
@@ -95,19 +99,20 @@ type evidence struct {
 type hit struct{ evs []evidence }
 
 type scanner struct {
-	ctx       context.Context
-	f         analyze.File
-	objs      []*object
-	byNum     map[int]*object
-	hits      map[string]*hit
-	seenURI   map[string]bool
-	memo      map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
-	iocs      []protocol.IOC
-	decoded   int
-	encrypted bool
-	undecoded bool
-	truncated bool
-	tooMany   bool
+	ctx        context.Context
+	f          analyze.File
+	objs       []*object
+	byNum      map[int]*object
+	hits       map[string]*hit
+	seenURI    map[string]bool
+	memo       map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
+	iocs       []protocol.IOC
+	decoded    int
+	maxDecoded int // decoded bytes allowed for the file
+	encrypted  bool
+	undecoded  bool
+	truncated  bool
+	tooMany    bool
 }
 
 // tok tokenizes b and remembers that the token limit was hit.
@@ -430,7 +435,7 @@ func slicesAny(filters []string, set map[string]bool) bool {
 // decode applies one filter within the per-stream and per-file limits. It returns
 // the bytes it got and, when it could not decode everything, a reason.
 func (s *scanner) decode(filter string, in []byte) ([]byte, string) {
-	limit := min(MaxStreamBytes, MaxFileBytes-s.decoded)
+	limit := min(MaxStreamBytes, s.maxDecoded-s.decoded)
 	var r io.Reader
 	switch filter {
 	case "FlateDecode", "Fl":

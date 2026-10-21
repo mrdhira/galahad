@@ -870,6 +870,46 @@ func TestAnalyze(t *testing.T) {
 	}
 }
 
+func TestAnalyzeBudget(t *testing.T) {
+	const word = "offer.docx"
+	body := rels()
+	tests := []struct {
+		name string
+		// inputs
+		budget int64 // negative means the context carries none
+		// expectations
+		wantSkips []string
+	}{
+		{name: "parts within the job budget are read", budget: 1 << 20},
+		{name: "no budget leaves the package budget alone", budget: -1},
+		{name: "a part past the job budget stops the scan", budget: int64(len(body)) * 3 / 2, wantSkips: []string{word + "!/b.rels:budget"}},
+		{name: "a spent job budget stops at the first part", budget: 0, wantSkips: []string{word + "!/a.rels:budget"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.budget >= 0 {
+				ctx = analyze.WithBudget(ctx, tt.budget)
+			}
+			data := zipOf(t, part{name: "a.rels", data: body}, part{name: "b.rels", data: body})
+			f := analyze.File{Path: word, Name: word, Kind: ident.OOXML, Data: data}
+
+			out, err := office.New().Analyze(ctx, f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			var skips []string
+			for _, s := range out.Skips {
+				skips = append(skips, s.Path+":"+s.Reason)
+			}
+			if !slices.Equal(skips, tt.wantSkips) {
+				t.Errorf("skips = %q, want %q", skips, tt.wantSkips)
+			}
+		})
+	}
+}
+
 func TestName(t *testing.T) {
 	tests := []struct {
 		name     string

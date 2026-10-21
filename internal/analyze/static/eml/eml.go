@@ -73,7 +73,11 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if err != nil {
 		return parseError, nil
 	}
-	w := &walker{ctx: ctx, f: f, hdr: end, budget: analyze.MaxFileSize, names: map[string]bool{}, iocs: map[string]bool{}}
+	budget := int64(analyze.MaxFileSize)
+	if b, ok := analyze.Budget(ctx); ok {
+		budget = min(budget, b)
+	}
+	w := &walker{ctx: ctx, f: f, hdr: end, budget: int(budget), names: map[string]bool{}, iocs: map[string]bool{}}
 	w.headers(msg.Header)
 	w.entity(msg.Header.Get, bytes.NewReader(f.Data[end:]), end, 0)
 	if err := ctx.Err(); err != nil {

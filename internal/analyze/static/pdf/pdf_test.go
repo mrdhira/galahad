@@ -428,6 +428,28 @@ func TestAnalyze(t *testing.T) {
 			wantSkips: []string{"unsupported"},
 		},
 		{
+			name: "stream within the job budget left is decoded",
+			kind: ident.PDF,
+			data: doc(stream(1, "/Filter /FlateDecode", deflate(t, zeros(4096)))),
+			ctx:  analyze.WithBudget(context.Background(), 4096),
+		},
+		{
+			name:      "stream over the job budget left",
+			kind:      ident.PDF,
+			data:      doc(stream(1, "/Filter /FlateDecode", deflate(t, zeros(4096)))),
+			ctx:       analyze.WithBudget(context.Background(), 4095),
+			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"unsupported"},
+		},
+		{
+			name:      "spent job budget decodes nothing",
+			kind:      ident.PDF,
+			data:      doc(stream(1, "/Filter /FlateDecode", deflate(t, zeros(4096)))),
+			ctx:       analyze.WithBudget(context.Background(), 0),
+			wantRules: []string{"GAL-PDF-007"},
+			wantSkips: []string{"unsupported"},
+		},
+		{
 			name:      "too many objects",
 			kind:      ident.PDF,
 			data:      doc(manyObjs),
