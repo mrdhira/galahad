@@ -2,6 +2,7 @@ package script
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"slices"
 	"sort"
@@ -128,16 +129,12 @@ func rootName(arg []byte) string {
 	return string(identRE.Find(bytes.TrimLeft(arg, "( \t\r\n")))
 }
 
-// loopVarRE ends the text before a name that a for loop declares.
-var loopVarRE = regexp.MustCompile(`\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+$`)
-
 // fetchedBefore looks at the windowLines lines (at most windowBytes) before
 // off for a network call and returns the offset of the last one, or -1. With a
-// root name, the data must flow from the call to off: the name must appear
-// from the line of the network call on, and not only as the variable that a
-// for loop declares. Without a name (.then(eval)) the call alone counts. A
-// name also asks for a callback or an await in the window, which carry the
-// response to off.
+// root name, the data must flow from the call to off: from the line of the
+// network call on, the name must get its value from the response (see bound).
+// Without a name (.then(eval)) the call alone counts. A name also asks for a
+// callback or an await in the window, which carry the response to off.
 func (s *scan) fetchedBefore(d *doc, off int, root string) int {
 	n := min(off, windowBytes)
 	if s.argBytes += n; s.argBytes > argBudget {
@@ -158,27 +155,45 @@ func (s *scan) fetchedBefore(d *doc, off int, root string) int {
 		return -1
 	}
 	at := s.networkAt(d, win)
-	if at < 0 || root != "" && !flows(win[bytes.LastIndexByte(win[:at], '\n')+1:], root) {
+	if at < 0 || root != "" && !s.bound(d, win[bytes.LastIndexByte(win[:at], '\n')+1:], root) {
 		return -1
 	}
 	return lo + at
 }
 
-// flows reports whether text uses name as a whole word anywhere but in the
-// declaration of a for loop variable.
-func flows(text []byte, name string) bool {
-	for from := 0; ; {
-		i := bytes.Index(text[from:], []byte(name))
-		if i < 0 {
-			return false
+// bindFmt matches the places where a name gets a value from a response; %[1]s
+// is the name. It is a parameter of a callback ("(t) =>", "t =>", "function (t)"),
+// it is appended to ("body +="), it is assigned from an await or a response
+// read ("const r = await ...", "d = res.data"), or it is destructured from an
+// await ("const { data } = await ...").
+const bindFmt = `(?:^|[^\w$.])%[1]s\s*(?:\+=|=>)` +
+	`|(?:^|[^\w$.])%[1]s\s*=[^=>;\n][^;\n]{0,400}?(?:\bawait\b|\.(?:text|json|blob|buffer|arrayBuffer|read)\s*\(|\.(?:data|body)\b|responseText)` +
+	`|\bfunction\s*\w*\s*\((?:[^()]*[^\w$.])?%[1]s(?:[^\w$][^()]*)?\)` +
+	`|\((?:[^()]*[^\w$.])?%[1]s(?:[^\w$][^()]*)?\)\s*=>` +
+	`|\{(?:[^{}]*[^\w$.])?%[1]s(?:[^\w$][^{}]*)?\}\s*=\s*await\b`
+
+// loopFmt matches a for loop that declares the name %[1]s over an iterable.
+const loopFmt = `\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+%[1]s\s+of\s`
+
+// bound reports whether the name root gets a value from the response of the
+// network call that text starts at the line of: see bindFmt. A for loop
+// variable counts when the loop runs over a network call. A name that is
+// only assigned from something else, such as process.argv, does not.
+func (s *scan) bound(d *doc, text []byte, root string) bool {
+	name := regexp.QuoteMeta(root)
+	if regexp.MustCompile(fmt.Sprintf(bindFmt, name)).Match(text) {
+		return true
+	}
+	for _, m := range regexp.MustCompile(fmt.Sprintf(loopFmt, name)).FindAllIndex(text, maxWindowHits) {
+		iter := text[m[1]:]
+		if i := bytes.IndexByte(iter, '\n'); i >= 0 {
+			iter = iter[:i]
 		}
-		i += from
-		from = i + 1
-		end := i + len(name)
-		if wordStart(text, i) && (end == len(text) || !isWord(text[end])) && !loopVarRE.Match(text[max(0, i-40):i]) {
+		if s.networkAt(d, iter) >= 0 {
 			return true
 		}
 	}
+	return false
 }
 
 // maxString is the longest string literal that argAt skips over.
