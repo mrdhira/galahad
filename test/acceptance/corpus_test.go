@@ -2,6 +2,7 @@ package acceptance_test
 
 import (
 	"archive/tar"
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -86,7 +87,26 @@ func TestCorpus(t *testing.T) {
 				zipEntries(t, dest, append(benignDocxEntries(), zipEntry{name: "word/embeddings/pack.zip", data: b}))
 			}),
 			wantCode:  20,
-			wantRules: []string{"GAL-AUTOEXEC-001 embed.docx!/word/embeddings/pack.zip!/.vscode/tasks.json:7"},
+			wantRules: []string{"GAL-AUTOEXEC-001 embed.docx!/word/embeddings/pack.zip!/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 embed.docx!/word/embeddings/pack.zip!/.vscode/tasks.json:7"},
+		},
+		{
+			name: "p1-ooxml-disguised-xml: a docx part named styles.xml is really a zip of the malicious repo (built)",
+			target: builtFile("disguise.docx", func(t *testing.T, dest string) {
+				inner := zipBytes(t, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+				zipEntries(t, dest, append(benignDocxEntries(), zipEntry{name: "word/styles.xml", data: inner}))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 disguise.docx!/word/styles.xml!/.vscode/tasks.json:7"},
+		},
+		{
+			name: "p1-ooxml-disguised-vba: a docx vbaProject.bin is really a zip of the malicious repo (built)",
+			target: builtFile("macro.docx", func(t *testing.T, dest string) {
+				inner := zipBytes(t, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+				zipEntries(t, dest, append(benignDocxEntries(), zipEntry{name: "word/vbaProject.bin", data: inner}))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 macro.docx!/word/vbaProject.bin!/.vscode/tasks.json:7"},
+			wantSkips: 1, // the office analyzer cannot read the fake project
 		},
 		{
 			name:   "p1-devcontainer-init: initializeCommand pipes a download into sh",
@@ -202,6 +222,65 @@ func TestCorpus(t *testing.T) {
 			}),
 			wantCode:  10,
 			wantRules: []string{"GAL-ARCHIVE-002 links.tgz!/link:0"},
+		},
+		{
+			name: "archive-backslash: a zip with backslash member names is read as paths (built)",
+			target: builtFile("backslash.zip", func(t *testing.T, dest string) {
+				entries := dirEntries(t, corpus(t, "p1-folderopen-curl"), "p1-folderopen-curl/")
+				for i := range entries {
+					entries[i].name = strings.ReplaceAll(entries[i].name, "/", `\`)
+				}
+				zipEntries(t, dest, entries)
+			}),
+			wantCode: 20,
+			wantRules: []string{
+				"GAL-AUTOEXEC-001 backslash.zip!/p1-folderopen-curl/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 backslash.zip!/p1-folderopen-curl/.vscode/tasks.json:7",
+				`GAL-ARCHIVE-005 backslash.zip!/p1-folderopen-curl\.vscode\tasks.json:0`,
+			},
+			wantSnippets: []string{`p1-folderopen-curl\.vscode\tasks.json`},
+		},
+		{
+			name: "archive-sfx: an executable with the malicious repo zipped after it (built)",
+			target: builtFile("setup.exe", func(t *testing.T, dest string) {
+				zipped := zipBytes(t, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+				writeBytes(t, dest, append(sfxStub(), zipped...))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 setup.exe!/.vscode/tasks.json:7", "GAL-ARCHIVE-006 setup.exe:0"},
+		},
+		{
+			name: "archive-nested: the payload sits in a zip inside four zips, beyond the nesting limit (built)",
+			target: builtFile("deep.zip", func(t *testing.T, dest string) {
+				nestedZips(t, dest, 5, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+			}),
+			wantCode:    10,
+			wantSkips:   1,
+			wantSummary: []string{"part of the input could not be analyzed"},
+		},
+		{
+			name: "archive-nested within the limit: the payload sits in a zip inside three zips (built)",
+			target: builtFile("deep.zip", func(t *testing.T, dest string) {
+				nestedZips(t, dest, 4, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 deep.zip!/next.zip!/next.zip!/next.zip!/.vscode/tasks.json:7"},
+		},
+		{
+			name: "archive-name-mismatch: the local header names the task file, the central directory a harmless name (built)",
+			target: builtFile("mismatch.zip", func(t *testing.T, dest string) {
+				tasks, err := os.ReadFile(filepath.Join(corpus(t, "p1-folderopen-curl"), ".vscode", "tasks.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				zipEntries(t, dest, []zipEntry{{name: "_vscode/tasks.json", data: tasks}})
+				b, err := os.ReadFile(dest) // #nosec G304 -- test fixture path under t.TempDir()
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeBytes(t, dest, bytes.Replace(b, []byte("_vscode/tasks.json"), []byte(".vscode/tasks.json"), 1))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-ARCHIVE-007 mismatch.zip!/_vscode/tasks.json:0", "GAL-AUTOEXEC-001 mismatch.zip!/.vscode/tasks.json:7"},
 		},
 
 		// Benign twins (P7).

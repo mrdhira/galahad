@@ -212,3 +212,29 @@ func TestResultJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestSkipHidesContent(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		reason string
+		// expectations
+		wantHides bool
+	}{
+		{name: "too large", reason: protocol.SkipTooLarge, wantHides: true},
+		{name: "budget", reason: protocol.SkipBudget, wantHides: true},
+		{name: "depth", reason: protocol.SkipDepth, wantHides: true},
+		{name: "encrypted", reason: protocol.SkipEncrypted, wantHides: true},
+		{name: "unsupported", reason: protocol.SkipUnsupported},
+		{name: "parse error", reason: protocol.SkipParseError},
+		{name: "timeout", reason: protocol.SkipTimeout},
+		{name: "panic", reason: protocol.SkipPanic},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := (protocol.Skip{Path: "a", Reason: tt.reason}).HidesContent(); got != tt.wantHides {
+				t.Errorf("HidesContent() = %v, want %v", got, tt.wantHides)
+			}
+		})
+	}
+}

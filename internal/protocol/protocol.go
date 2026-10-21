@@ -131,6 +131,16 @@ type Skip struct {
 	Reason string `json:"reason"`
 }
 
+// HidesContent reports a skip that leaves part of the input unread: a file or
+// member that was too large, over a budget, too deep or encrypted.
+func (s Skip) HidesContent() bool {
+	switch s.Reason {
+	case SkipTooLarge, SkipBudget, SkipDepth, SkipEncrypted:
+		return true
+	}
+	return false
+}
+
 // Coverage says how much of the target was analyzed.
 type Coverage struct {
 	FilesSeen     int      `json:"files_seen"`

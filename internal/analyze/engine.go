@@ -315,8 +315,16 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 		j.iocs[key] = true
 		j.res.IOCs = append(j.res.IOCs, ioc)
 	}
+	for _, s := range out.Skips {
+		if s.HidesContent() {
+			// The skipped member was seen but never analyzed.
+			j.admit()
+		}
+	}
 	j.res.Coverage.Skipped = append(j.res.Coverage.Skipped, out.Skips...)
 	for _, c := range out.Children {
+		// Extractors on Windows split member names at a backslash, so path rules must too.
+		c.Name = strings.ReplaceAll(c.Name, `\`, "/")
 		c.Path = protocol.CleanPath(parent.Path + "!/" + c.Name)
 		c.Name = c.Name[strings.LastIndexByte(c.Name, '/')+1:]
 		c.Depth = parent.Depth + 1

@@ -8,6 +8,7 @@ package scoring
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -97,7 +98,8 @@ func Apply(res *protocol.Result) {
 	if res.Coverage.FilesSeen > 0 {
 		cov = float64(res.Coverage.FilesAnalyzed) / float64(res.Coverage.FilesSeen)
 	}
-	if verdict == protocol.VerdictClean && cov < minCoverage {
+	clean := verdict == protocol.VerdictClean
+	if clean && cov < minCoverage {
 		verdict = protocol.VerdictSuspicious
 		why := "less than half of the files could be analyzed"
 		if res.Coverage.FilesSeen == 0 {
@@ -105,6 +107,11 @@ func Apply(res *protocol.Result) {
 		}
 		reasons = append(reasons,
 			fmt.Sprintf("coverage %d%% < %d%%", int(math.Round(cov*100)), int(minCoverage*100)), why)
+	}
+
+	if clean && slices.ContainsFunc(res.Coverage.Skipped, protocol.Skip.HidesContent) {
+		verdict = protocol.VerdictSuspicious
+		reasons = append(reasons, "part of the input could not be analyzed")
 	}
 
 	agree := len(analyzers) >= 2

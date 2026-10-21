@@ -152,7 +152,7 @@ func TestRun(t *testing.T) {
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  2,
 			wantFiles:      []string{"a/x.txt", "b.txt"},
-			wantSeen:       2, wantAnalyzed: 2,
+			wantSeen:       3, wantAnalyzed: 2, // the encrypted member counts as seen
 			wantSkips: []protocol.Skip{{Path: "b.txt!/enc", Reason: protocol.SkipEncrypted}},
 			wantFindings: []string{
 				"GAL-T-002@b.txt:1 alpha hi",
@@ -313,6 +313,42 @@ func TestRun(t *testing.T) {
 				"GAL-T-001@a.zip!/dir/m1.txt:0 names m1.txt depth=1",
 				"GAL-T-001@a.zip!/dir/m1.txt!/g.txt:0 names g.txt depth=2",
 				`GAL-T-001@a.zip!/e\u001bvil.txt:0 names e\u001bvil.txt depth=1`,
+			},
+		},
+		{
+			name: "analyzer skips that hide nothing are recorded but not counted as files",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.txt", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "skips", fn: func(context.Context, analyze.File) (analyze.Output, error) {
+				return analyze.Output{Skips: []protocol.Skip{{Path: "a.txt!/m", Reason: protocol.SkipUnsupported}}}, nil
+			}}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantFiles:      []string{"a.txt"},
+			wantSeen:       1, wantAnalyzed: 1,
+			wantSkips: []protocol.Skip{{Path: "a.txt!/m", Reason: protocol.SkipUnsupported}},
+		},
+		{
+			name: "backslashes in member names separate path segments",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.zip", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{
+				children("a.zip", analyze.File{Name: `d\.vscode\tasks.json`, Data: []byte("one")}),
+				fake{name: "names", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
+					return analyze.Output{Findings: []protocol.Finding{finding("GAL-T-001", protocol.SeverityLow, f.Path, 0, f.Name)}}, nil
+				}},
+			},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  1,
+			wantFiles:      []string{"a.zip", "a.zip!/d/.vscode/tasks.json"},
+			wantSeen:       2, wantAnalyzed: 2,
+			wantFindings: []string{
+				"GAL-T-001@a.zip:0 names a.zip",
+				"GAL-T-001@a.zip!/d/.vscode/tasks.json:0 names tasks.json",
 			},
 		},
 		{

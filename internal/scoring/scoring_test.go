@@ -19,6 +19,9 @@ func TestApply(t *testing.T) {
 	cov := func(seen, analyzed int) protocol.Coverage {
 		return protocol.Coverage{FilesSeen: seen, FilesAnalyzed: analyzed}
 	}
+	skipped := func(seen, analyzed int, reason string) protocol.Coverage {
+		return protocol.Coverage{FilesSeen: seen, FilesAnalyzed: analyzed, Skipped: []protocol.Skip{{Path: "a.zip!/x", Reason: reason}}}
+	}
 	tests := []struct {
 		name string
 		// inputs
@@ -227,6 +230,66 @@ func TestApply(t *testing.T) {
 			wantConf:    50,
 			wantLevel:   "medium",
 			wantReasons: []string{"no findings"},
+		},
+		{
+			name:        "a depth skip makes a clean result suspicious",
+			coverage:    skipped(10, 8, protocol.SkipDepth),
+			wantVerdict: protocol.VerdictSuspicious,
+			wantConf:    60,
+			wantLevel:   "medium",
+			wantReasons: []string{"no findings", "part of the input could not be analyzed"},
+		},
+		{
+			name:        "a budget skip makes a clean result suspicious",
+			coverage:    skipped(10, 8, protocol.SkipBudget),
+			wantVerdict: protocol.VerdictSuspicious,
+			wantConf:    60,
+			wantLevel:   "medium",
+			wantReasons: []string{"no findings", "part of the input could not be analyzed"},
+		},
+		{
+			name:        "a encrypted skip makes a clean result suspicious",
+			coverage:    skipped(10, 8, protocol.SkipEncrypted),
+			wantVerdict: protocol.VerdictSuspicious,
+			wantConf:    60,
+			wantLevel:   "medium",
+			wantReasons: []string{"no findings", "part of the input could not be analyzed"},
+		},
+		{
+			name:        "a too large skip makes a clean result suspicious",
+			coverage:    skipped(10, 8, protocol.SkipTooLarge),
+			wantVerdict: protocol.VerdictSuspicious,
+			wantConf:    60,
+			wantLevel:   "medium",
+			wantReasons: []string{"no findings", "part of the input could not be analyzed"},
+		},
+		{
+			name:        "low coverage and a skip give both reasons",
+			coverage:    skipped(10, 4, protocol.SkipDepth),
+			wantVerdict: protocol.VerdictSuspicious,
+			wantConf:    30,
+			wantLevel:   "low",
+			wantReasons: []string{"no findings", "coverage 40% < 50%", "less than half of the files could be analyzed", "part of the input could not be analyzed"},
+		},
+		{
+			name:        "a skip that hides nothing keeps a clean result",
+			coverage:    skipped(10, 10, protocol.SkipUnsupported),
+			wantVerdict: protocol.VerdictClean,
+			wantConf:    100,
+			wantLevel:   "high",
+			wantReasons: []string{"no findings"},
+		},
+		{
+			name: "a skip does not change a suspicious verdict",
+			findings: []protocol.Finding{
+				finding("GAL-A-001", protocol.SeverityMedium, "a", "f", 1),
+			},
+			coverage:    skipped(10, 10, protocol.SkipDepth),
+			wantVerdict: protocol.VerdictSuspicious,
+			wantScore:   15,
+			wantConf:    75,
+			wantLevel:   "medium",
+			wantReasons: []string{"score 15 >= 15"},
 		},
 		{
 			name: "low coverage does not change a suspicious verdict",
