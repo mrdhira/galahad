@@ -13,29 +13,72 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gate:
+  # Decides whether a pull request touches anything besides docs. Pushes to main always run in full.
+  changes:
     runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          fetch-depth: 0
+      - id: filter
+        name: Detect code changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ]; then
+            changed=$(git diff --name-only "$BASE" HEAD)
+            printf 'Changed files:\n%s\n' "$changed"
+            # Docs-only: every changed path is under docs/ or .claude/, a top-level Markdown file,
+            # LICENSE, .gitignore or the Dependabot config. Markdown under testdata/ counts as code.
+            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '^(docs/|\.claude/|[^/]+\.md$|LICENSE$|\.gitignore$|\.github/dependabot\.yml$)' >/dev/null; then
+              code=false
+            fi
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
+  # The jobs always run so the required checks report; on docs-only changes their steps are skipped.
+  gate:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.code != 'true'
+        run: echo "Docs-only change, gate skipped."
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.3'
-      - run: make tools
-      - run: make gate
+      - if: needs.changes.outputs.code == 'true'
+        run: make tools
+      - if: needs.changes.outputs.code == 'true'
+        run: make gate
 
   # Build and test only. The full gate runs on Linux.
   test:
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - if: needs.changes.outputs.code != 'true'
+        run: echo "Docs-only change, tests skipped."
+        shell: bash
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.3'
-      - run: go vet ./...
+      - if: needs.changes.outputs.code == 'true'
+        run: go vet ./...
         shell: bash
-      - run: go test -race -count=1 ./...
+      - if: needs.changes.outputs.code == 'true'
+        run: go test -race -count=1 ./...
         shell: bash
