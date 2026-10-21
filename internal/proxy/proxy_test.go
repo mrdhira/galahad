@@ -341,6 +341,9 @@ func TestServeBadConnect(t *testing.T) {
 	oversize := make([]byte, 5)
 	oversize[0] = byte(protocol.FrameConnect)
 	binary.BigEndian.PutUint32(oversize[1:], 1<<20)
+	// A Result header that claims 64 MiB, a valid length for that type. A guest could
+	// send it on many connections to make the host allocate, so it is refused on the header.
+	hugeResult := []byte{byte(protocol.FrameResult), 0x04, 0, 0, 0}
 	tests := []struct {
 		name string
 		// inputs
@@ -351,6 +354,7 @@ func TestServeBadConnect(t *testing.T) {
 		{name: "unknown field", raw: frame(protocol.FrameConnect, `{"host":"api.osv.dev","port":443,"extra":1}`), wantReason: "bad connect frame"},
 		{name: "frame over the Connect limit", raw: oversize, wantReason: "bad connect frame"},
 		{name: "wrong frame type", raw: frame(protocol.FrameHello, `{}`), wantReason: "bad connect frame"},
+		{name: "wrong frame type with a 64 MiB length", raw: hugeResult, wantReason: "bad connect frame"},
 		{name: "not JSON", raw: frame(protocol.FrameConnect, `host=api.osv.dev`), wantReason: "bad connect frame"},
 		{name: "trailing data", raw: frame(protocol.FrameConnect, `{"host":"api.osv.dev","port":443} {}`), wantReason: "bad connect frame"},
 		{name: "upper case host", raw: frame(protocol.FrameConnect, `{"host":"API.osv.dev","port":443}`), wantReason: "bad connect frame"},
@@ -372,9 +376,14 @@ func TestServeBadConnect(t *testing.T) {
 			if _, err := c.Write(tt.raw); err != nil {
 				t.Fatal(err)
 			}
+			began := time.Now()
 			reply, err := readReply(c)
 			if err != nil {
 				t.Fatalf("reading the reply: %v", err)
+			}
+			// The proxy must not wait for a payload that never comes (its deadline is 10 s).
+			if d := time.Since(began); d > 2*time.Second {
+				t.Errorf("refusal took %v, want a prompt one", d)
 			}
 			if reply.OK || reply.Reason != tt.wantReason {
 				t.Errorf("reply = %+v, want refusal %q", reply, tt.wantReason)
@@ -595,6 +604,63 @@ func TestServeTunnelCap(t *testing.T) {
 	}
 }
 
+// deadWriteConn reads like the guest connection but fails every write, as a guest that went away would.
+type deadWriteConn struct{ net.Conn }
+
+func (deadWriteConn) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+type deadWriteListener struct{ net.Listener }
+
+func (l deadWriteListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	return deadWriteConn{c}, err
+}
+
+func TestServeReplyFailed(t *testing.T) {
+	tests := []struct {
+		name string
+		// expectations
+		wantReason string
+	}{
+		{name: "a failed reply write is logged as a denial", wantReason: "reply failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, _ := echoBackend(t, "")
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := &lockedBuf{}
+			p := proxy.New(relayPolicy(t), log)
+			p.Resolve = resolveTo("93.184.216.34")
+			var dialed netip.AddrPort
+			p.Dial = dialTo(backend, &dialed, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- p.Serve(ctx, deadWriteListener{l}) }()
+			defer func() {
+				cancel()
+				if err := <-done; err != nil {
+					t.Errorf("Serve returned %v", err)
+				}
+			}()
+			c, err := net.Dial("tcp", l.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = c.Close() }()
+			if err := protocol.WriteFrame(c, protocol.FrameConnect, []byte(`{"host":"files.example.com","port":443}`)); err != nil {
+				t.Fatal(err)
+			}
+			line := log.lines(t, 1)[0]
+			if line["decision"] != proxy.Denied || line["reason"] != tt.wantReason {
+				t.Errorf("log line = %v, want a denial with reason %q", line, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestServeShutdown(t *testing.T) {
 	tests := []struct {
 		name string
@@ -681,7 +747,9 @@ func TestEvents(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		hosts []string
+		hosts   []string
+		allow   []string // --allow-host values
+		answers []string // DNS answer per request: an IP, or "" for a failure
 		// expectations
 		wantEvents int
 		wantFirst  proxy.Event
@@ -696,11 +764,29 @@ func TestEvents(t *testing.T) {
 			hosts: manyHosts(205), wantEvents: 200,
 			wantFirst: proxy.Event{Host: "h0.example.com", Port: 443, Decision: proxy.Denied, Reason: "host not allowed", Count: 1},
 		},
+		{
+			name:  "a later blocked address is not hidden by an earlier DNS failure",
+			hosts: []string{"rebind.example.com", "rebind.example.com"}, allow: []string{"rebind.example.com"},
+			answers: []string{"", "10.0.0.1"}, wantEvents: 1,
+			wantFirst: proxy.Event{Host: "rebind.example.com", Port: 443, Decision: proxy.Denied, Reason: "private", Blocked: true, Count: 2},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			addr, p, log := start(t, policy(t, proxy.Input{Kind: protocol.KindScan, Source: protocol.SourceLocal}), func(p *proxy.Proxy) {
+			var mu sync.Mutex
+			calls := 0
+			addr, p, log := start(t, policy(t, proxy.Input{Kind: protocol.KindScan, Source: protocol.SourceLocal, AllowHosts: tt.allow}), func(p *proxy.Proxy) {
 				p.Limits.LogLines = 1 << 20
+				p.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+					mu.Lock()
+					defer mu.Unlock()
+					ans := tt.answers[calls]
+					calls++
+					if ans == "" {
+						return nil, errors.New("no such host")
+					}
+					return []netip.Addr{netip.MustParseAddr(ans)}, nil
+				}
 			})
 			for _, h := range tt.hosts {
 				if _, _, err := open(t, addr, h, 443); err != nil {

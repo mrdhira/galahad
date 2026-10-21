@@ -38,11 +38,14 @@ var blockedV4 = ranges(
 var blockedV6 = ranges(
 	[2]string{"::/128", "unspecified"},
 	[2]string{"::1/128", "loopback"},
+	[2]string{"::/96", "ipv4-compatible"},
 	[2]string{"fc00::/7", "unique local"},
 	[2]string{"fe80::/10", "link-local"},
 	[2]string{"ff00::/8", "multicast"},
+	[2]string{"2001::/32", "teredo"},
 	[2]string{"2001:db8::/32", "documentation"},
 	[2]string{"2002::/16", "6to4"},
+	[2]string{"64:ff9b:1::/48", "local-use nat64"},
 )
 
 var nat64 = netip.MustParsePrefix("64:ff9b::/96")

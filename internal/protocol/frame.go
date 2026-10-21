@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 )
 
 // FrameType is the first byte of a frame.
@@ -84,16 +85,30 @@ func WriteFrame(w io.Writer, t FrameType, payload []byte) error {
 	return err
 }
 
-// ReadFrame reads one frame. It rejects an unknown type and a length over the
-// limit of its type before it allocates the payload. At a clean end of the
+// ReadFrame reads one frame of any type. It rejects an unknown type and a length
+// over the limit of its type before it allocates the payload. At a clean end of the
 // stream, before any header byte, it returns io.EOF.
 func ReadFrame(r io.Reader) (FrameType, []byte, error) {
+	return ReadFrameOf(r, FrameHello, FrameJob, FrameData, FrameEnd, FrameProgress,
+		FrameArtifact, FrameResult, FrameError, FrameConnect, FrameConnectReply)
+}
+
+// ReadFrameOf is ReadFrame for a reader that expects only some types. It rejects
+// a type that is not in allowed, and a length over the limit of its type, on the
+// header alone, so a peer cannot make it allocate for a frame it never wanted.
+func ReadFrameOf(r io.Reader, allowed ...FrameType) (FrameType, []byte, error) {
 	var h [headerSize]byte
 	if _, err := io.ReadFull(r, h[:]); err != nil {
 		return 0, nil, err
 	}
 	t := FrameType(h[0])
 	n := binary.BigEndian.Uint32(h[1:])
+	if _, known := frameLimits[t]; !known {
+		return 0, nil, checkLen(t, uint64(n))
+	}
+	if !slices.Contains(allowed, t) {
+		return 0, nil, fmt.Errorf("unexpected %s frame", t)
+	}
 	if err := checkLen(t, uint64(n)); err != nil {
 		return 0, nil, err
 	}

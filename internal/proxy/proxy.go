@@ -26,11 +26,12 @@ const (
 	Denied  = "denied"
 )
 
-// Fixed timeouts: reading the Connect frame, resolving a name and dialing.
+// Fixed timeouts: reading the Connect frame and writing the reply, resolving a name and dialing.
 const (
 	handshakeTimeout = 10 * time.Second
 	resolveTimeout   = 5 * time.Second
-	dialTimeout      = 15 * time.Second
+	addrTimeout      = 5 * time.Second  // one dial
+	dialTimeout      = 15 * time.Second // all dials of one request
 	maxEvents        = 200
 )
 
@@ -206,8 +207,9 @@ func (p *Proxy) handle(ctx context.Context, c net.Conn) {
 // readConnect reads the one frame a guest may send before the tunnel opens.
 func readConnect(c net.Conn) (protocol.Connect, bool) {
 	var req protocol.Connect
-	t, payload, err := protocol.ReadFrame(c)
-	if err != nil || t != protocol.FrameConnect {
+	// Only a Connect frame is allowed, so the header of anything else is refused before an allocation.
+	_, payload, err := protocol.ReadFrameOf(c, protocol.FrameConnect)
+	if err != nil {
 		return req, false
 	}
 	if err := protocol.DecodeStrict(payload, &req); err != nil || req.Validate() != nil {
@@ -280,13 +282,17 @@ func addrPort(ip netip.Addr, port int) netip.AddrPort {
 	return netip.AddrPortFrom(ip, uint16(port)) // #nosec G115 -- Validate bounds it to 1-65535
 }
 
-// dial connects to the first vetted address that answers.
+// dial connects to the first vetted address that answers. Each address gets its
+// own timeout, so one that never answers does not use up the budget of the rest.
 func (p *Proxy) dial(ctx context.Context, d decision, addrs []netip.AddrPort) (net.Conn, decision) {
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	for _, a := range addrs {
 		d.ip = a.Addr()
-		if r, err := p.Dial(ctx, a); err == nil {
+		actx, acancel := context.WithTimeout(ctx, addrTimeout)
+		r, err := p.Dial(actx, a)
+		acancel()
+		if err == nil {
 			return r, d
 		}
 	}
@@ -294,12 +300,14 @@ func (p *Proxy) dial(ctx context.Context, d decision, addrs []netip.AddrPort) (n
 	return nil, d
 }
 
-// reply sends the answer to the guest. It reports whether the write worked.
+// reply sends the answer to the guest. It reports whether the write worked. The
+// deadline starts again here, because resolving and dialing may have used up most of it.
 func (p *Proxy) reply(c net.Conn, r protocol.ConnectReply) bool {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return false
 	}
+	_ = c.SetDeadline(time.Now().Add(handshakeTimeout))
 	return protocol.WriteFrame(c, protocol.FrameConnectReply, b) == nil
 }
 
@@ -411,6 +419,10 @@ func (p *Proxy) addEvent(d decision, verdict string) {
 	for i := range p.events {
 		if e := &p.events[i]; e.Host == d.host && e.Port == d.port && e.Decision == verdict {
 			e.Count++
+			// A refusal for a non-public address must not be hidden by an earlier one.
+			if d.blocked && !e.Blocked {
+				e.Blocked, e.Reason = true, d.reason
+			}
 			return
 		}
 	}
