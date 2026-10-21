@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -23,6 +24,10 @@ func TestMain(m *testing.M) {
 }
 
 func TestSelect(t *testing.T) {
+	realBackend, realErr := "firecracker", ""
+	if runtime.GOOS != "linux" {
+		realBackend, realErr = "", "sandbox not supported"
+	}
 	tests := []struct {
 		name        string
 		sandbox     string // GALAHAD_SANDBOX
@@ -30,12 +35,13 @@ func TestSelect(t *testing.T) {
 		wantErr     string
 	}{
 		{name: "fake backend", sandbox: "fake", wantBackend: "fake"},
-		{name: "unset falls through to the real backends", sandbox: "", wantErr: "sandbox not supported"},
-		{name: "other value falls through to the real backends", sandbox: "firecracker", wantErr: "sandbox not supported"},
+		{name: "unset falls through to the real backend", sandbox: "", wantBackend: realBackend, wantErr: realErr},
+		{name: "other value falls through to the real backend", sandbox: "firecracker", wantBackend: realBackend, wantErr: realErr},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("GALAHAD_SANDBOX", tt.sandbox)
+			t.Setenv("GALAHAD_HOME", t.TempDir())
 			b, err := sandbox.Select()
 			if tt.wantErr != "" {
 				if !errors.Is(err, sandbox.ErrUnsupported) || !strings.Contains(err.Error(), tt.wantErr) {

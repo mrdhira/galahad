@@ -1,0 +1,131 @@
+name: vm
+
+# Boots the real Firecracker backend, which the development session cannot do: there is no KVM there.
+# It installs the pinned Firecracker and the pinned kernel and core image, builds galahad and
+# galahad-agent, and scans two corpus fixtures through a microVM. Each failure prints ::error::
+# lines, which show up as annotations without reading the job log.
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/**'
+      - 'images/**'
+      - 'internal/**'
+      - 'scripts/vm/**'
+      - 'testdata/corpus/**'
+      - '.github/workflows/vm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    # The images are built here when their release does not exist yet, which takes a while.
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+
+      - name: Check the scripts
+        run: shellcheck -x scripts/vm/*.sh
+
+      - name: Set up the state directory
+        run: echo "GALAHAD_HOME=$RUNNER_TEMP/galahad" >> "$GITHUB_ENV"
+
+      # Hosted runners have /dev/kvm, but only root can use it until this udev rule is in place.
+      - name: Set up KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          if ! [ -r /dev/kvm ] || ! [ -w /dev/kvm ]; then
+            echo "::error::/dev/kvm is not readable and writable on this runner: $(stat -c '%A %U:%G' /dev/kvm 2>&1 | tr -cd '[:print:]')"
+            exit 1
+          fi
+
+      - name: Build galahad and galahad-agent
+        run: |
+          make build 2>&1 | tee build.log && exit 0
+          tail -n 8 build.log | sed 's/^/::error::/'
+          exit 1
+
+      # The pin checks the archive before anything of it is unpacked.
+      - name: Install the pinned Firecracker
+        run: scripts/vm/firecracker.sh
+
+      # The images are published by the images-* tag (image.yml). Until that release exists, they are
+      # built the way image.yml builds them: the same container, scripts and cache. Only the kernel and
+      # the core image are needed here, not re. Either way the files are checked against pins.json,
+      # so a build that differs from the pins fails here, as it does in image.yml.
+      - name: Download the pinned images
+        id: release
+        run: |
+          tag=$(jq -r .tag internal/images/pins.json)
+          mkdir -p dl
+          if gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir dl --pattern vmlinux.gz --pattern core.ext4.gz; then
+            echo "dir=dl" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release $tag yet; the images are built next."
+            echo "dir=out" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: cache
+        if: steps.release.outputs.dir == 'out'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache
+          key: image-cache-${{ hashFiles('images/linux/common.sh', 'images/linux/build.sh', 'images/linux/packages-core.txt', 'images/linux/packages-re.txt', 'images/linux/kernel/build.sh') }}
+          restore-keys: image-cache-
+
+      - name: Build the core image
+        if: steps.release.outputs.dir == 'out'
+        run: |
+          # The build container is the one image.yml pins.
+          build_image=$(sed -n 's/^  BUILD_IMAGE: //p' .github/workflows/image.yml)
+          set -o pipefail
+          docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+            "$build_image" bash images/linux/build.sh core 2>&1 | tee core.log && exit 0
+          { grep -E 'build.sh:|rror|curl: |No such|not found' core.log | tail -n 6 || true; tail -n 4 core.log; } | sed 's/^/::error::/'
+          exit 1
+
+      - name: Build the kernel
+        if: steps.release.outputs.dir == 'out'
+        run: |
+          build_image=$(sed -n 's/^  BUILD_IMAGE: //p' .github/workflows/image.yml)
+          set -o pipefail
+          docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+            "$build_image" bash images/linux/kernel/build.sh 2>&1 | tee kernel.log && exit 0
+          { grep -E 'build.sh:|rror|curl: |No such|not found' kernel.log | tail -n 6 || true; tail -n 4 kernel.log; } | sed 's/^/::error::/'
+          exit 1
+
+      - name: Install the images
+        env:
+          IMAGE_DIR: ${{ steps.release.outputs.dir }}
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$IMAGE_DIR"
+          scripts/vm/images.sh "$IMAGE_DIR"
+
+      # The agent is found next to the galahad binary: bin/galahad-agent.
+      - name: Scan a benign project (exit 0)
+        run: scripts/vm/scan.sh testdata/corpus/benign-go-cli 0
+
+      - name: Scan a project that runs curl when its folder is opened (exit 20)
+        run: scripts/vm/scan.sh testdata/corpus/p1-folderopen-curl 20
+
+      # A scan that went wrong may have left a VM behind.
+      - name: Stop what is left
+        if: always()
+        run: pkill -KILL -x firecracker || true
