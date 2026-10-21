@@ -349,6 +349,69 @@ func TestRunAnalyzeHostGuard(t *testing.T) {
 	}
 }
 
+func TestRunAnalyzeMemoryLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		flags    []string
+		gomemlim string // GOMEMLIMIT; empty means unset, "set-empty" means set to an empty string
+		// expectations
+		wantCode  int
+		wantCalls int   // times the memory limit is set
+		wantLimit int64 // the limit set; 0 means any limit up to 4 GiB
+		wantErr   string
+	}{
+		{name: "default limit is set from the memory of the machine", wantCode: agent.ExitClean, wantCalls: 1},
+		{name: "flag sets the limit", flags: []string{"--memory-limit", "512MiB"}, wantCode: agent.ExitClean, wantCalls: 1, wantLimit: 512 << 20},
+		{name: "flag overrides GOMEMLIMIT", flags: []string{"--memory-limit", "64KiB"}, gomemlim: "1GiB", wantCode: agent.ExitClean, wantCalls: 1, wantLimit: 64 << 10},
+		{name: "GOMEMLIMIT is left alone", gomemlim: "1GiB", wantCode: agent.ExitClean, wantCalls: 0},
+		{name: "empty GOMEMLIMIT counts as unset", gomemlim: "set-empty", wantCode: agent.ExitClean, wantCalls: 1},
+		{name: "bad flag value is a usage error", flags: []string{"--memory-limit", "lots"}, wantCode: agent.ExitUsage, wantCalls: 0, wantErr: "memory-limit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOMEMLIMIT", "") // restored when the test ends
+			switch tt.gomemlim {
+			case "":
+				if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
+					t.Fatal(err)
+				}
+			case "set-empty": // set, but to an empty string
+			default:
+				t.Setenv("GOMEMLIMIT", tt.gomemlim)
+			}
+			tmp := t.TempDir()
+			target := filepath.Join(tmp, "a.txt")
+			mustWrite(t, target, "hello\n")
+			args := append([]string{"analyze", "--unsafe-host"}, tt.flags...)
+			args = append(args, "-o", filepath.Join(tmp, "out"), target)
+			var limits []int64
+			var stdout, stderr bytes.Buffer
+
+			code := agent.RunWithEnv(args, &stdout, &stderr, agent.Env{
+				DetectVM:       func() (bool, string) { return false, "test" },
+				SetMemoryLimit: func(n int64) { limits = append(limits, n) },
+			})
+
+			if code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tt.wantCode, stderr.String())
+			}
+			if len(limits) != tt.wantCalls {
+				t.Fatalf("limit set %d times (%v), want %d", len(limits), limits, tt.wantCalls)
+			}
+			if tt.wantCalls == 1 && tt.wantLimit != 0 && limits[0] != tt.wantLimit {
+				t.Errorf("limit = %d, want %d", limits[0], tt.wantLimit)
+			}
+			if tt.wantCalls == 1 && tt.wantLimit == 0 && (limits[0] <= 0 || limits[0] > 4<<30) {
+				t.Errorf("limit = %d, want from 1 byte to 4 GiB", limits[0])
+			}
+			if tt.wantErr != "" && !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Errorf("stderr %q missing %q", stderr.String(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {

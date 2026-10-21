@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -73,7 +74,11 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if err != nil {
 		return parseError, nil
 	}
-	w := &walker{ctx: ctx, f: f, hdr: end, budget: analyze.MaxFileSize, names: map[string]bool{}, iocs: map[string]bool{}}
+	budget := int64(analyze.MaxFileSize)
+	if b, ok := analyze.Budget(ctx); ok {
+		budget = min(budget, b)
+	}
+	w := &walker{ctx: ctx, f: f, hdr: end, budget: int(budget), names: map[string]bool{}, iocs: map[string]bool{}}
 	w.headers(msg.Header)
 	w.entity(msg.Header.Get, bytes.NewReader(f.Data[end:]), end, 0)
 	if err := ctx.Err(); err != nil {
@@ -223,7 +228,12 @@ func (w *walker) entity(get func(string) string, body io.Reader, off, depth int)
 		mr := multipart.NewReader(body, params["boundary"])
 		for !w.stop && w.ctx.Err() == nil {
 			p, err := mr.NextRawPart()
+			if errors.Is(err, io.EOF) {
+				return
+			}
 			if err != nil {
+				// The parts after a broken one were not read, and a lenient reader might.
+				w.skip(protocol.SkipUnreadable)
 				return
 			}
 			w.entity(p.Header.Get, p, -1, depth+1)

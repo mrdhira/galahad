@@ -217,23 +217,27 @@ func TestSkipUnreadAndHidesContent(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
+		path   string
 		reason string
 		// expectations
 		wantUnread bool
 		wantHides  bool
 	}{
-		{name: "too large is unread but hides nothing", reason: protocol.SkipTooLarge, wantUnread: true},
-		{name: "budget", reason: protocol.SkipBudget, wantUnread: true, wantHides: true},
-		{name: "depth", reason: protocol.SkipDepth, wantUnread: true, wantHides: true},
-		{name: "encrypted", reason: protocol.SkipEncrypted, wantUnread: true, wantHides: true},
-		{name: "unsupported", reason: protocol.SkipUnsupported},
-		{name: "parse error", reason: protocol.SkipParseError},
-		{name: "timeout", reason: protocol.SkipTimeout},
-		{name: "panic", reason: protocol.SkipPanic},
+		{name: "too large is unread but hides nothing", path: "a", reason: protocol.SkipTooLarge, wantUnread: true},
+		{name: "budget", path: "a", reason: protocol.SkipBudget, wantUnread: true, wantHides: true},
+		{name: "depth", path: "a", reason: protocol.SkipDepth, wantUnread: true, wantHides: true},
+		{name: "encrypted", path: "a", reason: protocol.SkipEncrypted, wantUnread: true, wantHides: true},
+		{name: "unsupported top-level file", path: "a", reason: protocol.SkipUnsupported},
+		{name: "unsupported container member", path: "a.zip!/b", reason: protocol.SkipUnsupported},
+		{name: "parse error in a top-level file", path: "a", reason: protocol.SkipParseError},
+		{name: "parse error in a container member", path: "a.zip!/b", reason: protocol.SkipParseError},
+		{name: "member that could not be extracted", path: "a.zip!/b", reason: protocol.SkipUnreadable, wantUnread: true, wantHides: true},
+		{name: "timeout", path: "a", reason: protocol.SkipTimeout, wantUnread: true, wantHides: true},
+		{name: "panic", path: "a", reason: protocol.SkipPanic, wantUnread: true, wantHides: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := protocol.Skip{Path: "a", Reason: tt.reason}
+			s := protocol.Skip{Path: tt.path, Reason: tt.reason}
 			if s.Unread() != tt.wantUnread || s.HidesContent() != tt.wantHides {
 				t.Errorf("Unread() = %v, HidesContent() = %v, want %v, %v", s.Unread(), s.HidesContent(), tt.wantUnread, tt.wantHides)
 			}

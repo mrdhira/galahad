@@ -15,7 +15,11 @@
 package autoexec
 
 import (
+	"bytes"
 	"context"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"path"
 	"regexp"
 	"strings"
@@ -69,15 +73,47 @@ func New() analyze.Analyzer { return analyzer{} }
 
 func (analyzer) Name() string { return "autoexec" }
 
-func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
-	var out analyze.Output
-	if err := ctx.Err(); err != nil {
-		return out, err
-	}
-	rel := f.Path
-	if i := strings.LastIndex(rel, "!/"); i >= 0 {
-		rel = rel[i+2:]
-	}
+// Priority reports whether the file at path, a path on disk, is one that runs
+// code on its own. The engine reads such a file even when the job is past its
+// file or byte limits, so padding a repository cannot hide it. Files that only
+// list where automation exists (Makefile, build.rs, CI workflows) are left out:
+// a large tree has thousands of them, and they cannot run anything by themselves.
+func (analyzer) Priority(path string) bool {
+	t := route(path)
+	return t != none && t != inventoryFile
+}
+
+// trigger is a kind of file that Analyze handles.
+type trigger int
+
+const (
+	none trigger = iota
+	toolBinFile
+	tasksFile
+	workspaceFile
+	settingsFile
+	devcontainerFile
+	packageFile
+	huskyHook
+	huskyGenerated
+	preCommitFile
+	gitConfigFile
+	npmrcFile
+	yarnrcFile
+	yarnrcYMLFile
+	pnpmfile
+	prismaFile
+	gypFile
+	setupFile
+	pyprojectFile
+	envrcFile
+	inventoryFile
+)
+
+// route says which kind of file the path names, matched case-insensitively. The
+// path is relative to the target or, for a container member, to its container
+// (analyze.File.Member), never cut at a "!/" that a directory name may hold.
+func route(rel string) trigger {
 	segs := strings.Split(strings.ToLower(rel), "/")
 	base := segs[len(segs)-1]
 	dirs := segs[:len(segs)-1]
@@ -85,70 +121,154 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if len(dirs) > 0 {
 		parent = dirs[len(dirs)-1]
 	}
-	toolBin := underDir(dirs, "node_modules", ".bin") || underDir(dirs, ".venv", "bin") || underDir(dirs, "venv", "bin") ||
+	inToolBin := underDir(dirs, "node_modules", ".bin") || underDir(dirs, ".venv", "bin") || underDir(dirs, "venv", "bin") ||
 		underDir(dirs, ".venv", "scripts") || underDir(dirs, "venv", "scripts")
-	if slicesContains(dirs, "node_modules") && !toolBin {
-		return out, nil
+	if slicesContains(dirs, "node_modules") && !inToolBin {
+		return none
+	}
+
+	switch {
+	case inToolBin:
+		// Package manager output. repoPath exempts these paths from the settings check, so a script
+		// committed here is graded instead. A real venv's bin/python is a symlink, which is never read.
+		return toolBinFile
+	case base == "tasks.json" && parent == ".vscode":
+		return tasksFile
+	case strings.HasSuffix(base, ".code-workspace"):
+		return workspaceFile
+	case base == "settings.json" && parent == ".vscode":
+		return settingsFile
+	case base == ".devcontainer.json", base == "devcontainer.json" && slicesContains(dirs, ".devcontainer"):
+		return devcontainerFile
+	case base == "package.json":
+		return packageFile
+	case parent == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
+		return huskyHook
+	case parent == "_" && len(dirs) > 1 && dirs[len(dirs)-2] == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
+		// Files husky generates: core.hooksPath may point here, so grade them without an inventory finding.
+		return huskyGenerated
+	case base == ".pre-commit-config.yaml":
+		return preCommitFile
+	case base == "config" && parent == ".git":
+		return gitConfigFile
+	case base == ".npmrc":
+		return npmrcFile
+	case base == ".yarnrc":
+		return yarnrcFile
+	case base == ".yarnrc.yml":
+		return yarnrcYMLFile
+	case base == ".pnpmfile.cjs", base == ".pnpmfile.mjs":
+		return pnpmfile
+	case strings.HasSuffix(base, ".prisma"):
+		return prismaFile
+	case path.Ext(base) == ".gyp", path.Ext(base) == ".gypi":
+		return gypFile
+	case base == "setup.py":
+		return setupFile
+	case base == "pyproject.toml":
+		return pyprojectFile
+	case base == ".envrc":
+		return envrcFile
+	case base == "build.rs", base == "makefile", base == "gnumakefile", isWorkflow(dirs, base):
+		return inventoryFile
+	}
+	return none
+}
+
+func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
+	var out analyze.Output
+	if err := ctx.Err(); err != nil {
+		return out, err
 	}
 	s := &scan{ctx: ctx, f: f, out: &out, counts: map[string]int{}}
 
 	var run func()
-	switch {
-	case toolBin:
-		// Package manager output. repoPath exempts these paths from the settings check, so a script
-		// committed here is graded instead. A real venv's bin/python is a symlink, which is never read.
+	rel := f.Path
+	if f.Member != "" {
+		rel = f.Member
+	}
+	trig := route(rel)
+	switch trig {
+	case toolBinFile, huskyGenerated:
 		run = s.riskFile
-	case base == "tasks.json" && parent == ".vscode":
+	case tasksFile:
 		run = func() { s.json(s.tasks, s.tasksLexical) }
-	case strings.HasSuffix(base, ".code-workspace"):
+	case workspaceFile:
 		run = func() { s.json(func(root *node) { s.tasks(root.get("tasks")) }, s.tasksLexical) }
-	case base == "settings.json" && parent == ".vscode":
+	case settingsFile:
 		run = func() { s.json(s.settings, nil) }
-	case base == ".devcontainer.json", base == "devcontainer.json" && slicesContains(dirs, ".devcontainer"):
+	case devcontainerFile:
 		run = func() { s.json(s.devcontainer, s.devcontainerLexical) }
-	case base == "package.json":
+	case packageFile:
 		run = func() { s.json(s.packageJSON, nil) }
-	case parent == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
+	case huskyHook:
 		run = s.husky
-	case parent == "_" && len(dirs) > 1 && dirs[len(dirs)-2] == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
-		// Files husky generates: core.hooksPath may point here, so grade them without an inventory finding.
-		run = s.riskFile
-	case base == ".pre-commit-config.yaml":
+	case preCommitFile:
 		run = s.preCommit
-	case base == "config" && parent == ".git":
+	case gitConfigFile:
 		run = s.gitConfig
-	case base == ".npmrc":
+	case npmrcFile:
 		run = s.npmrc
-	case base == ".yarnrc":
+	case yarnrcFile:
 		run = s.yarnrc
-	case base == ".yarnrc.yml":
+	case yarnrcYMLFile:
 		run = s.yarnrcYML
-	case base == ".pnpmfile.cjs", base == ".pnpmfile.mjs":
+	case pnpmfile:
 		// Reported before the size check, so a padded file is not a way past the rule.
 		s.add(rulePnpm, 0)
 		run = s.riskFile
-	case strings.HasSuffix(base, ".prisma"):
+	case prismaFile:
 		run = s.prisma
-	case path.Ext(base) == ".gyp", path.Ext(base) == ".gypi":
+	case gypFile:
 		run = s.gyp
-	case base == "setup.py":
+	case setupFile:
 		run = s.setupPy
-	case base == "pyproject.toml":
+	case pyprojectFile:
 		run = s.pyproject
-	case base == ".envrc":
+	case envrcFile:
 		run = s.envrc
-	case base == "build.rs", base == "makefile", base == "gnumakefile", isWorkflow(dirs, base):
+	case inventoryFile:
 		s.add(ruleOther, 0)
 		return out, nil
 	default:
 		return out, nil
 	}
 	if len(f.Data) > analyze.MaxConfigSize {
-		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: protocol.SkipTooLarge})
+		// Too big to read, and a file that runs code is where a payload hides behind
+		// padding. A copied interpreter or native tool in a tool directory is not a
+		// config file, but only if it really is an executable: a script can start with
+		// the magic bytes of one, because a shell skips a first line it cannot run.
+		reason := protocol.SkipBudget
+		if trig == toolBinFile && isExecutable(f.Data) {
+			reason = protocol.SkipTooLarge
+		}
+		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: reason})
 		return out, nil
 	}
 	run()
 	return out, nil
+}
+
+// isExecutable reports whether data parses as an ELF, PE or Mach-O file.
+func isExecutable(data []byte) bool {
+	r := bytes.NewReader(data)
+	if f, err := elf.NewFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	if f, err := pe.NewFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	if f, err := macho.NewFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	if f, err := macho.NewFatFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	return false
 }
 
 func isWorkflow(dirs []string, base string) bool {
