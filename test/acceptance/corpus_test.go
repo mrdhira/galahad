@@ -50,6 +50,39 @@ func corpusWithBig(name, bigName string, size int64) func(t *testing.T) string {
 	}
 }
 
+// paddedPDF returns a builder for a PDF with n empty objects followed by an OpenAction
+// that launches a program, like padding that pushes the action past the object limit.
+func paddedPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var b strings.Builder
+		b.WriteString("%PDF-1.7\n")
+		for i := range n {
+			fmt.Fprintf(&b, "%d 0 obj\nendobj\n", i+10)
+		}
+		b.WriteString("1 0 obj\n<< /Type /Catalog /OpenAction 2 0 R >>\nendobj\n")
+		b.WriteString("2 0 obj\n<< /S /Launch /F (cmd.exe) >>\nendobj\n")
+		b.WriteString("trailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, []byte(b.String()))
+	}
+}
+
+// pagedPDF returns a builder for a benign PDF with n pages, each with a link.
+func pagedPDF(n int) func(t *testing.T, dest string) {
+	return func(t *testing.T, dest string) {
+		var b, kids strings.Builder
+		b.WriteString("%PDF-1.7\n")
+		b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction [10 0 R /Fit] >>\nendobj\n")
+		for i := range n {
+			fmt.Fprintf(&kids, "%d 0 R ", 10+2*i)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [%d 0 R] >>\nendobj\n", 10+2*i, 11+2*i)
+			fmt.Fprintf(&b, "%d 0 obj\n<< /Type /Annot /Subtype /Link /A << /S /URI /URI (https://docs.example.test/p%d) >> >>\nendobj\n", 11+2*i, i)
+		}
+		fmt.Fprintf(&b, "2 0 obj\n<< /Type /Pages /Kids [%s] /Count %d >>\nendobj\n", kids.String(), n)
+		b.WriteString("trailer\n<< /Root 1 0 R >>\n%%EOF\n")
+		writeBytes(t, dest, []byte(b.String()))
+	}
+}
+
 // payloadAs returns a builder for a zip that holds the tasks file of p1-folderopen-curl under name.
 func payloadAs(name string) func(t *testing.T, dest string) {
 	return func(t *testing.T, dest string) {
@@ -190,6 +223,11 @@ func TestCorpus(t *testing.T) {
 			name:   "p4-pdf-openaction-uri: OpenAction to a URI action",
 			target: corpusDir("p4-pdf-openaction-uri"), wantCode: 10,
 			wantRules: []string{"GAL-PDF-002 statement.pdf:3"},
+		},
+		{
+			name:     "p4-pdf-padding: a Launch action behind more objects than the analyzer reads is not clean (built)",
+			target:   builtFile("padded.pdf", paddedPDF(100001)),
+			wantCode: 10, wantSkips: 1,
 		},
 		{
 			name: "p5-lnk-in-zip: decoy pdf name hides a shortcut with a PowerShell launcher (built)",
@@ -407,6 +445,10 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "benign-pdf: destination OpenAction and one link",
 			target: corpusDir("benign-pdf"), wantCode: 0, wantQuiet: true,
+		},
+		{
+			name:   "benign-pdf with 300 pages and a link on each (built)",
+			target: builtFile("pages.pdf", pagedPDF(300)), wantCode: 0, wantQuiet: true,
 		},
 		{
 			name:   "benign-docx: internal and external hyperlinks (built)",

@@ -7,8 +7,11 @@
 // cannot be read is reported twice: as GAL-PDF-007 (low) with the object line,
 // and as one coverage Skip per file, so the verdict cannot claim a full
 // analysis. The Skip reason is "encrypted" for a document with an /Encrypt
-// entry, "too_large" when the object or token limit was hit, and "unsupported"
-// when a non-image stream (always an object stream) could not be decoded.
+// entry, "budget" when the object or token limit was hit (the file has more
+// objects or tokens than the analyzer reads, so a payload could sit in the part
+// that was not read), and "unsupported" when a non-image stream (always an
+// object stream) could not be decoded. A whole file over the size limit is
+// skipped by the engine as "too_large" before this analyzer runs.
 // Image streams are never decoded and never reported.
 package pdf
 
@@ -71,7 +74,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if f.Kind != ident.PDF {
 		return analyze.Output{}, nil
 	}
-	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, lineNo: 1}
+	s := &scanner{ctx: ctx, f: f, byNum: map[int]*object{}, hits: map[string]*hit{}, seenURI: map[string]bool{}, memo: map[int]uint8{}, strs: map[int]stringVal{}, lineNo: 1}
 	return s.run()
 }
 
@@ -140,6 +143,12 @@ func (r region) where(off int) (int, string) {
 
 type hit struct{ evs []evidence }
 
+// stringVal is the cached result of stringAt for one object.
+type stringVal struct {
+	val string
+	ok  bool
+}
+
 type scanner struct {
 	ctx       context.Context
 	f         analyze.File
@@ -148,6 +157,7 @@ type scanner struct {
 	hits      map[string]*hit
 	seenURI   map[string]bool
 	memo      map[int]uint8 // objectIsAction results: 1 running, 2 no, 3 yes
+	strs      map[int]stringVal
 	iocs      []protocol.IOC
 	decoded   int
 	lineOff   int // lineAt cursor: offset in the file and its line number
@@ -195,7 +205,7 @@ func (s *scanner) run() (analyze.Output, error) {
 	}
 	out.IOCs = s.iocs
 	if s.tooMany || s.truncated {
-		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipTooLarge})
+		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipBudget})
 	}
 	if s.encrypted {
 		out.Skips = append(out.Skips, protocol.Skip{Path: s.f.Path, Reason: protocol.SkipEncrypted})
@@ -239,6 +249,20 @@ func (s *scanner) scanObject(o *object) error {
 func (s *scanner) full(r protocol.Rule) bool {
 	h := s.hits[r.ID]
 	return h != nil && len(h.evs) >= maxEvidence
+}
+
+// hasKey reports whether the rule already has a hit with the evidence key.
+func (s *scanner) hasKey(r protocol.Rule, key int) bool {
+	h := s.hits[r.ID]
+	if h == nil {
+		return false
+	}
+	for _, e := range h.evs {
+		if e.key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // add records a hit for the rule at the token buf[off] of the region.

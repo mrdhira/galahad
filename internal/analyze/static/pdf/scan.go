@@ -79,7 +79,8 @@ func (s *scanner) scanRegion(reg region) error {
 }
 
 // stringAt returns the string value at toks[i]: a literal or hex string, or a
-// reference to an object that holds one.
+// reference to an object that holds one. The result for a referenced object is
+// cached, so many references to one large string cost one copy of it.
 func (s *scanner) stringAt(toks []token, i int) (string, bool) {
 	if i >= len(toks) {
 		return "", false
@@ -91,15 +92,20 @@ func (s *scanner) stringAt(toks []token, i int) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	if c, ok := s.strs[n]; ok {
+		return c.val, c.ok
+	}
 	o := s.byNum[n]
 	if o == nil {
 		return "", false
 	}
+	var c stringVal
 	first, _ := tokenize(o.buf[o.ds:o.de], 1)
 	if len(first) == 1 && (first[0].kind == tStr || first[0].kind == tHex) {
-		return first[0].val, true
+		c = stringVal{first[0].val, true}
 	}
-	return "", false
+	s.strs[n] = c
+	return c.val, c.ok
 }
 
 // addScript records /JS at toks[i] and, when its value is a hex string or a
@@ -127,12 +133,16 @@ func (s *scanner) addScript(reg region, toks []token, i int) {
 	if o == nil {
 		return
 	}
+	key := evidenceKey(keyObject, o.hdr)
+	if s.hasKey(ruleJS, key) {
+		return
+	}
 	body, ok := s.stringAt(toks, i+1)
 	if !ok && o.content != nil {
 		body = string(o.content[:min(len(o.content), maxSnippetRaw)])
 	}
 	if body != "" {
-		s.addAt(ruleJS, o.hdr, scriptSnippet(body), evidenceKey(keyObject, o.hdr))
+		s.addAt(ruleJS, o.hdr, scriptSnippet(body), key)
 	}
 }
 

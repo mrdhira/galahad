@@ -107,6 +107,7 @@ func TestAnalyze(t *testing.T) {
 		return stream(5, fmt.Sprintf("/Type /ObjStm /N 2 /First %d /Filter /FlateDecode", first), deflate(t, body))
 	}
 	manyObjs := strings.Repeat("1 0 obj\nendobj\n", pdf.MaxObjects+1)
+	sharedStr := "(" + strings.Repeat("A", 2<<20) + ")"
 	fiveBombs := ""
 	for i := range 5 {
 		fiveBombs += stream(i+1, "/Filter /FlateDecode", deflate(t, zeros(pdf.MaxStreamBytes)))
@@ -396,11 +397,25 @@ func TestAnalyze(t *testing.T) {
 			wantRules: []string{"GAL-PDF-001"},
 		},
 		{
-			name:      "a region over the token limit is reported as too_large",
+			name:      "a region over the token limit is reported as budget",
 			kind:      ident.PDF,
 			data:      doc(obj(1, "<< /S /Launch /A ["+strings.Repeat("0 ", 1<<20+10)+"] >>")),
 			wantRules: []string{"GAL-PDF-003"},
-			wantSkips: []string{"too_large"},
+			wantSkips: []string{"budget"},
+		},
+		{
+			name:              "many script references to one 2 MiB string keep the finding within the time limit",
+			kind:              ident.PDF,
+			data:              doc(obj(1, "<< "+strings.Repeat("/JS 3 0 R ", 200000)+">>"), obj(3, sharedStr)),
+			timeout:           30 * time.Second,
+			wantRules:         []string{"GAL-PDF-001"},
+			wantEvidenceLines: map[string][]int{"GAL-PDF-001": {3, 5}},
+		},
+		{
+			name:    "many URI references to one 2 MiB string finish within the time limit and are dropped as too long",
+			kind:    ident.PDF,
+			data:    doc(obj(1, "<< "+strings.Repeat("/URI 3 0 R ", 200000)+">>"), obj(3, sharedStr)),
+			timeout: 30 * time.Second,
 		},
 		{
 			name:      "many references to one large object are examined once",
@@ -510,7 +525,7 @@ func TestAnalyze(t *testing.T) {
 			name:      "too many objects",
 			kind:      ident.PDF,
 			data:      doc(manyObjs),
-			wantSkips: []string{"too_large"},
+			wantSkips: []string{"budget"},
 		},
 		{
 			name:    "cancelled context",
