@@ -15,13 +15,16 @@
 package autoexec
 
 import (
+	"bytes"
 	"context"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"path"
 	"regexp"
 	"strings"
 
 	"github.com/mrdhira/galahad/internal/analyze"
-	"github.com/mrdhira/galahad/internal/analyze/ident"
 	"github.com/mrdhira/galahad/internal/analyze/static/signals"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
@@ -232,9 +235,11 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	}
 	if len(f.Data) > analyze.MaxConfigSize {
 		// Too big to read, and a file that runs code is where a payload hides behind
-		// padding. A copied interpreter or native tool is not a config file, though.
+		// padding. A copied interpreter or native tool in a tool directory is not a
+		// config file, but only if it really is an executable: a script can start with
+		// the magic bytes of one, because a shell skips a first line it cannot run.
 		reason := protocol.SkipBudget
-		if (trig == toolBinFile || trig == huskyGenerated) && (f.Kind == ident.ELF || f.Kind == ident.PE || f.Kind == ident.MachO) {
+		if trig == toolBinFile && isExecutable(f.Data) {
 			reason = protocol.SkipTooLarge
 		}
 		out.Skips = append(out.Skips, protocol.Skip{Path: f.Path, Reason: reason})
@@ -242,6 +247,28 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	}
 	run()
 	return out, nil
+}
+
+// isExecutable reports whether data parses as an ELF, PE or Mach-O file.
+func isExecutable(data []byte) bool {
+	r := bytes.NewReader(data)
+	if f, err := elf.NewFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	if f, err := pe.NewFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	if f, err := macho.NewFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	if f, err := macho.NewFatFile(r); err == nil {
+		_ = f.Close()
+		return true
+	}
+	return false
 }
 
 func isWorkflow(dirs []string, base string) bool {

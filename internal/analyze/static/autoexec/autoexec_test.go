@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/mrdhira/galahad/internal/analyze"
-	"github.com/mrdhira/galahad/internal/analyze/ident"
 	"github.com/mrdhira/galahad/internal/analyze/static/autoexec"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
@@ -367,24 +366,61 @@ func TestAnalyzePaddedPnpmfile(t *testing.T) {
 	}
 }
 
-func TestAnalyzeOversizeKind(t *testing.T) {
+// padded returns head followed by zeros, one byte over the config size limit.
+func padded(head []byte) string {
+	return string(head) + strings.Repeat("\x00", analyze.MaxConfigSize+1-len(head))
+}
+
+// elfHeader is the header of an ELF64 file with no sections or segments, which debug/elf reads.
+func elfHeader() []byte {
+	h := make([]byte, 64)
+	copy(h, "\x7fELF\x02\x01\x01")
+	h[16], h[18], h[20], h[52], h[54], h[58] = 2, 62, 1, 64, 56, 64 // type, machine, version, sizes of the header and its entries
+	return h
+}
+
+// machoHeader is the header of a 64-bit Mach-O file with no load commands.
+func machoHeader() []byte {
+	h := make([]byte, 32)
+	copy(h, "\xcf\xfa\xed\xfe")
+	h[4], h[7], h[12] = 12, 1, 2 // arm64, executable
+	return h
+}
+
+// peHeader is a DOS header that points at a PE header with no sections.
+func peHeader() []byte {
+	h := make([]byte, 0x80)
+	copy(h, "MZ")
+	h[0x3c] = 0x40
+	copy(h[0x40:], "PE\x00\x00")
+	h[0x44], h[0x45] = 0x64, 0x86 // amd64
+	return h
+}
+
+func TestAnalyzeOversizeExecutable(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
 		path string
-		kind ident.Kind
+		data string
 		// expectations
 		wantReason string
 	}{
-		{name: "copied interpreter in a virtualenv is too large and not a hidden payload", path: ".venv/bin/python", kind: ident.ELF, wantReason: "too_large"},
-		{name: "native tool in node_modules/.bin", path: "node_modules/.bin/esbuild", kind: ident.MachO, wantReason: "too_large"},
-		{name: "Windows launcher in a virtualenv", path: "venv/Scripts/python.exe", kind: ident.PE, wantReason: "too_large"},
-		{name: "text script in a virtualenv hides behind its size", path: ".venv/bin/activate", kind: ident.Text, wantReason: "budget"},
-		{name: "executable named like a tasks file still hides", path: ".vscode/tasks.json", kind: ident.ELF, wantReason: "budget"},
+		{name: "copied ELF interpreter in a virtualenv is too large and not a hidden payload", path: ".venv/bin/python", data: padded(elfHeader()), wantReason: "too_large"},
+		{name: "native Mach-O tool in node_modules/.bin", path: "node_modules/.bin/esbuild", data: padded(machoHeader()), wantReason: "too_large"},
+		{name: "Windows launcher in a virtualenv", path: "venv/Scripts/python.exe", data: padded(peHeader()), wantReason: "too_large"},
+		{name: "script in a virtualenv hides behind its size", path: ".venv/bin/activate", data: padded([]byte("#!/bin/sh\n")), wantReason: "budget"},
+		{name: "script that starts with the ELF magic is not an executable", path: ".venv/bin/activate", data: padded([]byte("\x7fELF\x02\x01\x01\n")), wantReason: "budget"},
+		{name: "PE magic alone is not an executable", path: ".venv/Scripts/activate.bat", data: padded([]byte("MZ\n")), wantReason: "budget"},
+		{name: "husky hook that starts with the ELF magic still hides", path: ".husky/pre-commit", data: padded([]byte("\x7fELF\x02\x01\x01\n")), wantReason: "budget"},
+		{name: "real ELF as a husky hook still hides, since git runs it", path: ".husky/pre-commit", data: padded(elfHeader()), wantReason: "budget"},
+		{name: "husky generated file with the ELF magic still hides", path: ".husky/_/pre-commit", data: padded([]byte("\x7fELF\x02\x01\x01\n")), wantReason: "budget"},
+		{name: "real ELF in the husky generated directory still hides", path: ".husky/_/pre-commit", data: padded(elfHeader()), wantReason: "budget"},
+		{name: "real ELF named like a tasks file still hides", path: ".vscode/tasks.json", data: padded(elfHeader()), wantReason: "budget"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Kind: tt.kind, Data: make([]byte, analyze.MaxConfigSize+1)}
+			f := analyze.File{Path: tt.path, Name: tt.path[strings.LastIndex(tt.path, "/")+1:], Data: []byte(tt.data)}
 
 			out, err := autoexec.New().Analyze(context.Background(), f)
 

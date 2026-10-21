@@ -38,6 +38,14 @@ func zipUnsupportedMember(t *testing.T, dest string) {
 	writeBytes(t, dest, buf.Bytes())
 }
 
+// elfHeader is the header of an ELF64 file with no sections or segments, which debug/elf reads.
+func elfHeader() string {
+	h := make([]byte, 64)
+	copy(h, "\x7fELF\x02\x01\x01")
+	h[16], h[18], h[20], h[52], h[54], h[58] = 2, 62, 1, 64, 56, 64
+	return string(h)
+}
+
 // tarBadHeader writes a tar with a benign a.txt, then a header with a bad checksum, then a folder-open
 // task. GNU tar skips the bad header and still extracts the task.
 func tarBadHeader(t *testing.T, dest string) {
@@ -91,11 +99,35 @@ func TestSkipAccounting(t *testing.T) {
 		{
 			name: "copied interpreter in a virtualenv is not a hidden payload",
 			setup: filesRepo(map[string]string{
-				".venv/bin/python": "\x7fELF\x02\x01\x01" + strings.Repeat("\x00", 2<<20),
+				".venv/bin/python": elfHeader() + strings.Repeat("\x00", 2<<20),
 				"app.py":           "print('hi')\n",
 			}),
 			wantCode: 0,
 			wantSkip: "too_large",
+		},
+		{
+			name: "virtualenv script that starts with the ELF magic is not a copied interpreter",
+			setup: filesRepo(map[string]string{
+				".venv/bin/activate": "\x7fELF\x02\x01\x01\n" + strings.Repeat("\x00", 1100<<10),
+			}),
+			wantCode: 10,
+			wantSkip: "budget",
+		},
+		{
+			name: "husky generated hook that starts with the ELF magic is not a copied executable",
+			setup: filesRepo(map[string]string{
+				".husky/_/pre-commit": "\x7fELF\x02\x01\x01\n" + strings.Repeat("\x00", 1100<<10),
+			}),
+			wantCode: 10,
+			wantSkip: "budget",
+		},
+		{
+			name: "husky hook that is a real ELF still hides, since git runs it",
+			setup: filesRepo(map[string]string{
+				".husky/pre-commit": elfHeader() + strings.Repeat("\x00", 1100<<10),
+			}),
+			wantCode: 10,
+			wantSkip: "budget",
 		},
 		{
 			name: "7z inside a zip is unsupported but not a hidden payload",

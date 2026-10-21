@@ -241,13 +241,13 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 		j.res.Coverage.Truncated = true
 		j.extraFiles++
 		j.extraBytes += size
-		j.skip(cp, j.unreadReason(cp, ident.Identify(name, data[:min(len(data), identifyWindow)])))
+		j.skip(cp, j.unreadReason(cp))
 		return
 	}
 	if extraOnly || size > limit {
 		j.res.Coverage.Truncated = true
 		if size > MaxFileSize || !j.priority(cp) {
-			j.skip(cp, j.unreadReason(cp, ident.Identify(name, data[:min(len(data), identifyWindow)])))
+			j.skip(cp, j.unreadReason(cp))
 			return
 		}
 		j.extra(ctx, File{Path: cp, Name: name, Data: data}, h.Sum(nil))
@@ -262,10 +262,9 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 }
 
 // unreadReason is the skip for a file over a size limit that no analyzer reads.
-// An auto-run file that stays unread hides content, but an executable in a
-// tool directory, such as a copied interpreter, is not a config file.
-func (j *job) unreadReason(path string, kind ident.Kind) string {
-	if j.priority(path) && kind != ident.ELF && kind != ident.PE && kind != ident.MachO {
+// An auto-run file that stays unread hides content, whatever its first bytes say.
+func (j *job) unreadReason(path string) string {
+	if j.priority(path) {
 		return protocol.SkipBudget
 	}
 	return protocol.SkipTooLarge
@@ -339,7 +338,7 @@ func (j *job) accept(c File, size int64, sum []byte) (File, bool) {
 		if c.Member != "" {
 			p = c.Member
 		}
-		j.skip(c.Path, j.unreadReason(p, kind))
+		j.skip(c.Path, j.unreadReason(p))
 		return File{}, false
 	}
 	info.Entropy = ident.Entropy(c.Data)
@@ -512,7 +511,7 @@ func (j *job) extraMember(ctx context.Context, c File) {
 	case c.Depth > MaxNesting:
 		j.skip(c.Path, protocol.SkipDepth)
 	case int64(len(c.Data)) > MaxFileSize:
-		j.skip(c.Path, j.unreadReason(c.Member, ident.Identify(c.Name, c.Data[:identifyWindow])))
+		j.skip(c.Path, j.unreadReason(c.Member))
 	default:
 		sum := sha256.Sum256(c.Data)
 		j.extra(ctx, c, sum[:])

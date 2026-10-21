@@ -130,16 +130,10 @@ func TestLimits(t *testing.T) {
 			wantAt:   map[string]string{"GAL-AUTOEXEC-001": "big.zip!/in2.zip!/.vscode/tasks.json:7"},
 		},
 		{
-			name: "benign jar after 19950 files stays clean",
+			name: "benign jars before and across the file cap stay clean",
 			setup: func(t *testing.T) string {
-				return paddedRepo(19950, map[string][]byte{"z.jar": smallJar(t)})(t)
-			},
-			wantCode: 0,
-		},
-		{
-			name: "the same jar before 25000 files stays clean",
-			setup: func(t *testing.T) string {
-				return paddedRepo(25000, map[string][]byte{"0.jar": smallJar(t)})(t)
+				// 0.jar comes first. b.jar follows 19850 files, so its members cross the cap.
+				return paddedRepo(19850, map[string][]byte{"0.jar": smallJar(t), "b.jar": smallJar(t)})(t)
 			},
 			wantCode: 0,
 		},
