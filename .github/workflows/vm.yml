@@ -50,7 +50,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           # The trigger is asynchronous: wait for udev, then up to 10 s more for the new mode.
-          sudo udevadm settle --timeout=10
+          sudo udevadm settle --timeout=10 || echo "::warning::udevadm settle timed out; polling /dev/kvm"
           for _ in $(seq 1 20); do
             if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then break; fi
             sleep 0.5
