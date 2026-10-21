@@ -88,8 +88,8 @@ func TestRunRemote(t *testing.T) {
 			wantErr: "the result is for a dir, the input is a file",
 		},
 		{
-			name: "a source that is not supported", source: protocol.SourceGit, wantNoJob: true,
-			wantErr: `the source "git" is not supported`,
+			name: "a source that is not supported", source: "ftp", wantNoJob: true,
+			wantErr: `the source "ftp" is not supported`,
 		},
 		{
 			name: "a link that is too long", source: protocol.SourceURL, target: "https://files.example.com/" + strings.Repeat("a", 2100), wantNoJob: true,

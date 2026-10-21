@@ -132,9 +132,10 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	// A net-probe job takes its input like a local scan, and also asks the proxy for job.URL.
 	local := job.Kind == protocol.KindScan && job.Source == protocol.SourceLocal
 	probe := job.Kind == protocol.KindNetProbe && netProbeEnabled
-	// A url or drive job has no input of its own: the host sends an empty stream, and the guest
-	// downloads job.URL and names the file itself.
-	remote := job.Kind == protocol.KindScan && (job.Source == protocol.SourceURL || job.Source == protocol.SourceDrive)
+	// A url, drive or git job has no input of its own: the host sends an empty stream, and the guest
+	// fetches job.URL itself and, for a link to a file, names the file.
+	remote := job.Kind == protocol.KindScan && (job.Source == protocol.SourceURL || job.Source == protocol.SourceDrive || job.Source == protocol.SourceGit)
+	clone := remote && job.Source == protocol.SourceGit
 	if !local && !probe && !remote {
 		return fail(protocol.CodeProtocol, "job kind %q with source %q is not supported", job.Kind, job.Source)
 	}
@@ -180,7 +181,12 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	}
 
 	var downloaded ingest.File
-	if remote {
+	switch {
+	case clone:
+		if err := cloneRepo(ingestCtx, host, job, relay.addr, dir); err != nil {
+			return fail(ingestCode(err), "ingest: %w", err)
+		}
+	case remote:
 		if downloaded, err = download(ingestCtx, job, relay.addr, dir); err != nil {
 			return fail(ingestCode(err), "ingest: %w", err)
 		}
@@ -199,6 +205,9 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fail(protocol.CodeIngest, "the input name %q is not a single local name", protocol.CleanPath(job.Name))
 	}
 	target := filepath.Join(dir, job.Name)
+	if clone {
+		target = dir // the repository is the whole directory
+	}
 	info, err := os.Lstat(target)
 	if err != nil {
 		return fail(protocol.CodeIngest, "the input has no entry named %q", protocol.CleanPath(job.Name))
@@ -223,7 +232,7 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fmt.Errorf("send tools log: %w", err)
 	}
 	res.Tool = protocol.Tool{Name: "galahad-agent", Version: version}
-	if remote && res.Target.SHA256 != downloaded.SHA256 {
+	if remote && !clone && res.Target.SHA256 != downloaded.SHA256 {
 		return fmt.Errorf("the analyzed file has sha256 %s, the download had %s", res.Target.SHA256, downloaded.SHA256)
 	}
 	if stream.TooDeep > 0 && len(res.Coverage.Skipped) < protocol.MaxSkipped {

@@ -38,6 +38,7 @@ Commands:
               --image core|re  --timeout <duration>  --cpus <n>  --memory <MiB>  --no-network
               --allow-host <host>  (repeatable: let the sandbox reach one more host)
               --timeout 0, or no --timeout, means the default of the image: 10m for core, 20m for re
+              --git  (clone an https link as a Git repository)  --submodules  (also fetch the submodules of a Git repository)
   setup     Download and verify the pinned Firecracker and guest images: galahad setup [--image core|re]
   doctor    Check that this host can run scans, and say how to fix what is wrong
   report    Show the report of a past scan: galahad report <id> [--json]
