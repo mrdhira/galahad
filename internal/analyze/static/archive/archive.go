@@ -12,7 +12,9 @@ import (
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"path"
@@ -31,6 +33,12 @@ const (
 	MaxArchiveBytes = 256 << 20 // decompressed bytes per archive
 	minRatioBytes   = 1 << 20   // the ratio check applies only above this size
 	tarHeadLen      = 512
+	partHeadLen     = 512         // bytes of an OOXML part checked against its name
+	eocdWindow      = 64<<10 + 22 // where the end of central directory record of a zip may start
+	eocdLen         = 22          // fixed part of the end of central directory record
+	dirHeadLen      = 46          // fixed part of a central directory record
+	localHeadLen    = 30          // fixed part of a zip local file header
+	max32           = 1<<32 - 1   // a 32-bit zip field that is too small, so the zip64 field holds the value
 )
 
 var (
@@ -38,6 +46,17 @@ var (
 	ruleLink      = protocol.Rule{ID: "GAL-ARCHIVE-002", Severity: protocol.SeverityMedium, Title: "Link entry in archive"}
 	ruleBomb      = protocol.Rule{ID: "GAL-ARCHIVE-003", Severity: protocol.SeverityHigh, Title: "Decompression bomb"}
 	ruleEncrypted = protocol.Rule{ID: "GAL-ARCHIVE-004", Severity: protocol.SeverityMedium, Title: "Encrypted archive entries could not be inspected", Attack: "T1027.013"}
+	// Legitimate archives use "/". The members are still analyzed under the "/" name,
+	// so this is only a hint, not enough to be suspicious alone.
+	ruleBackslash = protocol.Rule{ID: "GAL-ARCHIVE-005", Severity: protocol.SeverityLow, Title: "Archive entry name uses backslash separators"}
+	ruleAppended  = protocol.Rule{ID: "GAL-ARCHIVE-006", Severity: protocol.SeverityLow, Title: "Executable with an appended zip archive"}
+	ruleNames     = protocol.Rule{ID: "GAL-ARCHIVE-007", Severity: protocol.SeverityMedium, Title: "Zip entry names disagree"}
+)
+
+var (
+	localSig = []byte("PK\x03\x04")
+	dirSig   = []byte("PK\x01\x02")
+	eocdSig  = []byte("PK\x05\x06")
 )
 
 var errBomb = errors.New("archive expands beyond its limits")
@@ -51,10 +70,21 @@ func (analyzer) Name() string { return "archive" }
 
 func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
 	u := &unpack{ctx: ctx, f: f, left: allowance(len(f.Data))}
+
 	var err error
+	switch f.Kind {
+	case ident.Zip, ident.OOXML, ident.Tar, ident.Gzip, ident.Bzip2:
+		if f.Depth >= analyze.MaxNesting {
+			// The engine would drop the members, so do not decompress them.
+			u.skip(f.Path, protocol.SkipDepth)
+			return u.out, nil
+		}
+	}
 	switch f.Kind {
 	case ident.Zip, ident.OOXML:
 		err = u.zip()
+	case ident.PE, ident.ELF, ident.MachO:
+		err = u.appended()
 	case ident.Tar:
 		err = u.tar(u.cap(bytes.NewReader(f.Data)))
 	case ident.Gzip:
@@ -66,6 +96,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 			u.skip(f.Path, protocol.SkipUnsupported)
 		}
 	}
+	u.flush()
 	return u.out, err
 }
 
@@ -88,6 +119,38 @@ type unpack struct {
 	left    int64 // decompressed bytes still allowed
 	entries int
 	bombed  bool
+
+	// Findings that every entry of a bad archive would raise are kept as one each.
+	backslash, names tally
+}
+
+// tally groups the entries of one archive that raise the same finding, so that a
+// flood of them cannot fill the findings cap before the members are analyzed.
+type tally struct {
+	n      int
+	path   string // evidence path of the first
+	detail string // what the first looked like
+}
+
+func (t *tally) add(path, detail string) {
+	if t.n == 0 {
+		t.path, t.detail = path, detail
+	}
+	t.n++
+}
+
+// flush reports the grouped findings, once the entries are all seen.
+func (u *unpack) flush() {
+	for _, g := range []struct {
+		rule protocol.Rule
+		t    *tally
+	}{{ruleBackslash, &u.backslash}, {ruleNames, &u.names}} {
+		if g.t.n > 0 {
+			u.out.Findings = append(u.out.Findings, g.rule.Finding(protocol.Evidence{
+				Path: g.t.path, Snippet: protocol.Snippet(fmt.Sprintf("%d in this archive, first: %s", g.t.n, g.t.detail)),
+			}))
+		}
+	}
 }
 
 func (u *unpack) member(name string) string { return u.f.Path + "!/" + protocol.CleanPath(name) }
@@ -127,13 +190,17 @@ func (u *unpack) admit(name string) (ok, stop bool) {
 		}))
 		return false, false
 	}
+	if strings.Contains(name, `\`) {
+		// The engine turns the backslash into a slash, so keep the raw name here.
+		u.backslash.add(u.member(name), name)
+	}
 	return true, false
 }
 
 // escapes reports names that would leave the extraction directory: parent
 // segments, absolute paths, drive letters and UNC paths, with either separator.
 func escapes(name string) bool {
-	n := strings.ReplaceAll(name, `\`, "/")
+	n := fsName(name)
 	if strings.HasPrefix(n, "/") {
 		return true
 	}
@@ -142,6 +209,9 @@ func escapes(name string) bool {
 	}
 	return slices.Contains(strings.Split(n, "/"), "..")
 }
+
+// fsName is the name as a Windows extractor reads it, with "/" as the only separator.
+func fsName(name string) string { return strings.ReplaceAll(name, `\`, "/") }
 
 func (u *unpack) link(name, target string) {
 	snip := name
@@ -185,35 +255,203 @@ func (u *unpack) bomb(name string) {
 
 // ooxmlPart reports a member the office analyzer already reads, or that is
 // plain package markup it has nothing to find in: the root [Content_Types].xml
-// (any case), a vbaProject.bin anywhere (office scans it on the parent), and
-// .xml or .rels files below the standard package folders when no path segment
-// is hidden (the package's own .rels files aside). Everything else, such as media, embeddings, scripts and
-// dot-folders, is unpacked like any other zip member. The names are not
-// normalized, so a backslash name stays a plain member.
+// (any case), a vbaProject.bin or .rels file anywhere (office scans them on the
+// parent), and .xml files below the standard package folders when no path segment
+// is hidden. Everything else, such as media, embeddings, scripts and dot-folders,
+// is unpacked like any other zip member. The names are not normalized, so a
+// backslash name stays a plain member. The bytes of a match must also fit the
+// name (see inert).
 func ooxmlPart(name string) bool {
 	lower := strings.ToLower(name)
-	if lower == "[content_types].xml" || path.Base(lower) == "vbaproject.bin" {
+	ext := path.Ext(lower)
+	if lower == "[content_types].xml" || ext == ".rels" || path.Base(lower) == "vbaproject.bin" {
 		return true
 	}
 	segs := strings.Split(lower, "/")
-	if len(segs) < 2 || !slices.Contains([]string{"_rels", "docprops", "customxml", "word", "xl", "ppt"}, segs[0]) {
+	if len(segs) < 2 || !slices.Contains([]string{"_rels", "docprops", "customxml", "word", "xl", "ppt"}, segs[0]) || ext != ".xml" {
 		return false
-	}
-	if ext := path.Ext(lower); ext != ".xml" && ext != ".rels" {
-		return false
-	}
-	if segs[len(segs)-1] == ".rels" { // the package relationships part
-		segs = segs[:len(segs)-1]
 	}
 	return !slices.ContainsFunc(segs, func(seg string) bool { return strings.HasPrefix(seg, ".") })
 }
 
-func (u *unpack) zip() error {
+// inert reports whether an OOXML part named by ooxmlPart holds what its name
+// says: OLE for a VBA project, text for markup. Anything else, such as a zip or
+// an executable renamed to styles.xml, must be unpacked. An encrypted part is
+// left to the office analyzer as before, and one that cannot be read is not inert.
+func (u *unpack) inert(zf *zip.File) bool {
+	if zf.Flags&1 != 0 {
+		return true
+	}
+	rc, err := zf.Open()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rc.Close() }() // in-memory reader
+	head := make([]byte, partHeadLen)
+	n, err := io.ReadFull(u.cap(rc), head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false
+	}
+	head = head[:n]
+	kind := ident.Identify("", head)
+	if path.Base(strings.ToLower(zf.Name)) == "vbaproject.bin" {
+		return kind == ident.OLE
+	}
+	return !bytes.HasPrefix(head, []byte("PK")) && !bytes.HasPrefix(head, []byte("MZ")) &&
+		bytes.IndexByte(head, 0) < 0 && (kind == ident.Text || kind == ident.Unknown)
+}
+
+// localNames returns the name in the local file header of every entry of zr, in
+// directory order. It follows the offsets of the central directory records, the
+// way the zip reader does, so a header that an attacker plants elsewhere cannot
+// stand in for the real one. ok is false when the records do not match the
+// reader's entries or point at no local header.
+func localNames(data []byte, zr *zip.Reader) (names []string, ok bool) {
+	pos, base, ok := directory(data)
+	if !ok {
+		return nil, false
+	}
+	size := int64(len(data))
+	names = make([]string, 0, len(zr.File))
+	for _, zf := range zr.File {
+		if pos+dirHeadLen > size || !bytes.HasPrefix(data[pos:], dirSig) {
+			return nil, false
+		}
+		rec := data[pos:]
+		nameLen, extraLen, commentLen := int64(le.Uint16(rec[28:])), int64(le.Uint16(rec[30:])), int64(le.Uint16(rec[32:]))
+		next := pos + dirHeadLen + nameLen + extraLen + commentLen
+		if next > size || string(rec[dirHeadLen:dirHeadLen+nameLen]) != zf.Name {
+			return nil, false
+		}
+		off := int64(le.Uint32(rec[42:]))
+		if off == max32 {
+			if off, ok = zip64Offset(rec[dirHeadLen+nameLen:dirHeadLen+nameLen+extraLen], le.Uint32(rec[24:]), le.Uint32(rec[20:])); !ok {
+				return nil, false
+			}
+		}
+		at := base + off
+		if at < 0 || at+localHeadLen > size || !bytes.HasPrefix(data[at:], localSig) {
+			return nil, false
+		}
+		end := at + localHeadLen + int64(le.Uint16(data[at+26:]))
+		dataAt, err := zf.DataOffset()
+		if end > size || err != nil || dataAt != end+int64(le.Uint16(data[at+28:])) {
+			return nil, false
+		}
+		names = append(names, string(data[at+localHeadLen:end]))
+		pos = next
+	}
+	return names, true
+}
+
+var le = binary.LittleEndian
+
+// directory finds where the central directory records start and how far the
+// offsets stored in them are shifted by data before the zip, as the zip reader
+// does: from the end of central directory record and its zip64 form.
+func directory(data []byte) (start, base int64, ok bool) {
+	size := int64(len(data))
+	lo := max(0, size-eocdWindow)
+	last := size - eocdLen + int64(len(eocdSig))
+	if last <= lo {
+		return 0, 0, false
+	}
+	at := lo + int64(bytes.LastIndex(data[lo:last], eocdSig))
+	if at < lo || at+eocdLen+int64(le.Uint16(data[at+20:])) > size {
+		return 0, 0, false
+	}
+	dirSize, dirOff, end := int64(le.Uint32(data[at+12:])), int64(le.Uint32(data[at+16:])), at
+	if le.Uint16(data[at+10:]) == 0xffff || dirSize == max32 || dirOff == max32 {
+		// A zip64 locator sits right before the record, and the zip64 record holds the real values.
+		if loc := at - 20; loc >= 0 && bytes.HasPrefix(data[loc:], []byte("PK\x06\x07")) && le.Uint32(data[loc+4:]) == 0 && le.Uint32(data[loc+16:]) == 1 {
+			p := le.Uint64(data[loc+8:])
+			if p > uint64(size) || int64(p)+56 > size || !bytes.HasPrefix(data[p:], []byte("PK\x06\x06")) {
+				return 0, 0, false
+			}
+			sz, off := le.Uint64(data[p+40:]), le.Uint64(data[p+48:])
+			if sz > 1<<62 || off > 1<<62 {
+				return 0, 0, false
+			}
+			dirSize, dirOff, end = int64(sz), int64(off), int64(p)
+		}
+	}
+	base = end - dirSize - dirOff
+	if dirOff+base < 0 || dirOff+base >= size {
+		return 0, 0, false
+	}
+	if base > 0 && dirOff+dirHeadLen <= size && bytes.HasPrefix(data[dirOff:], dirSig) {
+		base = 0 // the records are valid without the shift, which the reader prefers
+	}
+	return dirOff + base, base, true
+}
+
+// zip64Offset reads the offset of a local header from the zip64 extra field of a
+// central directory record, which holds only the values whose 32-bit fields are full.
+func zip64Offset(extra []byte, usize, csize uint32) (int64, bool) {
+	for len(extra) >= 4 {
+		id, n := le.Uint16(extra), int(le.Uint16(extra[2:]))
+		if extra = extra[4:]; n > len(extra) {
+			return 0, false
+		}
+		if id == 1 {
+			b := extra[:n]
+			for _, full := range []bool{usize == max32, csize == max32} {
+				if full {
+					b = b[min(8, len(b)):]
+				}
+			}
+			if len(b) < 8 || le.Uint64(b) > 1<<62 {
+				return 0, false
+			}
+			return int64(le.Uint64(b)), true
+		}
+		extra = extra[n:]
+	}
+	return 0, false
+}
+
+func (u *unpack) reader() (*zip.Reader, error) {
 	zr, err := zip.NewReader(bytes.NewReader(u.f.Data), int64(len(u.f.Data)))
 	if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
+		return nil, err
+	}
+	return zr, nil
+}
+
+func (u *unpack) zip() error {
+	zr, err := u.reader()
+	if err != nil {
 		return err
 	}
-	for _, zf := range zr.File {
+	return u.members(zr)
+}
+
+// appended expands the zip of a self-extracting archive: an executable with the
+// archive after its code. An executable without a readable zip is not an error.
+func (u *unpack) appended() error {
+	if !bytes.Contains(u.f.Data[max(0, len(u.f.Data)-eocdWindow):], eocdSig) {
+		return nil
+	}
+	zr, err := u.reader()
+	if err != nil {
+		return nil
+	}
+	if u.f.Depth >= analyze.MaxNesting {
+		u.skip(u.f.Path, protocol.SkipDepth)
+		return nil
+	}
+	u.out.Findings = append(u.out.Findings, ruleAppended.Finding(protocol.Evidence{
+		Path: u.f.Path, Snippet: protocol.Snippet(fmt.Sprintf("%d zip entries after the executable", len(zr.File))),
+	}))
+	return u.members(zr)
+}
+
+func (u *unpack) members(zr *zip.Reader) error {
+	locals, matched := localNames(u.f.Data, zr)
+	if !matched {
+		u.names.add(u.f.Path, "the local headers do not match the central directory")
+	}
+	for i, zf := range zr.File {
 		if err := u.ctx.Err(); err != nil {
 			return err
 		}
@@ -222,13 +460,17 @@ func (u *unpack) zip() error {
 			break
 		}
 		mode := zf.Mode()
+		alt := ""
+		if ok && matched && !mode.IsDir() {
+			alt = u.mismatch(zf, locals[i])
+		}
 		switch {
 		case !ok, mode.IsDir():
 			continue
 		case mode&fs.ModeSymlink != 0:
 			u.link(zf.Name, "")
 			continue
-		case u.f.Kind == ident.OOXML && ooxmlPart(zf.Name):
+		case u.f.Kind == ident.OOXML && alt == "" && ooxmlPart(zf.Name) && u.inert(zf):
 			continue // the office analyzer reads it or it is inert markup
 		case zf.Flags&1 != 0:
 			u.out.Findings = append(u.out.Findings, ruleEncrypted.Finding(protocol.Evidence{
@@ -242,13 +484,38 @@ func (u *unpack) zip() error {
 			u.skip(u.member(zf.Name), protocol.SkipParseError)
 			continue
 		}
+		before := len(u.out.Children)
 		err = u.read(u.cap(rc), zf.Name)
 		_ = rc.Close() // in-memory reader
+		if alt != "" && len(u.out.Children) > before {
+			// A streaming extractor writes the local name, so the bytes are analyzed under it too.
+			u.out.Children = append(u.out.Children, analyze.File{Name: alt, Data: u.out.Children[before].Data})
+		}
 		if errors.Is(err, errBomb) {
 			break
 		}
 	}
 	return nil
+}
+
+// mismatch reports an entry whose local header name differs from its central
+// directory name and returns the local name, or "" when there is nothing more to
+// analyze: the names agree, or the local name escapes or reads the same.
+func (u *unpack) mismatch(zf *zip.File, local string) string {
+	if local == zf.Name {
+		return ""
+	}
+	u.names.add(u.member(zf.Name), "central: "+zf.Name+", local: "+local)
+	if escapes(local) {
+		u.out.Findings = append(u.out.Findings, ruleSlip.Finding(protocol.Evidence{
+			Path: u.member(local), Snippet: protocol.Snippet(local),
+		}))
+		return ""
+	}
+	if fsName(local) == fsName(zf.Name) {
+		return ""
+	}
+	return local
 }
 
 func (u *unpack) tar(r io.Reader) error {

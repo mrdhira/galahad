@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"io/fs"
 	"math/rand/v2"
 	"slices"
@@ -25,6 +27,8 @@ type entry struct {
 	mode fs.FileMode
 	flag uint16
 	raw  []byte // when set, written instead of data, with the stored method
+	// extra is written as the extra field of the local header and the central directory record
+	extra []byte
 }
 
 func zipOf(t *testing.T, entries ...entry) []byte {
@@ -32,7 +36,7 @@ func zipOf(t *testing.T, entries ...entry) []byte {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for _, e := range entries {
-		h := &zip.FileHeader{Name: e.name, Method: zip.Deflate, Flags: e.flag}
+		h := &zip.FileHeader{Name: e.name, Method: zip.Deflate, Flags: e.flag, Extra: e.extra}
 		if e.mode != 0 {
 			h.SetMode(e.mode)
 		}
@@ -135,6 +139,115 @@ func fromHex(s string) []byte {
 // helloBz2 is "hello\n" compressed with bzip2; the standard library only decompresses.
 const helloBz2 = "425a6839314159265359c1c080e2000001410000100244a00030cd00c3462997177245385090c1c080e2"
 
+// sfx is a stub with a valid PE header followed by tail, like the start of a self-extracting archive.
+func sfx(t *testing.T, tail ...byte) []byte {
+	t.Helper()
+	stub := make([]byte, 0x80)
+	copy(stub, "MZ")
+	stub[0x3c] = 0x40
+	copy(stub[0x40:], "PE\x00\x00")
+	return append(stub, tail...)
+}
+
+// mismatched renames the entry in its local file header only, so the central directory keeps the old name.
+func mismatched(t *testing.T, from, to string) []byte {
+	t.Helper()
+	if len(from) != len(to) {
+		t.Fatalf("names %q and %q differ in length", from, to)
+	}
+	return bytes.Replace(zipOf(t, entry{name: from, data: "payload"}), []byte(from), []byte(to), 1)
+}
+
+// fakeHeader is an extra field block that holds a well-formed local file header for name.
+func fakeHeader(name string) []byte {
+	h := make([]byte, 30)
+	copy(h, "PK\x03\x04")
+	h[26] = byte(len(name))
+	h = append(h, name...)
+	return append([]byte{0x66, 0x66, byte(len(h)), 0}, h...)
+}
+
+// rawZip assembles a stored zip by hand: n central directory records that all point at one local
+// header named "a" with the data "x" and the given local extra field. With zip64 the records
+// keep their offset in a zip64 extra field and the directory ends with the zip64 records.
+func rawZip(n int, extra []byte, zip64 bool) []byte {
+	le := binary.LittleEndian
+	crc := crc32.ChecksumIEEE([]byte("x"))
+	b := []byte("PK\x03\x04")
+	b = le.AppendUint16(b, 20)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint32(b, 0)
+	b = le.AppendUint32(b, crc)
+	b = le.AppendUint32(b, 1)
+	b = le.AppendUint32(b, 1)
+	b = le.AppendUint16(b, 1)
+	b = le.AppendUint16(b, uint16(len(extra)))
+	b = append(b, 'a')
+	b = append(b, extra...)
+	b = append(b, 'x')
+	dirAt := len(b)
+	for range n {
+		b = append(b, "PK\x01\x02"...)
+		b = le.AppendUint16(b, 20)
+		b = le.AppendUint16(b, 20)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint32(b, crc)
+		b = le.AppendUint32(b, 1)
+		b = le.AppendUint32(b, 1)
+		b = le.AppendUint16(b, 1)
+		offset := uint32(0)
+		if zip64 {
+			b = le.AppendUint16(b, 12)
+			offset = 1<<32 - 1
+		} else {
+			b = le.AppendUint16(b, 0)
+		}
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint16(b, 0)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint32(b, offset)
+		b = append(b, 'a')
+		if zip64 {
+			b = le.AppendUint16(b, 1)
+			b = le.AppendUint16(b, 8)
+			b = le.AppendUint64(b, 0)
+		}
+	}
+	dirSize, dirOff := uint32(len(b)-dirAt), uint32(dirAt)
+	if zip64 {
+		end := len(b)
+		b = append(b, "PK\x06\x06"...)
+		b = le.AppendUint64(b, 44)
+		b = le.AppendUint16(b, 45)
+		b = le.AppendUint16(b, 45)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint64(b, uint64(n))
+		b = le.AppendUint64(b, uint64(n))
+		b = le.AppendUint64(b, uint64(dirSize))
+		b = le.AppendUint64(b, uint64(dirAt))
+		b = append(b, "PK\x06\x07"...)
+		b = le.AppendUint32(b, 0)
+		b = le.AppendUint64(b, uint64(end))
+		b = le.AppendUint32(b, 1)
+		dirOff = 1<<32 - 1
+	}
+	b = append(b, "PK\x05\x06"...)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint16(b, 0)
+	b = le.AppendUint16(b, uint16(n))
+	b = le.AppendUint16(b, uint16(n))
+	b = le.AppendUint32(b, dirSize)
+	b = le.AppendUint32(b, dirOff)
+	return le.AppendUint16(b, 0)
+}
+
+const oleMagic = "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
 func TestAnalyze(t *testing.T) {
 	random := make([]byte, analyze.MaxFileSize+1)
 	_, _ = rand.NewChaCha8([32]byte{1}).Read(random) // never fails
@@ -142,14 +255,29 @@ func TestAnalyze(t *testing.T) {
 	for i := range archive.MaxEntries + 1 {
 		many = append(many, entry{name: fmt.Sprintf("f%d", i)})
 	}
+	crowded := make([]string, archive.MaxEntries)
+	for i := range crowded {
+		crowded[i] = "a"
+	}
+	// A 64 KiB extra field full of local header signatures, which a scan for the header would trip over.
+	decoys := bytes.Repeat([]byte("PK\x03\x04"), 1<<14-1)
+	withGap := func() []byte {
+		z := zipOf(t, entry{name: "a.txt", data: "a"})
+		end := bytes.LastIndex(z, []byte("PK\x05\x06"))
+		return slices.Concat(z[:end], []byte("junk!"), z[end:])
+	}()
+	// The second local header loses the last byte of its signature.
+	badLocal := zipOf(t, entry{name: "a.txt", data: "a"}, entry{name: "b.txt", data: "b"})
+	badLocal[bytes.LastIndex(badLocal[:bytes.Index(badLocal, []byte("PK\x01\x02"))], []byte("PK\x03\x04"))+3] = 5
 	iso := make([]byte, 0x8100)
 	copy(iso[0x8001:], "CD001")
 
 	tests := []struct {
 		name string
 		// inputs
-		file string
-		data []byte
+		file  string
+		data  []byte
+		depth int
 		// expectations
 		wantChildren []string // member names, in order
 		wantFindings []string // "rule path"
@@ -162,6 +290,40 @@ func TestAnalyze(t *testing.T) {
 		{name: "zip with a nested content types file is not ooxml and keeps all members", file: "in.zip",
 			data:         zipOf(t, entry{name: "p/.vscode/tasks.json", data: "{}"}, entry{name: "sub/[Content_Types].xml", data: "<Types/>"}),
 			wantChildren: []string{"p/.vscode/tasks.json", "sub/[Content_Types].xml"}},
+		{name: "zip at the nesting limit is not decompressed", file: "in.zip", depth: analyze.MaxNesting,
+			data:      zipOf(t, entry{name: "a.txt", data: "a"}),
+			wantSkips: []string{"in.zip depth"}},
+		{name: "zip just above the nesting limit is expanded", file: "in.zip", depth: analyze.MaxNesting - 1,
+			data:         zipOf(t, entry{name: "a.txt", data: "a"}),
+			wantChildren: []string{"a.txt"}},
+		{name: "executable with an appended zip is expanded", file: "in.exe",
+			data:         sfx(t, zipOf(t, entry{name: "p/.vscode/tasks.json", data: "{}"})...),
+			wantChildren: []string{"p/.vscode/tasks.json"},
+			wantFindings: []string{"GAL-ARCHIVE-006 in.exe"}},
+		{name: "executable with a zip written after an offset shift is expanded", file: "in.exe",
+			data: func() []byte {
+				stub := sfx(t)
+				buf := bytes.NewBuffer(stub)
+				zw := zip.NewWriter(buf)
+				zw.SetOffset(int64(len(stub)))
+				w, err := zw.Create("a.txt")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = w.Write([]byte("a"))
+				if err := zw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				return buf.Bytes()
+			}(),
+			wantChildren: []string{"a.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-006 in.exe"}},
+		{name: "executable with an appended zip at the nesting limit is not expanded", file: "in.exe", depth: analyze.MaxNesting,
+			data:      sfx(t, zipOf(t, entry{name: "a.txt", data: "a"})...),
+			wantSkips: []string{"in.exe depth"}},
+		{name: "executable with a stray zip signature is left alone", file: "in.exe",
+			data: sfx(t, []byte("text PK\x05\x06 text")...)},
+		{name: "executable without a zip is left alone", file: "in.exe", data: sfx(t)},
 		{name: "zip that cannot be read", file: "in.zip", data: []byte("PK\x03\x04 truncated"), wantErr: true},
 		{name: "more entries than the limit", file: "in.zip", data: zipOf(t, many...),
 			wantChildren: func() []string {
@@ -172,6 +334,10 @@ func TestAnalyze(t *testing.T) {
 				return names
 			}(),
 			wantSkips: []string{"in.zip budget"}},
+		{name: "many backslash names give one finding for the first", file: "in.zip",
+			data:         zipOf(t, entry{name: `a\1`}, entry{name: `a\2`}, entry{name: `a\3`}),
+			wantChildren: []string{`a\1`, `a\2`, `a\3`},
+			wantFindings: []string{`GAL-ARCHIVE-005 in.zip!/a\1`}},
 		{name: "parent segment", file: "in.zip", data: zipOf(t, entry{name: "../../evil.sh", data: "x"}),
 			wantFindings: []string{"GAL-ARCHIVE-001 in.zip!/../../evil.sh"}},
 		{name: "absolute path", file: "in.zip", data: zipOf(t, entry{name: "/etc/cron.d/x", data: "x"}),
@@ -182,8 +348,44 @@ func TestAnalyze(t *testing.T) {
 			wantFindings: []string{`GAL-ARCHIVE-001 in.zip!/\\srv\share\x`}},
 		{name: "backslash traversal", file: "in.zip", data: zipOf(t, entry{name: `a\..\..\x`, data: "x"}),
 			wantFindings: []string{`GAL-ARCHIVE-001 in.zip!/a\..\..\x`}},
+		{name: "backslash name is unpacked and reported", file: "in.zip", data: zipOf(t, entry{name: `a\.vscode\tasks.json`, data: "{}"}),
+			wantChildren: []string{`a\.vscode\tasks.json`},
+			wantFindings: []string{`GAL-ARCHIVE-005 in.zip!/a\.vscode\tasks.json`}},
+		{name: "tar backslash name is unpacked and reported", file: "in.tar", data: tarOf(t, tarEntry{name: `a\b`, data: "x", typeflag: tar.TypeReg}),
+			wantChildren: []string{`a\b`},
+			wantFindings: []string{`GAL-ARCHIVE-005 in.tar!/a\b`}},
 		{name: "dots inside a name are fine", file: "in.zip", data: zipOf(t, entry{name: "a..b/c..d", data: "x"}),
 			wantChildren: []string{"a..b/c..d"}},
+		{name: "local name differs from the central name", file: "in.zip", data: mismatched(t, "a.txt", "b.txt"),
+			wantChildren: []string{"a.txt", "b.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/a.txt"}},
+		{name: "many local names that differ give one finding for the first", file: "in.zip",
+			data: bytes.Replace(
+				bytes.Replace(zipOf(t, entry{name: "a.txt", data: "a"}, entry{name: "c.txt", data: "c"}), []byte("a.txt"), []byte("b.txt"), 1),
+				[]byte("c.txt"), []byte("d.txt"), 1),
+			wantChildren: []string{"a.txt", "b.txt", "c.txt", "d.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/a.txt"}},
+		{name: "local name that escapes is reported and not unpacked", file: "in.zip", data: mismatched(t, "abcdefg", "../evil"),
+			wantChildren: []string{"abcdefg"},
+			wantFindings: []string{"GAL-ARCHIVE-001 in.zip!/../evil", "GAL-ARCHIVE-007 in.zip!/abcdefg"}},
+		{name: "fake local header in the extra field does not hide the real local name", file: "in.zip",
+			data: bytes.Replace(zipOf(t, entry{name: "_vscode/tasks.json", data: "{}", extra: fakeHeader("_vscode/tasks.json")}),
+				[]byte("_vscode/tasks.json"), []byte(".vscode/tasks.json"), 1),
+			wantChildren: []string{"_vscode/tasks.json", ".vscode/tasks.json"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/_vscode/tasks.json"}},
+		{name: "local header that is not where the directory says is reported", file: "in.zip",
+			data:         badLocal,
+			wantChildren: []string{"a.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip"}, wantSkips: []string{"in.zip!/b.txt parse_error"}},
+		{name: "many entries sharing one local header with decoy signatures", file: "in.zip",
+			data: rawZip(archive.MaxEntries, decoys, false), wantChildren: crowded},
+		{name: "zip64 central directory records are followed", file: "in.zip",
+			data: rawZip(2, nil, true), wantChildren: []string{"a", "a"}},
+		{name: "gap before the end record does not shift the offsets", file: "in.zip",
+			data: withGap, wantChildren: []string{"a.txt"}},
+		{name: "local name that only differs by separator is reported once", file: "in.zip", data: mismatched(t, "a/b.txt", `a\b.txt`),
+			wantChildren: []string{"a/b.txt"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.zip!/a/b.txt"}},
 		{name: "zip symlink entry", file: "in.zip", data: zipOf(t, entry{name: "link", data: "/etc/passwd", mode: fs.ModeSymlink | 0o777}),
 			wantFindings: []string{"GAL-ARCHIVE-002 in.zip!/link"}},
 		{name: "ooxml leaves package markup and macro projects to the office analyzer", file: "in.docm",
@@ -193,33 +395,55 @@ func TestAnalyze(t *testing.T) {
 				entry{name: "customXml/item1.xml", data: "<c/>"}, entry{name: "word/document.xml", data: "<d/>"},
 				entry{name: "word/_rels/document.xml.rels", data: "<r/>"}, entry{name: "Word/Theme/theme1.XML", data: "<t/>"},
 				entry{name: "xl/sharedStrings.xml", data: "<s/>"}, entry{name: "ppt/slides/slide1.xml", data: "<s/>"},
-				entry{name: "word/vbaProject.bin", data: "x"}, entry{name: "macros/VBAPROJECT.BIN", data: "x"})},
+				entry{name: "word/vbaProject.bin", data: oleMagic}, entry{name: "macros/VBAPROJECT.BIN", data: oleMagic},
+				entry{name: "docProps/empty.xml"}, entry{name: "word/utf8.xml", data: "<a>\u00e9</a>"},
+				entry{name: "word/_rels/.rels", data: "<r/>"}, entry{name: "ppt/.a.rels", data: "<a/>"}, entry{name: "x/y/z.rels", data: "<a/>"})},
 		{name: "ooxml unpacks every other member", file: "in.docx",
 			data: zipOf(t,
 				entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/document.xml", data: "<d/>"},
 				entry{name: "extra/.vscode/tasks.json", data: "{}"}, entry{name: "run.js", data: "x"},
 				entry{name: "[Content_Types].xml.bak", data: "x"}, entry{name: "wordy/run.xml", data: "x"}, entry{name: "word", data: "x"},
 				entry{name: `word\theme.xml`, data: "<t/>"}, entry{name: `word\vbaProject.bin`, data: "x"}),
-			wantChildren: []string{"extra/.vscode/tasks.json", "run.js", "[Content_Types].xml.bak", "wordy/run.xml", "word", `word\theme.xml`, `word\vbaProject.bin`}},
+			wantChildren: []string{"extra/.vscode/tasks.json", "run.js", "[Content_Types].xml.bak", "wordy/run.xml", "word", `word\theme.xml`, `word\vbaProject.bin`},
+			wantFindings: []string{`GAL-ARCHIVE-005 in.docx!/word\theme.xml`}},
 		{name: "ooxml unpacks payloads below the package folders", file: "in.docx",
 			data: zipOf(t,
 				entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/.vscode/tasks.json", data: "{}"},
 				entry{name: "xl/.vscode/tasks.json", data: "{}"}, entry{name: "word/embeddings/x.bin", data: "x"},
 				entry{name: "word/run.js", data: "x"}, entry{name: "Word/media/image1.png", data: "x"},
-				entry{name: "word/.hidden/a.xml", data: "<a/>"}, entry{name: "ppt/.a.rels", data: "<a/>"}),
-			wantChildren: []string{"word/.vscode/tasks.json", "xl/.vscode/tasks.json", "word/embeddings/x.bin", "word/run.js", "Word/media/image1.png", "word/.hidden/a.xml", "ppt/.a.rels"}},
+				entry{name: "word/.hidden/a.xml", data: "<a/>"}),
+			wantChildren: []string{"word/.vscode/tasks.json", "xl/.vscode/tasks.json", "word/embeddings/x.bin", "word/run.js", "Word/media/image1.png", "word/.hidden/a.xml"}},
+		{name: "ooxml part holding a zip, an executable or binary data is unpacked", file: "in.docx",
+			data: zipOf(t,
+				entry{name: "[Content_Types].xml", data: "<Types/>"},
+				entry{name: "word/styles.xml", data: "PK\x03\x04 zip"}, entry{name: "word/theme/theme1.xml", data: "MZ stub"},
+				entry{name: "docProps/core.xml", data: "<a/>\x00\x01"}, entry{name: "word/_rels/document.xml.rels", data: "PK\x05\x06"},
+				entry{name: "word/gz.xml", data: string(gzipOf(t, []byte("x")))}),
+			wantChildren: []string{"word/styles.xml", "word/theme/theme1.xml", "docProps/core.xml", "word/_rels/document.xml.rels", "word/gz.xml"}},
+		{name: "ooxml vba project that is not OLE is unpacked", file: "in.docm",
+			data:         zipOf(t, entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/vbaProject.bin", data: "PK\x03\x04 zip"}, entry{name: "empty/vbaProject.bin"}),
+			wantChildren: []string{"word/vbaProject.bin", "empty/vbaProject.bin"}},
+		{name: "ooxml part with a different local name is unpacked under both names", file: "in.docx",
+			data:         bytes.Replace(zipOf(t, entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/a.xml", data: "<a/>"}), []byte("word/a.xml"), []byte("word/b.xml"), 1),
+			wantChildren: []string{"word/a.xml", "word/b.xml"},
+			wantFindings: []string{"GAL-ARCHIVE-007 in.docx!/word/a.xml"}},
 		{name: "ooxml part name that escapes is still reported", file: "in.docx",
 			data:         zipOf(t, entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/../../evil.sh", data: "x"}),
 			wantFindings: []string{"GAL-ARCHIVE-001 in.docx!/word/../../evil.sh"}},
 		{name: "ooxml symlink under a package folder is still reported", file: "in.docx",
 			data:         zipOf(t, entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/link", data: "/etc/passwd", mode: fs.ModeSymlink | 0o777}),
 			wantFindings: []string{"GAL-ARCHIVE-002 in.docx!/word/link"}},
+		{name: "ooxml encrypted part is left to the office analyzer", file: "in.docx",
+			data: zipOf(t, entry{name: "[Content_Types].xml", data: "<Types/>"}, entry{name: "word/styles.xml", data: "x", flag: 1})},
 		{name: "encrypted zip entry", file: "in.zip", data: zipOf(t, entry{name: "secret.txt", data: "x", flag: 1}),
 			wantFindings: []string{"GAL-ARCHIVE-004 in.zip!/secret.txt"}, wantSkips: []string{"in.zip!/secret.txt encrypted"}},
 		{name: "zip bomb by ratio", file: "in.zip", data: zipOf(t, entry{name: "zeros", data: strings.Repeat("\x00", 20<<20)}),
 			wantFindings: []string{"GAL-ARCHIVE-003 in.zip"}, wantSkips: []string{"in.zip!/zeros budget"}},
 		{name: "entry above the file size limit", file: "in.zip", data: zipOf(t, entry{name: "big", raw: random}),
 			wantSkips: []string{"in.zip!/big too_large"}},
+		{name: "tar at the nesting limit is not decompressed", file: "in.tar", depth: analyze.MaxNesting,
+			data:      tarOf(t, tarEntry{name: "a.txt", data: "a", typeflag: tar.TypeReg}),
+			wantSkips: []string{"in.tar depth"}},
 		{name: "tar members become children", file: "in.tar", data: tarOf(t, tarEntry{name: "d/", typeflag: tar.TypeDir}, tarEntry{name: "a.txt", data: "a", typeflag: tar.TypeReg}),
 			wantChildren: []string{"a.txt"}},
 		{name: "tar that cannot be read", file: "in.tar", data: bytes.Repeat([]byte("x"), 1024),
@@ -242,6 +466,9 @@ func TestAnalyze(t *testing.T) {
 			wantChildren: []string{"a.txt"}},
 		{name: "tar.gz expands its tar", file: "in.tar.gz", data: gzipOf(t, tarOf(t, tarEntry{name: "a.txt", data: "a", typeflag: tar.TypeReg})),
 			wantChildren: []string{"a.txt"}},
+		{name: "gz at the nesting limit is not decompressed", file: "in.gz", depth: analyze.MaxNesting,
+			data:      gzipOf(t, []byte("hello\n")),
+			wantSkips: []string{"in.gz depth"}},
 		{name: "gz becomes one child without its suffix", file: "notes.txt.gz", data: gzipOf(t, []byte("hello\n")),
 			wantChildren: []string{"notes.txt"}},
 		{name: "gz suffix in capitals", file: "NOTES.GZ", data: gzipOf(t, []byte("hello\n")),
@@ -270,7 +497,7 @@ func TestAnalyze(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := analyze.File{Path: tt.file, Name: tt.file, Kind: ident.Identify(tt.file, tt.data), Data: tt.data}
+			f := analyze.File{Path: tt.file, Name: tt.file, Kind: ident.Identify(tt.file, tt.data), Data: tt.data, Depth: tt.depth}
 
 			out, err := archive.New().Analyze(context.Background(), f)
 
@@ -313,6 +540,9 @@ func TestAnalyzeRuleMetadata(t *testing.T) {
 	}{
 		{name: "zip slip", data: zipOf(t, entry{name: "../x"}), wantRule: "GAL-ARCHIVE-001", wantSeverity: "high", wantSnippet: "../x"},
 		{name: "encrypted entry", data: zipOf(t, entry{name: "s", flag: 1}), wantRule: "GAL-ARCHIVE-004", wantSeverity: "medium", wantAttack: "T1027.013", wantSnippet: "encrypted entry"},
+		{name: "backslash name", data: zipOf(t, entry{name: `a\b`}), wantRule: "GAL-ARCHIVE-005", wantSeverity: "low", wantSnippet: `1 in this archive, first: a\b`},
+		{name: "appended zip", data: sfx(t, zipOf(t, entry{name: "a"})...), wantRule: "GAL-ARCHIVE-006", wantSeverity: "low", wantSnippet: "1 zip entries after the executable"},
+		{name: "name mismatch", data: mismatched(t, "a.txt", "b.txt"), wantRule: "GAL-ARCHIVE-007", wantSeverity: "medium", wantSnippet: "1 in this archive, first: central: a.txt, local: b.txt"},
 		{name: "link target is shown", data: tarOf(t, tarEntry{name: "l", link: "/etc/passwd", typeflag: tar.TypeSymlink}), wantRule: "GAL-ARCHIVE-002", wantSeverity: "medium", wantSnippet: "l -> /etc/passwd"},
 	}
 	for _, tt := range tests {

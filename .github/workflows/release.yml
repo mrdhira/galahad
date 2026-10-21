@@ -42,15 +42,22 @@ jobs:
           set -euo pipefail
           pkg=github.com/mrdhira/galahad/internal/cli
           ldflags="-s -w -X ${pkg}.version=${GITHUB_REF_NAME} -X ${pkg}.commit=${GITHUB_SHA::12}"
+          agentpkg=github.com/mrdhira/galahad/internal/agent
+          agentldflags="-s -w -X ${agentpkg}.version=${GITHUB_REF_NAME} -X ${agentpkg}.commit=${GITHUB_SHA::12}"
           mkdir -p dist
           for os in linux darwin windows; do
             for arch in amd64 arm64; do
               name="galahad_${GITHUB_REF_NAME}_${os}_${arch}"
               bin=galahad
-              [ "$os" = windows ] && bin=galahad.exe
+              agentbin=galahad-agent
+              if [ "$os" = windows ]; then
+                bin=galahad.exe
+                agentbin=galahad-agent.exe
+              fi
               stage="dist/${name}"
               mkdir -p "$stage"
               CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$ldflags" -o "${stage}/${bin}" ./cmd/galahad
+              CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$agentldflags" -o "${stage}/${agentbin}" ./cmd/galahad-agent
               cp LICENSE README.md "$stage/"
               if [ "$os" = windows ]; then
                 (cd dist && zip -qr "${name}.zip" "$name")
