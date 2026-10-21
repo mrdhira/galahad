@@ -170,8 +170,10 @@ func TestSkipAccounting(t *testing.T) {
 			wantSeen: 1, wantAnalyzed: 1,
 		},
 		{
-			name:     "job that runs out of time is not clean",
-			setup:    filesRepo(map[string]string{"a.txt": "hello\n", "b.txt": "world\n"}),
+			name: "job that runs out of time is not clean",
+			// A file the analyzers need well over one Windows timer tick (about 15 ms) to read,
+			// so the 1 ns deadline has passed before the job can finish.
+			setup:    filesRepo(map[string]string{"a.js": strings.Repeat("var a = b(c);\n", 300000), "b.txt": "world\n"}),
 			flags:    []string{"-timeout", "1ns"},
 			wantCode: 10,
 			wantSkip: "timeout",
