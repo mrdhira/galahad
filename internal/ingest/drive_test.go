@@ -96,6 +96,10 @@ func TestFetcherDrive(t *testing.T) {
 		b.WriteString(`</form>`)
 		return b.String()
 	}
+	repeated := func(origin string) string { // one name, many values
+		return `<form action="` + origin + `/download"><input type="hidden" name="confirm" value="t">` +
+			strings.Repeat(`<input type="hidden" name="x" value="v">`, 40) + `</form>`
+	}
 	unclosed := func(string) string {
 		return `<form action="/download"><input type="hidden" name="id" value="` + driveID + `"><input type="hidden" name="export" value="download">` +
 			`<input type="hidden" name="authuser" value="0"><input type="hidden" name="confirm" value="t"><input type="hidden" name="uuid" value="` + driveUUID + `">`
@@ -203,6 +207,10 @@ func TestFetcherDrive(t *testing.T) {
 		},
 		{
 			name: "a form with too many fields is refused", handler: flow(manyFields),
+			wantErr: "too many or too long fields",
+		},
+		{
+			name: "a form that repeats one field name too often is refused", handler: flow(repeated),
 			wantErr: "too many or too long fields",
 		},
 		{

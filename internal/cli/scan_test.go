@@ -177,6 +177,7 @@ func TestRunScan(t *testing.T) {
 		{name: "a link without a host", args: []string{"https:///a"}, wantCode: cli.ExitUsage, wantStderr: "has no host"},
 		{name: "a link with a password", args: []string{"https://user:secret@example.com/a"}, wantCode: cli.ExitUsage, wantStderr: "user name or password"},
 		{name: "a Drive link that is not a file", args: []string{"https://drive.google.com/drive/folders/1AbCdEfGhIjKl"}, wantCode: cli.ExitUsage, wantStderr: "is not a Google Drive file link"},
+		{name: "a Docs link that is not a file", args: []string{"https://docs.google.com/document/d/1AbCdEfGhIjKl/edit"}, wantCode: cli.ExitUsage, wantStderr: "is not a Google Drive file link"},
 		{name: "a link without the network", args: []string{"--no-network", "https://example.com/a.pdf"}, wantCode: cli.ExitUsage, wantStderr: "a link needs the network"},
 		{name: "unknown flag", args: []string{"--nope", file}, wantCode: cli.ExitUsage, wantStderr: "flag provided but not defined"},
 		{name: "cpus is not a number", args: []string{"--cpus", "many", file}, wantCode: cli.ExitUsage, wantStderr: "invalid value"},
@@ -199,7 +200,7 @@ func TestRunScan(t *testing.T) {
 		{name: "a Drive link starts a job", args: []string{"https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "drive"},
 		{name: "a Drive open link starts a job", args: []string{"HTTPS://Drive.Google.com/open?id=1AbCdEfGhIjKlMnOp"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "drive"},
 		{name: "a Drive uc link starts a job", args: []string{"http://drive.google.com/uc?export=download&id=1AbCdEfGhIjKlMnOp"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "drive"},
-		{name: "a link on another Google host is a plain link", args: []string{"https://docs.google.com/uc?id=1AbCdEfGhIjKlMnOp"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "url"},
+		{name: "a docs uc link starts a job", args: []string{"https://docs.google.com/uc?id=1AbCdEfGhIjKlMnOp"}, backend: broken, wantCode: cli.ExitError, wantStderr: "no kvm (job ", wantJob: true, wantKind: "drive"},
 		{name: "a link to a host the policy refuses", args: []string{"http://a_b.example.com/x"}, backend: broken, wantCode: cli.ExitError, wantStderr: "is not a valid host name"},
 	}
 	for _, tt := range tests {

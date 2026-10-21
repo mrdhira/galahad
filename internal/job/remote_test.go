@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,7 @@ func TestRunRemote(t *testing.T) {
 		wantNoJob   bool
 		wantKind    string // target kind in job.json
 		wantBlocked bool
+		wantHost    bool         // the Result is the host's own, for a link that was never downloaded
 		wantJob     protocol.Job // Source and URL of the Job frame, when the source is set
 	}{
 		{
@@ -118,12 +120,18 @@ func TestRunRemote(t *testing.T) {
 			wantAbsent: "pwned",
 		},
 		{
-			name: "an address that is not public is reported and not offered", source: protocol.SourceURL,
+			name: "an address that is not public gives a report of the host", source: protocol.SourceURL,
 			script: failLink(func(g *guest) { g.connectRetry("169.254.169.254", 443) },
 				protocol.Error{Code: protocol.CodeNotAllowed, Message: guestText}),
-			wantErr:     "GAL-NET-001: CONNECT 169.254.169.254:443 denied: metadata",
-			wantAbsent:  "--allow-host",
-			wantBlocked: true,
+			wantBlocked: true, wantHost: true,
+		},
+		{
+			name: "a blocked request followed by another refusal still gives the report", source: protocol.SourceURL,
+			script: failLink(func(g *guest) {
+				g.connectRetry("169.254.169.254", 443)
+				g.connectRetry("evil.example.com", 443)
+			}, protocol.Error{Code: protocol.CodeIngest, Message: guestText}),
+			wantBlocked: true, wantHost: true,
 		},
 		{
 			name: "a port that is not allowed has no flag to offer", source: protocol.SourceURL,
@@ -224,6 +232,20 @@ func TestRunRemote(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(jobs, out.Job.ID, "report.json")); err != nil {
 					t.Errorf("report.json: %v", err)
 				}
+			}
+			switch {
+			case tt.wantHost:
+				res := out.Result
+				if res == nil || res.Verdict != protocol.VerdictSuspicious || res.Target.Name != target || res.Target.SHA256 != "" ||
+					res.Tool.Name != "galahad" || res.Network == nil || len(res.Findings) != 1 || res.Findings[0].RuleID != "GAL-NET-001" ||
+					res.Findings[0].Evidence[0].Snippet != "CONNECT 169.254.169.254:443 denied: metadata" || res.Coverage.FilesAnalyzed != 0 ||
+					!slices.ContainsFunc(res.Reasons, func(r string) bool { return strings.Contains(r, "could not be downloaded") }) {
+					t.Errorf("Result = %+v, want a suspicious result of the host with GAL-NET-001 and a note that nothing was downloaded", res)
+				}
+				if res != nil && res.Validate() != nil {
+					t.Errorf("Result does not validate: %v", res.Validate())
+				}
+			case tt.wantErr == "":
 				if out.Result == nil || out.Result.Target.SHA256 != strings.Repeat("ab", 32) {
 					t.Errorf("Result = %+v, want the hash the guest reported", out.Result)
 				}

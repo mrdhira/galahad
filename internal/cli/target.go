@@ -45,7 +45,7 @@ func classifyTarget(arg string) (target, error) {
 	case u.User != nil:
 		return target{}, errors.New("a link with a user name or password is not supported")
 	}
-	if strings.EqualFold(u.Hostname(), protocol.DriveHost) {
+	if protocol.IsDriveHost(u.Hostname()) {
 		if _, ok := protocol.DriveFileID(arg); !ok {
 			return target{}, fmt.Errorf("%q is not a Google Drive file link; use /file/d/<id>, /open?id=<id> or /uc?id=<id>", shown)
 		}

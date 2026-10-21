@@ -79,6 +79,8 @@ func TestScanLink(t *testing.T) {
 		wantKind    string // target kind in job.json
 		wantName    string // target name in report.json
 		wantState   string
+		wantStdout  []string
+		wantReason  string // a reason of a report the host built from its proxy, when not empty
 		wantStderr  []string
 		wantAbsent  []string // not in stderr
 		wantBlocked bool
@@ -108,9 +110,9 @@ func TestScanLink(t *testing.T) {
 		{
 			name:     "a redirect to the metadata address is blocked and reported",
 			target:   "http://files.test/to-metadata",
-			wantCode: 1, wantKind: "url", wantState: "failed", wantBlocked: true,
-			wantStderr: []string{"the guest failed (not_allowed)", "GAL-NET-001: CONNECT 169.254.169.254:80 denied: metadata"},
-			wantAbsent: []string{"--allow-host", "the proxy refused the connection"},
+			wantCode: 10, wantKind: "url", wantState: "done", wantBlocked: true, wantName: "http://files.test/to-metadata",
+			wantStdout: []string{"SUSPICIOUS", "GAL-NET-001", "BLOCKED"},
+			wantReason: "could not be downloaded",
 			wantLog:    []string{`"host":"169.254.169.254"`, `"decision":"denied"`, `"reason":"metadata"`},
 		},
 		{
@@ -151,6 +153,11 @@ func TestScanLink(t *testing.T) {
 			if code != tt.wantCode {
 				t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout, stderr)
 			}
+			for _, w := range tt.wantStdout {
+				if !strings.Contains(stdout, w) {
+					t.Errorf("stdout lacks %q:\n%s", w, stdout)
+				}
+			}
 			for _, w := range tt.wantStderr {
 				if !strings.Contains(stderr, w) {
 					t.Errorf("stderr lacks %q:\n%s", w, stderr)
@@ -181,6 +188,17 @@ func TestScanLink(t *testing.T) {
 			rep, err := readReport(filepath.Join(dir, "report.json"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tt.wantReason != "" {
+				// The host built this report: nothing was downloaded, so there is no hash and no analysis of content.
+				if rep.Target.Name != tt.wantName || rep.Target.Kind != "file" || rep.Target.SHA256 != "" || rep.Verdict != "suspicious" ||
+					!hasFinding(rep, "GAL-NET-001", "(network):0") || !strings.Contains(strings.Join(rep.Reasons, "\n"), tt.wantReason) {
+					t.Errorf("report = %+v, want a suspicious report of the host for %s with GAL-NET-001 and the reason %q", rep, tt.wantName, tt.wantReason)
+				}
+				if html := readFile(t, filepath.Join(dir, "report.html")); !strings.Contains(html, "GAL-NET-001") {
+					t.Error("report.html lacks GAL-NET-001")
+				}
+				return
 			}
 			if rep.Target.Name != tt.wantName || rep.Target.Kind != "file" || len(rep.Target.SHA256) != 64 {
 				t.Errorf("report target = %+v, want file %s with a sha256", rep.Target, tt.wantName)

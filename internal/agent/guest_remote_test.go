@@ -3,7 +3,10 @@ package agent_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -25,6 +28,7 @@ func TestGuestRemote(t *testing.T) {
 		// inputs
 		source string
 		url    string
+		header string // Content-Disposition of the backend; the plain backend when empty
 		proxy  string // "backend": the host proxy in front of the test backend; otherwise the reason of a proxy that refuses; "none": no --proxy
 		// expectations
 		wantErrCode string // an Error frame instead of a Result
@@ -34,6 +38,11 @@ func TestGuestRemote(t *testing.T) {
 		{
 			name: "a url job downloads the file and analyzes it", source: protocol.SourceURL, url: "http://allowed.example.com/dir/report.txt", proxy: "backend",
 			wantName: "report.txt",
+		},
+		{
+			name: "a hostile name is written out and the file is still analyzed", source: protocol.SourceURL, url: "http://allowed.example.com/a", proxy: "backend",
+			header:   `attachment; filename*=UTF-8''invoice%E2%80%AEfdp%00%ff.exe`,
+			wantName: `invoice\u202efdp\u0000\xff.exe`,
 		},
 		{
 			name: "a url job whose host the proxy refuses ends in not_allowed", source: protocol.SourceURL, url: "http://evil.example.com/a.bin", proxy: "host not allowed",
@@ -64,6 +73,14 @@ func TestGuestRemote(t *testing.T) {
 			case "none":
 			case "backend":
 				addr, _ := newBackend(t)
+				if tt.header != "" {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						w.Header().Set("Content-Disposition", tt.header)
+						_, _ = io.WriteString(w, body)
+					}))
+					t.Cleanup(srv.Close)
+					addr = srv.Listener.Addr().String()
+				}
 				args = []string{"--proxy", "tcp:" + hostProxyAt(t, addr)}
 			default:
 				args = []string{"--proxy", "tcp:" + fakeProxyAt(t, refuse(tt.proxy))}

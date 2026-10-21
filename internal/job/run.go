@@ -299,7 +299,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 				if err := decode(ev.payload, &e); err != nil {
 					return fmt.Errorf("error frame: %w", err)
 				}
-				return r.guestError(e)
+				return r.guestError(e, out)
 			case protocol.FrameResult:
 				if !endSent.Load() {
 					return errors.New("the guest sent a result before the end of the input")
@@ -397,7 +397,7 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 		return fmt.Errorf("the proxy: %w", err)
 	}
 	res.Network = networkOf(events)
-	r.job.Blocked = slices.ContainsFunc(events, func(e proxy.Event) bool { return e.Blocked })
+	r.job.Blocked = slices.ContainsFunc(events, func(ev proxy.Event) bool { return ev.Blocked })
 	addNetworkFinding(&res)
 	scoring.Apply(&res)
 	paths, err := report.Write(r.jobDir, &res)
@@ -467,10 +467,21 @@ func minTime(a, b time.Time) time.Time {
 	return b
 }
 
-// guestError is the error for an Error frame of the guest. For the codes about the network the text
-// is the host's own, built from its proxy record, so nothing the guest wrote is repeated, and the host
-// named in the hint is one the proxy saw and refused.
-func (r *runner) guestError(e protocol.Error) error {
+// guestError handles an Error frame of the guest. When a link led the guest to a request to an address
+// that is not public, the job still ends done: the host reports what its own proxy saw (blockedResult).
+// Otherwise it returns the error. For the codes about the network the text is the host's own, built from
+// its proxy record, so nothing the guest wrote is repeated, and the host named in the hint is one the
+// proxy saw and refused.
+func (r *runner) guestError(e protocol.Error, out *Outcome) error {
+	if r.in.remote() {
+		events, err := r.px.stop() // the decisions are final once the guest has failed
+		if err != nil {
+			return fmt.Errorf("the proxy: %w", err)
+		}
+		if slices.ContainsFunc(events, func(ev proxy.Event) bool { return ev.Blocked }) {
+			return r.blockedResult(events, out)
+		}
+	}
 	var why string
 	switch e.Code {
 	case protocol.CodeDrivePrivate:
@@ -485,9 +496,8 @@ func (r *runner) guestError(e protocol.Error) error {
 	return fmt.Errorf("the guest failed (%s): %s", e.Code, why)
 }
 
-// deniedText says what the proxy refused last. A request to an address that is not public is
-// reported with GAL-NET-001, and a host that is only not on the allowlist comes with the flag to
-// allow it.
+// deniedText says what the proxy refused last. A host that is only not on the allowlist comes with
+// the flag to allow it.
 func (r *runner) deniedText() string {
 	events, _ := r.px.stop() // the decisions are final once the guest has failed; a stop error does not change the text
 	last := -1
@@ -501,12 +511,44 @@ func (r *runner) deniedText() string {
 	}
 	d := events[last]
 	text := fmt.Sprintf("CONNECT %s:%d denied: %s", d.Host, d.Port, d.Reason)
-	if d.Blocked {
-		r.job.Blocked = true
-		return "GAL-NET-001: " + text
-	}
 	if _, err := proxy.NewPolicy(proxy.Input{AllowHosts: []string{d.Host}}); err == nil && d.Reason == proxy.ReasonHostNotAllowed {
 		text += fmt.Sprintf("; if you trust %s, rerun with --allow-host %s", d.Host, d.Host)
 	}
 	return text
+}
+
+// blockedResult reports a link whose download led to a blocked request. There is nothing to analyze, so
+// the host builds the Result from its own records: the link as the target, the blocked requests, and
+// GAL-NET-001, which makes the verdict suspicious. The coverage and the reasons say that the input was
+// never read, so the report does not pass for an analysis of content.
+func (r *runner) blockedResult(events []proxy.Event, out *Outcome) error {
+	res := protocol.Result{
+		SchemaVersion: protocol.SchemaVersion,
+		Tool:          protocol.Tool{Name: "galahad", Version: r.spec.Version},
+		Target:        protocol.Target{Name: protocol.CleanPath(r.in.url), Kind: protocol.TargetFile},
+		StartedAt:     r.start.UTC(),
+		FinishedAt:    r.spec.Now().UTC(),
+		Files:         []protocol.FileInfo{},
+		Findings:      []protocol.Finding{},
+		IOCs:          []protocol.IOC{},
+		Coverage: protocol.Coverage{
+			FilesSeen: 1,
+			Skipped:   []protocol.Skip{{Path: "(download)", Reason: protocol.SkipUnreadable}},
+			Analyzers: []string{"network"},
+		},
+	}
+	res.Network = networkOf(events)
+	r.job.Blocked = true
+	addNetworkFinding(&res)
+	scoring.Apply(&res)
+	res.Reasons = append(res.Reasons, "the input could not be downloaded, so only the network requests were examined")
+	if err := res.Validate(); err != nil {
+		return fmt.Errorf("the result of the host: %w", err)
+	}
+	paths, err := report.Write(r.jobDir, &res)
+	if err != nil {
+		return fmt.Errorf("write the report: %w", err)
+	}
+	out.Result, out.Paths = &res, paths
+	return nil
 }

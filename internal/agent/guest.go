@@ -195,7 +195,7 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fmt.Errorf("send progress: %w", err)
 	}
 	// The name comes from the host or from a download: it must be one local path element.
-	if !filepath.IsLocal(job.Name) || strings.ContainsAny(job.Name, `/\`) {
+	if job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name {
 		return fail(protocol.CodeIngest, "the input name %q is not a single local name", protocol.CleanPath(job.Name))
 	}
 	target := filepath.Join(dir, job.Name)

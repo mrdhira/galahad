@@ -135,6 +135,7 @@ func warningForm(page []byte) (action string, fields url.Values, err error) {
 	z := html.NewTokenizer(bytes.NewReader(page))
 	var cur url.Values // the fields of the open form
 	var curAction string
+	values := 0 // values in cur, counted with repeats
 	quota := false
 	for {
 		switch z.Next() {
@@ -158,15 +159,16 @@ func warningForm(page []byte) (action string, fields url.Values, err error) {
 			}
 			switch string(name) {
 			case "form":
-				cur, curAction = url.Values{}, attrs["action"]
+				cur, curAction, values = url.Values{}, attrs["action"], 0
 			case "input":
 				if cur == nil || !strings.EqualFold(attrs["type"], "hidden") || attrs["name"] == "" {
 					continue
 				}
-				if len(cur) >= maxFormFields || len(attrs["name"]) > maxFieldBytes || len(attrs["value"]) > maxFieldBytes {
+				if values >= maxFormFields || len(attrs["name"]) > maxFieldBytes || len(attrs["value"]) > maxFieldBytes {
 					return "", nil, errors.New("the Drive form has too many or too long fields")
 				}
 				cur.Add(attrs["name"], attrs["value"])
+				values++
 			}
 		case html.EndTagToken:
 			if name, _ := z.TagName(); string(name) == "form" && cur != nil {
