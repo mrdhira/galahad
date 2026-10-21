@@ -58,7 +58,7 @@ type Analyzer interface {
 // Run analyzes the file or directory at path. Symlinks are never followed and
 // FIFOs, devices and sockets are never opened. A cancelled ctx ends the walk
 // early and marks the coverage truncated. The caller sets Result.Tool.
-func Run(ctx context.Context, path string, analyzers []Analyzer) (protocol.Result, error) {
+func Run(ctx context.Context, path string, analyzers []Analyzer, opts ...Option) (protocol.Result, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return protocol.Result{}, err
@@ -67,7 +67,11 @@ func Run(ctx context.Context, path string, analyzers []Analyzer) (protocol.Resul
 	if err != nil {
 		return protocol.Result{}, err
 	}
-	j := newJob(analyzers)
+	lim := DefaultLimits()
+	for _, o := range opts {
+		o(&lim)
+	}
+	j := newJob(analyzers, lim)
 	j.res.StartedAt = time.Now().UTC()
 	j.res.Target.Name = protocol.CleanPath(filepath.Base(abs))
 
@@ -90,6 +94,7 @@ func Run(ctx context.Context, path string, analyzers []Analyzer) (protocol.Resul
 
 type job struct {
 	analyzers []Analyzer
+	lim       Limits
 	res       protocol.Result
 	topFiles  int
 	topBytes  int64
@@ -105,7 +110,7 @@ type job struct {
 	memberCut  bool  // a member past the file cap was dropped, and a skip says so
 }
 
-func newJob(analyzers []Analyzer) *job {
+func newJob(analyzers []Analyzer, lim Limits) *job {
 	as := append([]Analyzer(nil), analyzers...)
 	sort.SliceStable(as, func(a, b int) bool { return as[a].Name() < as[b].Name() })
 	names := make([]string, len(as))
@@ -114,6 +119,7 @@ func newJob(analyzers []Analyzer) *job {
 	}
 	return &job{
 		analyzers: as,
+		lim:       lim,
 		perRule:   map[string]int{},
 		iocs:      map[string]bool{},
 		unread:    map[string]bool{},
@@ -203,21 +209,21 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 	j.topFiles++
 	// Past the file cap, or with the job byte budget spent, only an auto-run file is
 	// read, from the extra allowance and not the job budget.
-	extraOnly := late || j.bytes >= MaxTotalBytes
+	extraOnly := late || j.bytes >= j.lim.MaxTotalBytes
 	if extraOnly && !late && !j.priority(cp) {
 		j.res.Coverage.Truncated = true
 		j.skip(cp, protocol.SkipTooLarge)
 		return
 	}
-	limit := MaxTotalBytes - j.bytes
-	readMax := int64(MaxFileSize)
+	limit := j.lim.MaxTotalBytes - j.bytes
+	readMax := j.lim.MaxFileSize
 	if extraOnly {
-		if j.extraFiles >= MaxExtraFiles || j.extraBytes >= MaxExtraBytes {
+		if j.extraFiles >= j.lim.MaxExtraFiles || j.extraBytes >= j.lim.MaxExtraBytes {
 			j.res.Coverage.Truncated = true
 			j.refuse(cp)
 			return
 		}
-		readMax = min(readMax, MaxExtraBytes-j.extraBytes)
+		readMax = min(readMax, j.lim.MaxExtraBytes-j.extraBytes)
 	}
 	h := sha256.New()
 	data, err := io.ReadAll(io.LimitReader(r, readMax+1))
@@ -227,7 +233,7 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 	}
 	size := int64(len(data))
 	_, _ = h.Write(data) // hash.Hash never fails
-	if size > MaxFileSize && !extraOnly {
+	if size > j.lim.MaxFileSize && !extraOnly {
 		n, err := io.Copy(h, io.LimitReader(r, limit-size+1))
 		size += n
 		if err != nil {
@@ -246,7 +252,7 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 	}
 	if extraOnly || size > limit {
 		j.res.Coverage.Truncated = true
-		if size > MaxFileSize || !j.priority(cp) {
+		if size > j.lim.MaxFileSize || !j.priority(cp) {
 			j.skip(cp, j.unreadReason(cp))
 			return
 		}
@@ -285,7 +291,7 @@ func (j *job) priority(cp string) bool {
 // the byte budget is spent. It draws on its own allowance and does not charge the
 // job budget.
 func (j *job) extra(ctx context.Context, c File, sum []byte) {
-	if j.extraFiles >= MaxExtraFiles || j.extraBytes+int64(len(c.Data)) > MaxExtraBytes {
+	if j.extraFiles >= j.lim.MaxExtraFiles || j.extraBytes+int64(len(c.Data)) > j.lim.MaxExtraBytes {
 		j.refuse(c.Path)
 		return
 	}
@@ -310,12 +316,12 @@ func (j *job) refuse(cp string) {
 // the walk should continue.
 func (j *job) admit() (ok, more bool) {
 	c := &j.res.Coverage
-	if c.FilesSeen >= maxFilesSeen {
+	if c.FilesSeen >= j.lim.MaxFilesSeen {
 		c.Truncated = true
 		return false, false
 	}
 	c.FilesSeen++
-	if c.FilesSeen > MaxFiles {
+	if c.FilesSeen > j.lim.MaxFiles {
 		c.Truncated = true
 		return false, true
 	}
@@ -325,7 +331,7 @@ func (j *job) admit() (ok, more bool) {
 // accept records a file's info and returns it for analysis, unless it is too
 // large to hand to analyzers.
 func (j *job) accept(c File, size int64, sum []byte) (File, bool) {
-	large := size > MaxFileSize
+	large := size > j.lim.MaxFileSize
 	head := c.Data[:min(len(c.Data), identifyWindow)]
 	if !large {
 		head = c.Data
@@ -352,7 +358,7 @@ func (j *job) accept(c File, size int64, sum []byte) (File, bool) {
 func (j *job) dispatch(ctx context.Context, f File) {
 	failed := false
 	for _, a := range j.analyzers {
-		out, reason := call(WithBudget(ctx, MaxTotalBytes-j.bytes), a, f)
+		out, reason := call(WithBudget(ctx, j.lim.MaxTotalBytes-j.bytes), a, f)
 		if reason != "" {
 			if !failed {
 				j.skip(f.Path, reason)
@@ -459,7 +465,7 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 		c.Member = c.Name
 		c.Name = c.Name[strings.LastIndexByte(c.Name, '/')+1:]
 		c.Depth = parent.Depth + 1
-		if j.bytes+int64(len(c.Data)) > MaxTotalBytes {
+		if j.bytes+int64(len(c.Data)) > j.lim.MaxTotalBytes {
 			// Queued members hold their bytes in memory, so they are charged here.
 			j.admit()
 			j.res.Coverage.Truncated = true
@@ -510,7 +516,7 @@ func (j *job) extraMember(ctx context.Context, c File) {
 	case !j.priority(c.Member):
 	case c.Depth > MaxNesting:
 		j.skip(c.Path, protocol.SkipDepth)
-	case int64(len(c.Data)) > MaxFileSize:
+	case int64(len(c.Data)) > j.lim.MaxFileSize:
 		j.skip(c.Path, j.unreadReason(c.Member))
 	default:
 		sum := sha256.Sum256(c.Data)
