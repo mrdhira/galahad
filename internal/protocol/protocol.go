@@ -17,8 +17,8 @@ const (
 
 // Skip reasons.
 const (
-	SkipTooLarge    = "too_large" // a file over a size or work limit of its own
-	SkipBudget      = "budget"    // a container with more members or bytes than its budget allows
+	SkipTooLarge    = "too_large" // a file over a size limit of its own
+	SkipBudget      = "budget"    // a container with more members or bytes than its budget allows, or a file whose work budget ran out before its end
 	SkipDepth       = "depth"
 	SkipUnsupported = "unsupported"
 	SkipEncrypted   = "encrypted"
@@ -141,13 +141,13 @@ func (s Skip) Unread() bool {
 }
 
 // HidesContent reports a skip behind which a payload could be hidden on purpose:
-// a container that is too deep, encrypted or over its member budget, input that
-// makes an analyzer run out of time or panic, or a member the container could
-// not extract, such as a zip member with an unsupported compression method. A
-// file that is only too large, such as a data file or a media file, is not one,
-// and neither is a file that is unsupported or fails to parse, even inside a
-// container: benign inputs have those, so they lower confidence but never decide
-// the verdict.
+// a container that is too deep, encrypted or over its member budget, a file
+// whose work budget ran out before its end, input that makes an analyzer run
+// out of time or panic, or a member the container could not extract, such as a
+// zip member with an unsupported compression method. A file that is only too
+// large, such as a data file or a media file, is not one, and neither is a file
+// that is unsupported or fails to parse, even inside a container: benign inputs
+// have those, so they lower confidence but never decide the verdict.
 func (s Skip) HidesContent() bool {
 	switch s.Reason {
 	case SkipBudget, SkipDepth, SkipEncrypted, SkipTimeout, SkipPanic, SkipUnreadable:

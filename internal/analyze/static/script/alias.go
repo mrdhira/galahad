@@ -1,6 +1,7 @@
 package script
 
 import (
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -52,9 +53,11 @@ var (
 	pyFromRE     = regexp.MustCompile(`from\s+([\w.]+)\s+import\s+\(?([^\n#;)]*)`)
 
 	// pyDynREs start with a literal word each, so that the search stays fast.
+	// They match only the network modules, so a file full of other imports
+	// costs no more than the search for the word.
 	pyDynREs = []*regexp.Regexp{
-		regexp.MustCompile(`__import__\s*\(\s*['"]([\w.]+)['"]`),
-		regexp.MustCompile(`importlib\s*\.\s*import_module\s*\(\s*['"]([\w.]+)['"]`),
+		regexp.MustCompile(`__import__\s*\(\s*['"](` + quoteNames(slices.Sorted(maps.Keys(pyNetNames))) + `)['"]`),
+		regexp.MustCompile(`importlib\s*\.\s*import_module\s*\(\s*['"](` + quoteNames(slices.Sorted(maps.Keys(pyNetNames))) + `)['"]`),
 	}
 
 	// tailAssignRE and tailDestructRE end at the end of the text before a
@@ -103,7 +106,7 @@ func (s *scan) aliasesOf(d *doc) *aliasSet {
 			a.scanJS(d, base, minEnd, text)
 		}
 		if d.lang&langPy != 0 {
-			a.scanPy(s, text)
+			a.scanPy(s, text, anyIn(d.data[base:base+len(text)], pyNetWords))
 		}
 	})
 	a.copies(s, d)
@@ -245,8 +248,9 @@ func (a *aliasSet) scanJS(d *doc, base, minEnd int, text string) {
 // import_module and plain imports count only the modules that reach the
 // network, at most maxPyImports of them per file; past that the rest of the
 // search is left out and s.limited says so. A match counts only in a statement
-// of its own.
-func (a *aliasSet) scanPy(s *scan, text string) {
+// of its own. The searches for network modules run only when net is set, which
+// means that text has the name of one.
+func (a *aliasSet) scanPy(s *scan, text string, net bool) {
 	over := func() bool {
 		if s.pyImports++; s.pyImports > maxPyImports {
 			s.limited = true
@@ -254,39 +258,38 @@ func (a *aliasSet) scanPy(s *scan, text string) {
 		}
 		return false
 	}
-	for _, re := range pyDynREs {
-		eachSubmatch(re, text, func(m []int) bool {
-			if _, ok := pyNetNames[text[m[2]:m[3]]]; !ok {
+	if net {
+		for _, re := range pyDynREs {
+			eachSubmatch(re, text, func(m []int) bool {
+				if a.full() || over() {
+					return false
+				}
+				if t := strings.TrimRight(tailBefore(text, m[0]), " \t"); !strings.HasSuffix(t, "=") && !strings.HasSuffix(t, "= await") {
+					return true
+				}
+				if g := tailAssignRE.FindStringSubmatch(tailBefore(text, m[0])); g != nil {
+					a.add(&a.ns, g[1])
+				}
+				return true
+			})
+		}
+		eachSubmatch(pyImportRE, text, func(m []int) bool {
+			mod := text[m[2]:m[3]]
+			if _, ok := pyNetNames[mod]; !ok || !statementStart(text, m[0]) {
 				return true
 			}
-			if a.full() || over() {
+			if len(a.seeds) >= len(pyNetNames) || over() {
 				return false
 			}
-			if t := strings.TrimRight(tailBefore(text, m[0]), " \t"); !strings.HasSuffix(t, "=") && !strings.HasSuffix(t, "= await") {
-				return true
-			}
-			if g := tailAssignRE.FindStringSubmatch(tailBefore(text, m[0])); g != nil {
-				a.add(&a.ns, g[1])
+			if name, _, _ := strings.Cut(mod, "."); !slices.Contains(a.seeds, name) {
+				a.seeds = append(a.seeds, name)
 			}
 			return true
 		})
-	}
-	eachSubmatch(pyImportRE, text, func(m []int) bool {
-		mod := text[m[2]:m[3]]
-		if _, ok := pyNetNames[mod]; !ok || !statementStart(text, m[0]) {
-			return true
-		}
-		if len(a.seeds) >= len(pyNetNames) || over() {
-			return false
-		}
-		if name, _, _ := strings.Cut(mod, "."); !slices.Contains(a.seeds, name) {
-			a.seeds = append(a.seeds, name)
-		}
-		return true
-	})
-	for _, m := range pyImportAsRE.FindAllStringSubmatch(text, -1) {
-		if _, ok := pyNetNames[m[1]]; ok {
-			a.add(&a.ns, m[2])
+		for _, m := range pyImportAsRE.FindAllStringSubmatch(text, -1) {
+			if _, ok := pyNetNames[m[1]]; ok {
+				a.add(&a.ns, m[2])
+			}
 		}
 	}
 	for _, m := range pyFromRE.FindAllStringSubmatch(text, -1) {
