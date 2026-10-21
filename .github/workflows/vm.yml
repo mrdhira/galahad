@@ -41,8 +41,11 @@ jobs:
       - name: Check the scripts
         run: shellcheck -x scripts/vm/*.sh
 
+      # Private, as galahad setup makes it: doctor refuses a state directory others can read.
       - name: Set up the state directory
-        run: echo "GALAHAD_HOME=$RUNNER_TEMP/galahad" >> "$GITHUB_ENV"
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/galahad"
+          echo "GALAHAD_HOME=$RUNNER_TEMP/galahad" >> "$GITHUB_ENV"
 
       # Hosted runners have /dev/kvm, but only root can use it until this udev rule is in place.
       - name: Set up KVM
