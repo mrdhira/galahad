@@ -57,7 +57,7 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 		Verdict:         strings.ToUpper(clean(string(res.Verdict))),
 		VerdictClass:    "clean",
 		Action:          actionLine(res.Verdict),
-		Meta:            metaLine(res, len(all)),
+		Meta:            metaLine(res),
 		TargetName:      clean(res.Target.Name),
 		Target:          describeTarget(res.Target),
 		Findings:        cleanGroups(hosts, all),
@@ -70,7 +70,7 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 	if res.Verdict == protocol.VerdictSuspicious || res.Verdict == protocol.VerdictMalicious {
 		d.VerdictClass = string(res.Verdict)
 	}
-	for _, g := range why(all) {
+	for _, g := range why(res.Verdict, all) {
 		e := g.Entries[0]
 		d.Why = append(d.Why, htmlLine{Severity: cleanSeverity(e.Severity), Title: text(hosts, e.Title), Location: clean(g.Location)})
 	}

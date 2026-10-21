@@ -184,6 +184,142 @@ func TestWriteContent(t *testing.T) {
 			wantNeitherHas: []string{"collect.sinkhole.test", "(100%)"},
 		},
 		{
+			name:   "html title names the verdict and the target",
+			mutate: func(r *protocol.Result) { r.Target.Name = "repo.zip" },
+			wantHTML: []string{
+				"<title>MALICIOUS: repo.zip – Galahad</title>",
+				`<h1><span class="badge">MALICIOUS</span> repo.zip</h1>`,
+			},
+		},
+		{
+			name:     "malicious action line and meta line",
+			mutate:   func(r *protocol.Result) {},
+			wantBoth: []string{"Do not open, install or run this.", "Score 100/100 · confidence 90% (high) · 3 findings · coverage 50% · 1 not analyzed"},
+		},
+		{
+			name:           "suspicious action line",
+			mutate:         func(r *protocol.Result) { r.Verdict = protocol.VerdictSuspicious },
+			wantBoth:       []string{"Treat with caution. Review the findings below before you open, install or run it."},
+			wantHTML:       []string{`<header class="verdict suspicious">`, "<title>SUSPICIOUS: sample – Galahad</title>"},
+			wantNeitherHas: []string{"Do not open"},
+		},
+		{
+			name:           "clean action line",
+			mutate:         func(r *protocol.Result) { r.Verdict, r.Coverage.Skipped = protocol.VerdictClean, nil },
+			wantBoth:       []string{"No known-bad patterns found. This is not a guarantee.", "coverage 50%"},
+			wantHTML:       []string{`<header class="verdict clean">`},
+			wantNeitherHas: []string{"Do not open", "not analyzed"},
+		},
+		{
+			name:     "page has landmarks, 16px text and print styles",
+			mutate:   func(r *protocol.Result) {},
+			wantHTML: []string{"<header ", "</header>\n<main>", "</main>\n<footer>", "font:16px/1.5", "@media print"},
+		},
+		{
+			name: "meta line counts findings, not evidence locations",
+			mutate: func(r *protocol.Result) {
+				r.Findings = []protocol.Finding{{RuleID: "GAL-A-001", Severity: protocol.SeverityHigh, Title: "Spread", Evidence: []protocol.Evidence{
+					{Path: "a.js", Line: 1, Snippet: "x"}, {Path: "b.js", Line: 2, Snippet: "y"}, {Path: "c.js", Line: 3, Snippet: "z"},
+				}}}
+			},
+			wantBoth:       []string{" · 1 finding · "},
+			wantNeitherHas: []string{"3 findings"},
+		},
+		{
+			name: "meta line gives counts, not a percentage, next to skipped items",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 1, FilesAnalyzed: 1, Skipped: []protocol.Skip{{Path: "a", Reason: "timeout"}, {Path: "b", Reason: "timeout"}}}
+			},
+			wantBoth:       []string{" · 1 of 1 file analyzed · 2 not analyzed"},
+			wantNeitherHas: []string{"coverage 99%", "coverage 100%"},
+		},
+		{
+			name:     "header warns when items were not analyzed",
+			mutate:   func(r *protocol.Result) {},
+			wantHTML: []string{"1 not analyzed</p>\n<p class=\"warn\">1 item was not analyzed; the verdict does not cover it.</p>\n<h2 class=\"why-title\">Why</h2>"},
+		},
+		{
+			name:           "a hostile target name is escaped in title and heading",
+			mutate:         func(r *protocol.Result) { r.Target.Name = `</title><script>alert(1)</script> https://e.test/x` },
+			wantHTML:       []string{"&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; hxxps://e[.]test/x – Galahad</title>"},
+			wantNeitherHas: []string{"<script", "</script", "https://e.test", "href=", "src="},
+		},
+		{
+			name: "why lists the first three critical or high findings with their location",
+			mutate: func(r *protocol.Result) {
+				r.Findings = nil
+				for i, sev := range []protocol.Severity{protocol.SeverityMedium, protocol.SeverityCritical, protocol.SeverityHigh, protocol.SeverityHigh, protocol.SeverityHigh} {
+					r.Findings = append(r.Findings, protocol.Finding{RuleID: fmt.Sprintf("GAL-W-%03d", i), Severity: sev, Title: fmt.Sprintf("Reason %d", i), Evidence: []protocol.Evidence{{Path: fmt.Sprintf("w%d.js", i), Line: 1, Snippet: fmt.Sprintf("s%d", i)}}})
+				}
+			},
+			wantMD:         []string{"## Why\n\n- critical: Reason 1 in w1.js:1\n- high: Reason 2 in w2.js:1\n- high: Reason 3 in w3.js:1\n\n"},
+			wantHTML:       []string{`<ul class="why">`, "Reason 1", "Reason 3", `<code>w2.js:1</code>`},
+			wantMDAbsent:   []string{"- high: Reason 4", "- medium: Reason 0"},
+			wantHTMLAbsent: []string{`</span> Reason 4`, `</span> Reason 0`},
+		},
+		{
+			name: "why lists a title once when it repeats at another location",
+			mutate: func(r *protocol.Result) {
+				r.Findings = []protocol.Finding{{RuleID: "GAL-W-001", Severity: protocol.SeverityHigh, Title: "Same title", Evidence: []protocol.Evidence{{Path: "a.js", Line: 1, Snippet: "x"}, {Path: "b.js", Line: 2, Snippet: "y"}}}}
+			},
+			wantMD:       []string{"## Why\n\n- high: Same title in a.js:1\n\n"},
+			wantMDAbsent: []string{"- high: Same title in b.js:2"},
+		},
+		{
+			name: "why falls back to medium findings for a suspicious verdict",
+			mutate: func(r *protocol.Result) {
+				r.Verdict, r.Findings = protocol.VerdictSuspicious, nil
+				for i := 0; i < 4; i++ {
+					r.Findings = append(r.Findings, protocol.Finding{RuleID: "GAL-M-001", Severity: protocol.SeverityMedium, Title: fmt.Sprintf("Medium %d", i), Evidence: []protocol.Evidence{{Path: fmt.Sprintf("m%d.js", i), Line: 1, Snippet: fmt.Sprintf("s%d", i)}}})
+				}
+			},
+			wantMD:       []string{"## Why\n\n- medium: Medium 0 in m0.js:1\n- medium: Medium 1 in m1.js:1\n- medium: Medium 2 in m2.js:1\n\n"},
+			wantMDAbsent: []string{"- medium: Medium 3"},
+			wantHTML:     []string{`<ul class="why">`},
+		},
+		{
+			name: "no why section for a clean verdict",
+			mutate: func(r *protocol.Result) {
+				r.Verdict, r.Findings = protocol.VerdictClean, r.Findings[1:]
+			},
+			wantNeitherHas: []string{"Why"},
+		},
+		{
+			name: "no why section without critical, high or medium findings",
+			mutate: func(r *protocol.Result) {
+				r.Findings = r.Findings[2:]
+			},
+			wantNeitherHas: []string{"Why"},
+		},
+		{
+			name:           "runs automatically lists auto-run findings above findings",
+			mutate:         func(r *protocol.Result) {},
+			wantMD:         []string{"## Runs automatically (1)\n\n- medium: Runs on install in package.json:1\n"},
+			wantHTML:       []string{`<h2 id="auto">Runs automatically (1)</h2>`, `<span class="tag">runs automatically</span>`, `<code>package.json:1</code></li>`},
+			wantHTMLAbsent: []string{"Auto-execution inventory"},
+		},
+		{
+			name: "markdown caps runs automatically at ten",
+			mutate: func(r *protocol.Result) {
+				r.Findings = nil
+				for i := 0; i < 15; i++ {
+					rule := "GAL-R-001"
+					if i < 12 {
+						rule = "GAL-AUTOEXEC-001"
+					}
+					r.Findings = append(r.Findings, protocol.Finding{RuleID: rule, Severity: protocol.SeverityLow, Title: "t", Evidence: []protocol.Evidence{{Path: "a", Line: i + 1}}})
+				}
+			},
+			wantMD: []string{"## Runs automatically (12)", "Showing 10 of 12. See report.json for the rest.", "## Findings (15)", "Showing 10 of 15. See report.json for the rest."},
+		},
+		{
+			name: "no runs automatically section without auto-run findings",
+			mutate: func(r *protocol.Result) {
+				r.Findings = r.Findings[:1]
+			},
+			wantNeitherHas: []string{"Runs automatically"},
+		},
+		{
 			name: "domains from the IOC list are defanged in free text only",
 			mutate: func(r *protocol.Result) {
 				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test", Path: "a.txt", Line: 1})
@@ -216,46 +352,102 @@ func TestWriteContent(t *testing.T) {
 			wantMDAbsent: []string{"\n- [.]:"},
 		},
 		{
-			name: "directory target shows folder and file count without a hash",
-			mutate: func(r *protocol.Result) {
-				r.Target = protocol.Target{Name: "repo", Kind: protocol.TargetDir, Size: 208896, SHA256: sha, FileCount: 2}
-			},
-			wantMD:         []string{"- Kind: folder, 2 files", "- Size: 204 KiB"},
-			wantHTML:       []string{"<dd>folder, 2 files</dd>", "<dd>204 KiB</dd>"},
-			wantNeitherHas: []string{"SHA-256", sha, "208896"},
-		},
-		{
-			name:     "directory with one file is singular",
-			mutate:   func(r *protocol.Result) { r.Target.FileCount, r.Target.Size = 1, 1 },
-			wantBoth: []string{"folder, 1 file", "1 byte"},
-			wantNeitherHas: []string{
-				"1 files", "1 bytes",
-			},
-		},
-		{
-			name: "file target shows hash and size",
-			mutate: func(r *protocol.Result) {
-				r.Target = protocol.Target{Name: "a.zip", Kind: protocol.TargetFile, Size: 5 * 1024 * 1024, SHA256: sha, FileCount: 1}
-			},
-			wantMD:         []string{"- Kind: file\n", "- SHA-256: " + sha, "- Size: 5.0 MiB"},
-			wantHTML:       []string{"<dd>file</dd>", `<dt>SHA-256</dt><dd><code>` + sha + `</code>`, "<dd>5.0 MiB</dd>"},
-			wantNeitherHas: []string{"1 file"},
-		},
-		{
-			name: "file target without a hash has no hash row",
-			mutate: func(r *protocol.Result) {
-				r.Target = protocol.Target{Name: "a.zip", Kind: protocol.TargetFile, Size: 12, FileCount: 1}
-			},
-			wantBoth:       []string{"12 bytes"},
-			wantNeitherHas: []string{"SHA-256"},
-		},
-		{
 			name: "ftp and file urls are defanged",
 			mutate: func(r *protocol.Result) {
 				r.Findings[0].Evidence[0].Snippet = "get ftp://f.test/a.bin, ftps://g.test/b and file:///C:/x.exe"
 			},
 			wantBoth:       []string{"fxp://f[.]test/a[.]bin", "fxps://g[.]test/b", "fxle:///C:/x[.]exe"},
 			wantNeitherHas: []string{"ftp://", "ftps://", "file://"},
+		},
+		{
+			name: "findings sharing location and snippet are grouped with every rule and title",
+			mutate: func(r *protocol.Result) {
+				ev := []protocol.Evidence{{Path: "setup.js", Line: 5, Snippet: "  eval(x)"}}
+				r.Findings = []protocol.Finding{
+					{RuleID: "GAL-A-001", Severity: protocol.SeverityHigh, Title: "First title", Attack: "T1059", Analyzer: "a", Evidence: ev},
+					{RuleID: "GAL-B-001", Severity: protocol.SeverityCritical, Title: "Second title", Attack: "T1204", Analyzer: "b", Evidence: ev},
+					{RuleID: "GAL-C-001", Severity: protocol.SeverityLow, Title: "Elsewhere", Analyzer: "c", Evidence: []protocol.Evidence{{Path: "setup.js", Line: 6, Snippet: "eval(x)"}}},
+				}
+			},
+			wantBoth: []string{"Findings (2)"},
+			wantMD:   []string{"| critical | GAL-B-001, GAL-A-001 | Second title; First title | T1204, T1059 | setup.js:5 | eval\\(x\\) |"},
+			wantHTML: []string{
+				`<ol class="findings">`,
+				`<h3>Second title</h3><span class="rid">GAL-B-001 · ATT&amp;CK T1204</span>`,
+				`<h3>First title</h3><span class="rid">GAL-A-001 · ATT&amp;CK T1059</span>`,
+				"<pre>eval(x)</pre>",
+				"<pre>eval(x)</pre>\n</li>",
+			},
+			wantHTMLAbsent: []string{"<pre>  eval", "<pre> eval"},
+		},
+		{
+			name: "same rule and title at the same place is listed once",
+			mutate: func(r *protocol.Result) {
+				ev := protocol.Evidence{Path: "a.js", Line: 1, Snippet: "x"}
+				r.Findings = []protocol.Finding{{RuleID: "GAL-A-001", Severity: protocol.SeverityHigh, Title: "Twice", Evidence: []protocol.Evidence{ev, ev}}}
+			},
+			wantMD:         []string{"## Findings (1)"},
+			wantNeitherHas: []string{"Twice; Twice", "GAL-A-001, GAL-A-001"},
+		},
+		{
+			name: "findings without evidence are never grouped",
+			mutate: func(r *protocol.Result) {
+				r.Findings = []protocol.Finding{
+					{RuleID: "GAL-A-001", Severity: protocol.SeverityLow, Title: "One"},
+					{RuleID: "GAL-B-001", Severity: protocol.SeverityLow, Title: "Two"},
+				}
+			},
+			wantBoth: []string{"Findings (2)"},
+		},
+		{
+			name: "findings that differ only in how path and line join are not grouped",
+			mutate: func(r *protocol.Result) {
+				r.Findings = []protocol.Finding{
+					{RuleID: "GAL-A-001", Severity: protocol.SeverityHigh, Title: "One", Evidence: []protocol.Evidence{{Path: "a:1", Line: 0, Snippet: "x"}}},
+					{RuleID: "GAL-B-001", Severity: protocol.SeverityHigh, Title: "Two", Evidence: []protocol.Evidence{{Path: "a", Line: 1, Snippet: "x"}}},
+				}
+			},
+			wantBoth: []string{"Findings (2)"},
+		},
+		{
+			name:     "iocs have a copyable list with one defanged value per line",
+			mutate:   func(r *protocol.Result) {},
+			wantHTML: []string{"<details open>", "<pre>hxxps://collect[.]sinkhole[.]test/k\nwho[@]sinkhole[.]test\n</pre>"},
+		},
+		{
+			name: "a repeated ioc value is listed once in the copyable list",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = []protocol.IOC{{Type: "ip", Value: "192.0.2.1", Path: "a", Line: 1}, {Type: "ip", Value: "192.0.2.1", Path: "b", Line: 2}}
+			},
+			wantHTML: []string{"<pre>192[.]0[.]2[.]1\n</pre>"},
+		},
+		{
+			name:     "ioc section keeps its name when the verdict is not clean",
+			mutate:   func(r *protocol.Result) {},
+			wantBoth: []string{"IOCs (2)"},
+			wantNeitherHas: []string{
+				"not a sign of compromise",
+			},
+		},
+		{
+			name:     "ioc section of a clean verdict is not a sign of compromise",
+			mutate:   func(r *protocol.Result) { r.Verdict = protocol.VerdictClean },
+			wantBoth: []string{"Network indicators (not a sign of compromise)"},
+			wantMD:   []string{"## Network indicators (not a sign of compromise)\n"},
+			wantHTML: []string{`<h2 id="iocs">Network indicators (not a sign of compromise)</h2>`},
+			wantNeitherHas: []string{
+				"IOCs (2)",
+			},
+		},
+		{
+			name:   "html tables keep table semantics and scroll in a region",
+			mutate: func(r *protocol.Result) {},
+			wantHTML: []string{
+				`<div class="scroll" tabindex="0" role="region" aria-label="IOCs">`,
+				`<div class="scroll" tabindex="0" role="region" aria-label="Skipped items">`,
+				"<thead>", `<th scope="col">Value</th>`, `<th scope="col">Reason</th>`, "<tbody>", ".scroll{overflow-x:auto}",
+			},
+			wantHTMLAbsent: []string{"display:block", "<script", "href="},
 		},
 		{
 			name: "skips next to full analysis never read 100%",
@@ -314,170 +506,49 @@ func TestWriteContent(t *testing.T) {
 			wantBoth: []string{"Files analyzed: 0 of 0 (0%)"},
 		},
 		{
-			name:   "html tables keep table semantics and scroll in a region",
-			mutate: func(r *protocol.Result) {},
-			wantHTML: []string{
-				`<div class="scroll" tabindex="0" role="region" aria-label="IOCs">`,
-				`<div class="scroll" tabindex="0" role="region" aria-label="Skipped items">`,
-				"<thead>", `<th scope="col">Value</th>`, `<th scope="col">Reason</th>`, "<tbody>", ".scroll{overflow-x:auto}",
-			},
-			wantHTMLAbsent: []string{"display:block", "<script", "href="},
-		},
-		{
-			name:   "html title names the verdict and the target",
-			mutate: func(r *protocol.Result) { r.Target.Name = "repo.zip" },
-			wantHTML: []string{
-				"<title>MALICIOUS: repo.zip – Galahad</title>",
-				`<h1><span class="badge">MALICIOUS</span>repo.zip</h1>`,
-			},
-		},
-		{
-			name:     "malicious action line and meta line",
-			mutate:   func(r *protocol.Result) {},
-			wantBoth: []string{"Do not open, install or run this.", "Score 100/100 · confidence 90% (high) · 3 findings · coverage 50% · 1 not analyzed"},
-		},
-		{
-			name:           "suspicious action line",
-			mutate:         func(r *protocol.Result) { r.Verdict = protocol.VerdictSuspicious },
-			wantBoth:       []string{"Treat with caution. Review the findings below before you open, install or run it."},
-			wantHTML:       []string{`<header class="verdict suspicious">`, "<title>SUSPICIOUS: sample – Galahad</title>"},
-			wantNeitherHas: []string{"Do not open"},
-		},
-		{
-			name:           "clean action line",
-			mutate:         func(r *protocol.Result) { r.Verdict, r.Coverage.Skipped = protocol.VerdictClean, nil },
-			wantBoth:       []string{"No known-bad patterns found. This is not a guarantee.", "coverage 50%"},
-			wantHTML:       []string{`<header class="verdict clean">`},
-			wantNeitherHas: []string{"Do not open", "not analyzed"},
-		},
-		{
-			name: "why lists the first three critical or high findings with their location",
+			name: "directory target shows folder and file count without a hash",
 			mutate: func(r *protocol.Result) {
-				r.Findings = nil
-				for i, sev := range []protocol.Severity{protocol.SeverityMedium, protocol.SeverityCritical, protocol.SeverityHigh, protocol.SeverityHigh, protocol.SeverityHigh} {
-					r.Findings = append(r.Findings, protocol.Finding{RuleID: fmt.Sprintf("GAL-W-%03d", i), Severity: sev, Title: fmt.Sprintf("Reason %d", i), Evidence: []protocol.Evidence{{Path: fmt.Sprintf("w%d.js", i), Line: 1, Snippet: fmt.Sprintf("s%d", i)}}})
-				}
+				r.Target = protocol.Target{Name: "repo", Kind: protocol.TargetDir, Size: 208896, SHA256: sha, FileCount: 2}
 			},
-			wantMD:         []string{"## Why\n\n- critical: Reason 1 in w1.js:1\n- high: Reason 2 in w2.js:1\n- high: Reason 3 in w3.js:1\n\n"},
-			wantHTML:       []string{`<ul class="why">`, "Reason 1", "Reason 3", `<code>w2.js:1</code>`},
-			wantMDAbsent:   []string{"- high: Reason 4", "- medium: Reason 0"},
-			wantHTMLAbsent: []string{`</span> Reason 4`, `</span> Reason 0`},
+			wantMD:         []string{"- Kind: folder, 2 files", "- Size: 204 KiB"},
+			wantHTML:       []string{"<dd>folder, 2 files</dd>", "<dd>204 KiB</dd>"},
+			wantNeitherHas: []string{"SHA-256", sha, "208896"},
 		},
 		{
-			name: "why lists a title once when it repeats at another location",
-			mutate: func(r *protocol.Result) {
-				r.Findings = []protocol.Finding{{RuleID: "GAL-W-001", Severity: protocol.SeverityHigh, Title: "Same title", Evidence: []protocol.Evidence{{Path: "a.js", Line: 1, Snippet: "x"}, {Path: "b.js", Line: 2, Snippet: "y"}}}}
-			},
-			wantMD:       []string{"## Why\n\n- high: Same title in a.js:1\n\n"},
-			wantMDAbsent: []string{"- high: Same title in b.js:2"},
-		},
-		{
-			name: "no why section without critical or high findings",
-			mutate: func(r *protocol.Result) {
-				r.Findings = r.Findings[1:]
-			},
-			wantNeitherHas: []string{"Why"},
-		},
-		{
-			name:           "runs automatically lists auto-run findings above findings",
-			mutate:         func(r *protocol.Result) {},
-			wantMD:         []string{"## Runs automatically (1)\n\n- medium: Runs on install in package.json:1\n"},
-			wantHTML:       []string{`<h2 id="auto">Runs automatically (1)</h2>`, `<span class="tag">runs automatically</span>`, `<code>package.json:1</code></li>`},
-			wantHTMLAbsent: []string{"Auto-execution inventory"},
-		},
-		{
-			name: "no runs automatically section without auto-run findings",
-			mutate: func(r *protocol.Result) {
-				r.Findings = r.Findings[:1]
-			},
-			wantNeitherHas: []string{"Runs automatically"},
-		},
-		{
-			name: "findings sharing location and snippet are grouped with every rule and title",
-			mutate: func(r *protocol.Result) {
-				ev := []protocol.Evidence{{Path: "setup.js", Line: 5, Snippet: "  eval(x)"}}
-				r.Findings = []protocol.Finding{
-					{RuleID: "GAL-A-001", Severity: protocol.SeverityHigh, Title: "First title", Attack: "T1059", Analyzer: "a", Evidence: ev},
-					{RuleID: "GAL-B-001", Severity: protocol.SeverityCritical, Title: "Second title", Attack: "T1204", Analyzer: "b", Evidence: ev},
-					{RuleID: "GAL-C-001", Severity: protocol.SeverityLow, Title: "Elsewhere", Analyzer: "c", Evidence: []protocol.Evidence{{Path: "setup.js", Line: 6, Snippet: "eval(x)"}}},
-				}
-			},
-			wantBoth: []string{"Findings (2)"},
-			wantMD:   []string{"| critical | GAL-B-001, GAL-A-001 | Second title; First title | T1204, T1059 | setup.js:5 | eval\\(x\\) |"},
-			wantHTML: []string{
-				`<ol class="findings">`,
-				`<h3>Second title</h3><span class="rid">GAL-B-001 · ATT&amp;CK T1204</span>`,
-				`<h3>First title</h3><span class="rid">GAL-A-001 · ATT&amp;CK T1059</span>`,
-				"<pre>eval(x)</pre>",
-				"<pre>eval(x)</pre>\n</li>",
-			},
-			wantHTMLAbsent: []string{"<pre>  eval", "<pre> eval"},
-		},
-		{
-			name: "same rule and title at the same place is listed once",
-			mutate: func(r *protocol.Result) {
-				ev := protocol.Evidence{Path: "a.js", Line: 1, Snippet: "x"}
-				r.Findings = []protocol.Finding{{RuleID: "GAL-A-001", Severity: protocol.SeverityHigh, Title: "Twice", Evidence: []protocol.Evidence{ev, ev}}}
-			},
-			wantMD:         []string{"## Findings (1)"},
-			wantNeitherHas: []string{"Twice; Twice", "GAL-A-001, GAL-A-001"},
-		},
-		{
-			name: "findings without evidence are never grouped",
-			mutate: func(r *protocol.Result) {
-				r.Findings = []protocol.Finding{
-					{RuleID: "GAL-A-001", Severity: protocol.SeverityLow, Title: "One"},
-					{RuleID: "GAL-B-001", Severity: protocol.SeverityLow, Title: "Two"},
-				}
-			},
-			wantBoth: []string{"Findings (2)"},
-		},
-		{
-			name:     "iocs have a copyable list with one defanged value per line",
-			mutate:   func(r *protocol.Result) {},
-			wantHTML: []string{"<details open>", "<pre>hxxps://collect[.]sinkhole[.]test/k\nwho[@]sinkhole[.]test\n</pre>"},
-		},
-		{
-			name: "a repeated ioc value is listed once in the copyable list",
-			mutate: func(r *protocol.Result) {
-				r.IOCs = []protocol.IOC{{Type: "ip", Value: "192.0.2.1", Path: "a", Line: 1}, {Type: "ip", Value: "192.0.2.1", Path: "b", Line: 2}}
-			},
-			wantHTML: []string{"<pre>192[.]0[.]2[.]1\n</pre>"},
-		},
-		{
-			name:     "ioc section keeps its name when the verdict is not clean",
-			mutate:   func(r *protocol.Result) {},
-			wantBoth: []string{"IOCs (2)"},
+			name:     "directory with one file is singular",
+			mutate:   func(r *protocol.Result) { r.Target.FileCount, r.Target.Size = 1, 1 },
+			wantBoth: []string{"folder, 1 file", "1 byte"},
 			wantNeitherHas: []string{
-				"not a sign of compromise",
+				"1 files", "1 bytes",
 			},
 		},
 		{
-			name:     "ioc section of a clean verdict is not a sign of compromise",
-			mutate:   func(r *protocol.Result) { r.Verdict = protocol.VerdictClean },
-			wantBoth: []string{"Network indicators (not a sign of compromise)"},
-			wantMD:   []string{"## Network indicators (not a sign of compromise)\n"},
-			wantHTML: []string{`<h2 id="iocs">Network indicators (not a sign of compromise)</h2>`},
-			wantNeitherHas: []string{
-				"IOCs (2)",
+			name: "file target shows hash and size",
+			mutate: func(r *protocol.Result) {
+				r.Target = protocol.Target{Name: "a.zip", Kind: protocol.TargetFile, Size: 5 * 1024 * 1024, SHA256: sha, FileCount: 1}
 			},
+			wantMD:         []string{"- Kind: file\n", "- SHA-256: " + sha, "- Size: 5.0 MiB"},
+			wantHTML:       []string{"<dd>file</dd>", `<dt>SHA-256</dt><dd><code>` + sha + `</code>`, "<dd>5.0 MiB</dd>"},
+			wantNeitherHas: []string{"1 file"},
 		},
 		{
-			name:     "page has landmarks and the scoring reasons are in the footer",
+			name: "file target without a hash has no hash row",
+			mutate: func(r *protocol.Result) {
+				r.Target = protocol.Target{Name: "a.zip", Kind: protocol.TargetFile, Size: 12, FileCount: 1}
+			},
+			wantBoth:       []string{"12 bytes"},
+			wantNeitherHas: []string{"SHA-256"},
+		},
+		{
+			name:     "scoring reasons are listed in the footer",
 			mutate:   func(r *protocol.Result) {},
-			wantHTML: []string{"<header ", "</header>\n<main>", "</main>\n<footer>", "<h2>Scoring details</h2>", "hard trigger GAL-SIG-001 (critical) at a.txt:3", "font:16px/1.5", "@media print"},
+			wantHTML: []string{"</main>\n<footer>\n<h2>Scoring details</h2>", "hard trigger GAL-SIG-001 (critical) at a.txt:3"},
 			wantMD:   []string{"## Scoring details\n\n- hard trigger GAL-SIG-001"},
 		},
 		{
 			name:     "no scoring reasons",
 			mutate:   func(r *protocol.Result) { r.Reasons = nil },
 			wantBoth: []string{"No scoring reasons."},
-		},
-		{
-			name:           "a hostile target name is escaped in title and heading",
-			mutate:         func(r *protocol.Result) { r.Target.Name = `</title><script>alert(1)</script> https://e.test/x` },
-			wantHTML:       []string{"&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; hxxps://e[.]test/x – Galahad</title>"},
-			wantNeitherHas: []string{"<script", "</script", "https://e.test", "href=", "src="},
 		},
 	}
 	for _, tt := range tests {

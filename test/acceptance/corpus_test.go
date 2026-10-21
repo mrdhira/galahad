@@ -31,7 +31,7 @@ func checkHTMLPage(t *testing.T, html, verdict string) {
 	for _, want := range []string{
 		`content="default-src 'none'; style-src 'unsafe-inline'"`,
 		"<title>" + strings.ToUpper(verdict) + ": ",
-		actionLines[verdict], "<header ", "<main>", "<footer>", "<h1><span class=\"badge\">" + strings.ToUpper(verdict) + "</span>",
+		actionLines[verdict], "<header ", "<main>", "<footer>", "<h1><span class=\"badge\">" + strings.ToUpper(verdict) + "</span> ",
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("report.html lacks %q", want)

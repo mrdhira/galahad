@@ -57,7 +57,7 @@ func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
 
 	hosts := iocHosts(res)
 	all := groups(res, nil)
-	if top := why(all); len(top) > 0 {
+	if top := why(res.Verdict, all); len(top) > 0 {
 		fmt.Fprintf(w, "\nWhy:\n")
 		for _, g := range top {
 			e := g.Entries[0]

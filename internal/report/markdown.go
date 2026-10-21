@@ -71,8 +71,8 @@ func renderMarkdown(res *protocol.Result) string {
 
 	all := groups(res, nil)
 	w("# Galahad report\n\n")
-	w("**Verdict: %s**\n\n%s\n\n%s\n", mdEscape(strings.ToUpper(string(res.Verdict))), actionLine(res.Verdict), metaLine(res, len(all)))
-	if top := why(all); len(top) > 0 {
+	w("**Verdict: %s**\n\n%s\n\n%s\n", mdEscape(strings.ToUpper(string(res.Verdict))), actionLine(res.Verdict), metaLine(res))
+	if top := why(res.Verdict, all); len(top) > 0 {
 		w("\n## Why\n\n")
 		for _, g := range top {
 			mdLine(&b, hosts, g.Entries[0].Severity, g.Entries[0].Title, g.Location)

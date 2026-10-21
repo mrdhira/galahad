@@ -81,6 +81,8 @@ type row struct {
 	Rule     string
 	Title    string
 	Attack   string
+	Path     string // empty without evidence
+	Line     int
 	Location string // path:line, empty without evidence
 	Snippet  string
 	Auto     bool // the finding is an auto-execution one
@@ -108,6 +110,7 @@ func rows(res *protocol.Result, keep func(protocol.Finding) bool) []row {
 		}
 		for _, e := range f.Evidence {
 			r := base
+			r.Path, r.Line = e.Path, e.Line
 			r.Location = location(e.Path, e.Line)
 			r.Snippet = strings.TrimLeftFunc(e.Snippet, unicode.IsSpace)
 			out = append(out, r)
@@ -135,18 +138,24 @@ type group struct {
 	Location, Snippet string
 }
 
-// groups merges the rows of the kept findings by location and snippet. Groups keep the order of
+// groups merges the rows of the kept findings by path, line and snippet. The key is not the
+// "path:line" text: a file named "a:1" would collide with line 1 of file "a". Groups keep the order of
 // their most severe row.
 func groups(res *protocol.Result, keep func(protocol.Finding) bool) []group {
 	var out []group
-	at := map[[2]string]int{}
+	type key struct {
+		path    string
+		line    int
+		snippet string
+	}
+	at := map[key]int{}
 	for _, r := range rows(res, keep) {
 		e := entry{Severity: r.Severity, Rule: r.Rule, Title: r.Title, Attack: r.Attack, Auto: r.Auto}
-		if r.Location == "" && r.Snippet == "" {
+		if r.Path == "" && r.Line == 0 && r.Snippet == "" {
 			out = append(out, group{Entries: []entry{e}})
 			continue
 		}
-		k := [2]string{r.Location, r.Snippet}
+		k := key{r.Path, r.Line, r.Snippet}
 		i, ok := at[k]
 		if !ok {
 			at[k] = len(out)
@@ -180,14 +189,26 @@ func (g group) join(sep string, get func(entry) string) string {
 // maxWhy is how many reasons the verdict header lists.
 const maxWhy = 3
 
-// why returns the first maxWhy groups whose most severe finding is critical or high. A title that
-// repeats at another location is listed once, so the reasons differ.
-func why(gs []group) []group {
+// why returns the first maxWhy groups whose most severe finding is critical or high. Without
+// any, a suspicious verdict falls back to the medium ones. A title that repeats at another
+// location is listed once, so the reasons differ. A clean verdict has no reasons.
+func why(v protocol.Verdict, gs []group) []group {
+	if v == protocol.VerdictClean {
+		return nil
+	}
+	top := pick(gs, protocol.SeverityCritical, protocol.SeverityHigh)
+	if len(top) == 0 {
+		top = pick(gs, protocol.SeverityMedium)
+	}
+	return top
+}
+
+func pick(gs []group, sevs ...protocol.Severity) []group {
 	var out []group
 	seen := map[string]bool{}
 	for _, g := range gs {
 		title := g.Entries[0].Title
-		if s := g.severity(); seen[title] || s != protocol.SeverityCritical && s != protocol.SeverityHigh {
+		if seen[title] || !slices.Contains(sevs, g.severity()) {
 			continue
 		}
 		seen[title] = true
@@ -210,12 +231,17 @@ func actionLine(v protocol.Verdict) string {
 	}
 }
 
-// metaLine is the one-line summary under the verdict. It counts the items that were not analyzed
-// only when there are some.
-func metaLine(res *protocol.Result, findings int) string {
-	line := fmt.Sprintf("Score %d/100 \u00b7 confidence %d%% (%s) \u00b7 %s \u00b7 coverage %s",
-		res.Score, res.Confidence, clean(res.ConfidenceLevel), plural(findings, "finding"), coveragePercent(res.Coverage))
-	if n := len(res.Coverage.Skipped); n > 0 {
+// metaLine is the one-line summary under the verdict. Next to skipped items it gives counts, not a
+// percentage, and it counts the items that were not analyzed only when there are some.
+func metaLine(res *protocol.Result) string {
+	c := res.Coverage
+	cov := "coverage " + percent(c.FilesAnalyzed, c.FilesSeen)
+	if alsoSkipped(c) {
+		cov = fmt.Sprintf("%d of %s analyzed", c.FilesAnalyzed, plural(c.FilesSeen, "file"))
+	}
+	line := fmt.Sprintf("Score %d/100 \u00b7 confidence %d%% (%s) \u00b7 %s \u00b7 %s",
+		res.Score, res.Confidence, clean(res.ConfidenceLevel), plural(len(res.Findings), "finding"), cov)
+	if n := len(c.Skipped); n > 0 {
 		line += fmt.Sprintf(" \u00b7 %d not analyzed", n)
 	}
 	return line
@@ -287,15 +313,6 @@ func percent(analyzed, seen int) string {
 	return fmt.Sprintf("%d%%", p)
 }
 
-// coveragePercent is percent for the whole coverage. It never shows 100% next to skipped items.
-func coveragePercent(c protocol.Coverage) string {
-	p := percent(c.FilesAnalyzed, c.FilesSeen)
-	if p == "100%" && len(c.Skipped) > 0 {
-		return "99%"
-	}
-	return p
-}
-
 // plural returns "1 file" or "2 files".
 func plural(n int, noun string) string {
 	if n == 1 {
@@ -335,10 +352,16 @@ func describeTarget(t protocol.Target) targetInfo {
 	return targetInfo{Kind: "file", Size: humanSize(t.Size), SHA256: t.SHA256}
 }
 
+// alsoSkipped is true when every seen file was analyzed but other items were skipped, so a
+// percentage would read 100% next to a skip.
+func alsoSkipped(c protocol.Coverage) bool {
+	return len(c.Skipped) > 0 && c.FilesSeen > 0 && c.FilesAnalyzed >= c.FilesSeen
+}
+
 // coverageLine is the coverage sentence. Some skipped items are not in FilesSeen, so with skips
 // it names them next to the counts instead of showing 100%.
 func coverageLine(c protocol.Coverage) string {
-	if len(c.Skipped) > 0 && c.FilesSeen > 0 && c.FilesAnalyzed >= c.FilesSeen {
+	if alsoSkipped(c) {
 		return fmt.Sprintf("Files analyzed: %d of %d (%s also skipped)", c.FilesAnalyzed, c.FilesSeen, plural(len(c.Skipped), "item"))
 	}
 	return fmt.Sprintf("Files analyzed: %d of %d (%s)", c.FilesAnalyzed, c.FilesSeen, percent(c.FilesAnalyzed, c.FilesSeen))

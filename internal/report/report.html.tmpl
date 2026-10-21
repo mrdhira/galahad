@@ -21,7 +21,7 @@ pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--soft);
 .verdict.clean{--v:var(--clean)}.verdict.suspicious{--v:var(--suspicious)}.verdict.malicious{--v:var(--malicious)}
 .eyebrow{margin:0 0 4px;color:var(--muted);font-size:14px}
 .verdict h1{font-size:26px;overflow-wrap:anywhere}
-.badge{display:inline-block;background:var(--v);color:var(--on);font-weight:800;letter-spacing:.04em;padding:2px 10px;border-radius:4px;margin-right:8px;font-size:22px}
+.badge{display:inline-block;background:var(--v);color:var(--on);font-weight:800;letter-spacing:.04em;padding:2px 10px;border-radius:4px;margin-right:4px;font-size:22px}
 .action{font-size:17px;margin:8px 0}
 .meta{color:var(--muted);margin:0 0 8px}
 .why-title{font-size:16px;margin:12px 0 0}
@@ -52,10 +52,11 @@ footer{margin-top:32px;border-top:1px solid var(--line)}
 <body>
 <header class="verdict {{.VerdictClass}}">
 <p class="eyebrow">Galahad report</p>
-<h1><span class="badge">{{.Verdict}}</span>{{.TargetName}}</h1>
+<h1><span class="badge">{{.Verdict}}</span> {{.TargetName}}</h1>
 <p class="action">{{.Action}}</p>
 <p class="meta">{{.Meta}}</p>
-{{if .Why}}<h2 class="why-title">Why</h2>
+{{if .CoverageWarning}}<p class="warn">{{.CoverageWarning}}.</p>
+{{end}}{{if .Why}}<h2 class="why-title">Why</h2>
 <ul class="why">
 {{range .Why}}<li><span class="sev sev-{{.Severity}}">{{.Severity}}</span> {{.Title}}{{if .Location}} <span class="muted">in</span> <code>{{.Location}}</code>{{end}}</li>
 {{end}}</ul>
