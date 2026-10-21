@@ -18,6 +18,9 @@ var (
 
 const osvHost = "api.osv.dev"
 
+// ReasonHostNotAllowed is the reason of a denial for a host that is not on the allowlist.
+const ReasonHostNotAllowed = "host not allowed"
+
 // Input describes a job for NewPolicy.
 type Input struct {
 	Kind       string   // protocol.Kind*
@@ -82,7 +85,7 @@ func (p *Policy) add(hosts ...string) {
 // When it says no, reason tells why.
 func (p Policy) Allows(host string, port int) (ok bool, reason string) {
 	if !p.hosts[host] {
-		return false, "host not allowed"
+		return false, ReasonHostNotAllowed
 	}
 	switch {
 	case port == 443:

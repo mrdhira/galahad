@@ -132,10 +132,13 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	// A net-probe job takes its input like a local scan, and also asks the proxy for job.URL.
 	local := job.Kind == protocol.KindScan && job.Source == protocol.SourceLocal
 	probe := job.Kind == protocol.KindNetProbe && netProbeEnabled
-	if !local && !probe {
+	// A url or drive job has no input of its own: the host sends an empty stream, and the guest
+	// downloads job.URL and names the file itself.
+	remote := job.Kind == protocol.KindScan && (job.Source == protocol.SourceURL || job.Source == protocol.SourceDrive)
+	if !local && !probe && !remote {
 		return fail(protocol.CodeProtocol, "job kind %q with source %q is not supported", job.Kind, job.Source)
 	}
-	if job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name {
+	if !remote && (job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name) {
 		return fail(protocol.CodeProtocol, "job name %q is not a single path element", protocol.CleanPath(job.Name))
 	}
 	relay, err := startRelay(dialProxy, unsafeHost, env.Setenv)
@@ -143,6 +146,9 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fmt.Errorf("start the relay: %w", err)
 	}
 	defer relay.close()
+	if remote && relay == nil {
+		return fail(protocol.CodeIngest, "a %s job needs the network, and this job has none", job.Source)
+	}
 	start := time.Now()
 	jobTime := time.Duration(job.Timeouts.Job) * time.Second
 	host.deadline = start.Add(jobTime)
@@ -173,6 +179,13 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fail(protocol.CodeIngest, "ingest: %w", err)
 	}
 
+	var downloaded ingest.File
+	if remote {
+		if downloaded, err = download(ingestCtx, job, relay.addr, dir); err != nil {
+			return fail(ingestCode(err), "ingest: %w", err)
+		}
+		job.Name = downloaded.Name
+	}
 	if probe {
 		if err := runNetProbe(host, relay, job.URL); err != nil {
 			return err
@@ -180,6 +193,10 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	}
 	if err := host.sendJSON(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageAnalyze}); err != nil {
 		return fmt.Errorf("send progress: %w", err)
+	}
+	// The name comes from the host or from a download: it must be one local path element.
+	if job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name {
+		return fail(protocol.CodeIngest, "the input name %q is not a single local name", protocol.CleanPath(job.Name))
 	}
 	target := filepath.Join(dir, job.Name)
 	info, err := os.Lstat(target)
@@ -206,6 +223,9 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fmt.Errorf("send tools log: %w", err)
 	}
 	res.Tool = protocol.Tool{Name: "galahad-agent", Version: version}
+	if remote && res.Target.SHA256 != downloaded.SHA256 {
+		return fmt.Errorf("the analyzed file has sha256 %s, the download had %s", res.Target.SHA256, downloaded.SHA256)
+	}
 	if stream.TooDeep > 0 && len(res.Coverage.Skipped) < protocol.MaxSkipped {
 		// The extractor dropped entries the analyzer never saw. A full list already ends with a budget skip.
 		shallowest := protocol.CleanPath(strings.TrimPrefix(stream.Shallowest, job.Name+"/"))
@@ -225,13 +245,28 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	return nil
 }
 
-// ingestCode is the Error code for a failed extraction. A failure the control channel
-// caused already has its own code.
+// download fetches the url or drive target of job into dir through the relay at relayAddr.
+func download(ctx context.Context, job protocol.Job, relayAddr, dir string) (ingest.File, error) {
+	f := ingest.Fetcher{Dial: ingest.TunnelDialer(relayAddr), DriveBase: driveBase()}
+	if job.Source == protocol.SourceDrive {
+		return f.Drive(ctx, job.URL, dir)
+	}
+	return f.URL(ctx, job.URL, dir)
+}
+
+// ingestCode is the Error code for a failed extraction or download. A failure the control
+// channel caused already has its own code.
 func ingestCode(err error) string {
 	var ce *codeError
 	switch {
 	case errors.As(err, &ce):
 		return ce.code
+	case errors.Is(err, ingest.ErrNotAllowed):
+		return protocol.CodeNotAllowed
+	case errors.Is(err, ingest.ErrDrivePrivate):
+		return protocol.CodeDrivePrivate
+	case errors.Is(err, ingest.ErrDriveQuota):
+		return protocol.CodeDriveQuota
 	case errors.Is(err, ingest.ErrTooLarge):
 		return protocol.CodeTooLarge
 	case errors.Is(err, context.DeadlineExceeded):

@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/proxy"
 )
 
 const (
@@ -35,18 +36,63 @@ type entry struct {
 }
 
 // plan is what the host sends for one target. The host walks the tree but never reads
-// what is in the files, except to copy it.
+// what is in the files, except to copy it. A link has no entries: the guest downloads it.
 type plan struct {
+	source  string // protocol.SourceLocal, SourceURL or SourceDrive
+	url     string // the link of a url or drive target
+	probe   string // the address of a net-probe job, which galahadtest builds can ask for; empty otherwise
 	name    string // base name of the target, the single top-level element of the tar stream
 	isDir   bool
 	entries []entry
 	size    int64 // the size of the tar stream, as far as it is known before it is written
 }
 
-// newPlan walks target without following any symlink, and checks the caps of the
+// remote reports whether the guest downloads the target.
+func (p *plan) remote() bool { return p.source != protocol.SourceLocal }
+
+// newPlan plans the target of a job. For a link, which only the guest ever fetches, it checks the
+// length and nothing else.
+func newPlan(source, target string) (*plan, error) {
+	switch source {
+	case "", protocol.SourceLocal:
+		p, err := newLocalPlan(target)
+		if p != nil {
+			p.probe = netProbeURL()
+		}
+		return p, err
+	case protocol.SourceURL, protocol.SourceDrive:
+		if len(target) > protocol.MaxURL {
+			return nil, fmt.Errorf("the link is %d bytes, the most is %d", len(target), protocol.MaxURL)
+		}
+		return &plan{source: source, url: target}, nil
+	}
+	return nil, fmt.Errorf("the source %q is not supported", source)
+}
+
+// policy builds the proxy policy of the job.
+func (p *plan) policy(allowHosts []string) (proxy.Policy, error) {
+	in := proxy.Input{Kind: protocol.KindScan, Source: p.source, AllowHosts: allowHosts}
+	switch {
+	case p.remote():
+		in.Target = p.url
+	case p.probe != "":
+		in.Source, in.Target = protocol.SourceURL, p.probe
+	}
+	return proxy.NewPolicy(in)
+}
+
+// jobTarget is the target of job.json. The kind of a link is its source.
+func (p *plan) jobTarget(target string) Target {
+	if p.remote() {
+		return Target{Input: protocol.CleanPath(target), Kind: p.source}
+	}
+	return Target{Input: protocol.CleanPath(filepath.Clean(target)), Kind: "path"}
+}
+
+// newLocalPlan walks target without following any symlink, and checks the caps of the
 // guest's extractor, so an input that is too large fails before the machine boots. Devices,
 // FIFOs and sockets are left out.
-func newPlan(target string) (*plan, error) {
+func newLocalPlan(target string) (*plan, error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
 		return nil, err
@@ -54,7 +100,7 @@ func newPlan(target string) (*plan, error) {
 	if filepath.Dir(abs) == abs {
 		return nil, errors.New("cannot scan a filesystem root; pass a folder or a file")
 	}
-	p := &plan{name: filepath.Base(abs), size: 2 * tarBlock} // the end of the archive
+	p := &plan{source: protocol.SourceLocal, name: filepath.Base(abs), size: 2 * tarBlock} // the end of the archive
 	if len(p.name) > protocol.MaxPath || !utf8.ValidString(p.name) {
 		return nil, fmt.Errorf("the name %q is too long or is not valid UTF-8", protocol.CleanPath(p.name))
 	}
@@ -138,12 +184,15 @@ func (p *plan) send(conn net.Conn, job protocol.Job, endSent *atomic.Bool) sent 
 		return sent{err: fmt.Errorf("send job: %w", err)}
 	}
 	cw := &chunkWriter{conn: conn, h: sha256.New()}
-	fileSHA, err := p.writeTar(cw)
-	if err != nil {
-		return sent{err: err}
-	}
-	if err := cw.flush(); err != nil {
-		return sent{err: fmt.Errorf("send input: %w", err)}
+	var fileSHA string
+	if !p.remote() { // a link has no stream, and the End frame says so
+		var err error
+		if fileSHA, err = p.writeTar(cw); err != nil {
+			return sent{err: err}
+		}
+		if err := cw.flush(); err != nil {
+			return sent{err: fmt.Errorf("send input: %w", err)}
+		}
 	}
 	endSent.Store(true)
 	end := protocol.End{Bytes: cw.n, SHA256: hex.EncodeToString(cw.h.Sum(nil))}
