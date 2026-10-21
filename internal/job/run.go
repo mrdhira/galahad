@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	// DefaultTimeout is the time limit of a whole job.
-	DefaultTimeout = 5 * time.Minute
+	// DefaultTimeout is the time limit of a whole job, ClamAV and YARA included, for the core image.
+	// The re image gets twice as much, for capa.
+	DefaultTimeout = 10 * time.Minute
 	// MinTimeout is the shortest job time limit. The guest stops its analysis a minute before
 	// the end of the job, so a shorter limit would leave it no time.
 	MinTimeout = 2 * time.Minute

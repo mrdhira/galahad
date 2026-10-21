@@ -13,6 +13,7 @@ import (
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/static"
+	"github.com/mrdhira/galahad/internal/analyze/tools"
 	"github.com/mrdhira/galahad/internal/ingest"
 	"github.com/mrdhira/galahad/internal/protocol"
 	"github.com/mrdhira/galahad/internal/scoring"
@@ -193,6 +194,16 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	res, err := analyze.Run(ctx, target, static.All())
 	if err != nil {
 		return fmt.Errorf("analyze: %w", err)
+	}
+	// The tools share what is left of the job time after the engine.
+	toolsLog, err := tools.Apply(ctx, tools.All(), target, &res, func(stage string) error {
+		return host.sendJSON(protocol.FrameProgress, protocol.Progress{Stage: stage})
+	})
+	if err != nil {
+		return fmt.Errorf("send progress: %w", err)
+	}
+	if err := host.send(protocol.FrameArtifact, protocol.Artifact{ID: protocol.ArtifactToolsLog, Data: toolsLog}.Marshal()); err != nil {
+		return fmt.Errorf("send tools log: %w", err)
 	}
 	res.Tool = protocol.Tool{Name: "galahad-agent", Version: version}
 	if stream.TooDeep > 0 && len(res.Coverage.Skipped) < protocol.MaxSkipped {

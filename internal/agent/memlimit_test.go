@@ -18,7 +18,7 @@ func TestMemoryLimit(t *testing.T) {
 		wantLimit int64
 		wantSet   bool
 	}{
-		{name: "75% of the memory", ram: 4 * gib, wantLimit: 3 * gib, wantSet: true},
+		{name: "50% of the memory", ram: 4 * gib, wantLimit: 2 * gib, wantSet: true},
 		{name: "the flag overrides the default", ram: 4 * gib, flag: 100 << 20, wantLimit: 100 << 20, wantSet: true},
 		{name: "the flag overrides GOMEMLIMIT", ram: 4 * gib, gomemlimit: true, flag: 100 << 20, wantLimit: 100 << 20, wantSet: true},
 		{name: "the flag may exceed the 4 GiB ceiling", ram: 64 * gib, flag: 8 * gib, wantLimit: 8 * gib, wantSet: true},
@@ -26,8 +26,9 @@ func TestMemoryLimit(t *testing.T) {
 		{name: "GOMEMLIMIT is left alone when the memory is unknown", gomemlimit: true, wantSet: false},
 		{name: "unknown memory falls back to 2 GiB", wantLimit: 2 * gib, wantSet: true},
 		{name: "the default is capped at 4 GiB", ram: 64 * gib, wantLimit: 4 * gib, wantSet: true},
-		{name: "5 GiB stays under the cap", ram: 5 * gib, wantLimit: 15 * gib / 4, wantSet: true},
-		{name: "6 GiB would pass the cap", ram: 6 * gib, wantLimit: 4 * gib, wantSet: true},
+		{name: "5 GiB stays under the cap", ram: 5 * gib, wantLimit: 5 * gib / 2, wantSet: true},
+		{name: "8 GiB reaches the cap", ram: 8 * gib, wantLimit: 4 * gib, wantSet: true},
+		{name: "10 GiB would pass the cap", ram: 10 * gib, wantLimit: 4 * gib, wantSet: true},
 		{name: "a huge memory does not overflow", ram: 1<<64 - 1, wantLimit: 4 * gib, wantSet: true},
 	}
 	for _, tt := range tests {

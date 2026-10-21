@@ -34,7 +34,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	image := fs.String("image", "core", "guest image: core or re")
-	timeout := fs.Duration("timeout", job.DefaultTimeout, "time limit of the whole scan")
+	timeout := fs.Duration("timeout", 0, "time limit of the whole scan (default 10m for core, 20m for re)")
 	cpus := fs.Int("cpus", defaultCPUs, "virtual CPUs of the guest")
 	memory := fs.Int("memory", defaultMemoryMiB, "memory of the guest in MiB")
 	noNetwork := fs.Bool("no-network", false, "give the sandbox no network at all, not even through the proxy")
@@ -49,6 +49,13 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	if fs.NArg() != 1 {
 		fmt.Fprintf(stderr, "galahad scan: want exactly one path, got %d arguments\n\n%s", fs.NArg(), usage)
 		return ExitUsage
+	}
+	switch {
+	case *timeout != 0:
+	case *image == "re":
+		*timeout = 2 * job.DefaultTimeout
+	default:
+		*timeout = job.DefaultTimeout
 	}
 	if err := checkLimits(*image, *timeout, *cpus, *memory); err != nil {
 		fmt.Fprintf(stderr, "galahad scan: %v\n\n%s", err, usage)

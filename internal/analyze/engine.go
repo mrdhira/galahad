@@ -449,8 +449,7 @@ func call(ctx context.Context, a Analyzer, f File) (out Output, reason string) {
 // then never push out a critical one. Only a finding whose rule occurs more than
 // once can be replaced, so the only finding of a rule always stays. It reports
 // whether fd was added.
-func (j *job) evictFor(fd protocol.Finding) bool {
-	fs := j.res.Findings
+func evictFor(fs []protocol.Finding, fd protocol.Finding) bool {
 	rules := map[string]int{}
 	for _, f := range fs {
 		rules[f.RuleID]++
@@ -481,7 +480,7 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 		fd.Evidence = fd.Evidence[:min(len(fd.Evidence), protocol.MaxEvidence)]
 		if len(j.res.Findings) >= protocol.MaxFindings {
 			j.res.Coverage.Truncated = true
-			if !j.evictFor(fd) {
+			if !evictFor(j.res.Findings, fd) {
 				continue
 			}
 		} else {
@@ -611,8 +610,14 @@ func (j *job) finish() protocol.Result {
 		res.Target.Size = j.topBytes
 	}
 	res.FinishedAt = time.Now().UTC()
-	sort.SliceStable(res.Findings, func(a, b int) bool {
-		x, y := res.Findings[a], res.Findings[b]
+	sortFindings(res.Findings)
+	return res
+}
+
+// sortFindings orders findings by severity, then by evidence path and line, then by rule.
+func sortFindings(fs []protocol.Finding) {
+	sort.SliceStable(fs, func(a, b int) bool {
+		x, y := fs[a], fs[b]
 		if rx, ry := severityRank[x.Severity], severityRank[y.Severity]; rx != ry {
 			return rx > ry
 		}
@@ -624,7 +629,6 @@ func (j *job) finish() protocol.Result {
 		}
 		return x.RuleID < y.RuleID
 	})
-	return res
 }
 
 var severityRank = map[protocol.Severity]int{

@@ -148,7 +148,12 @@ func TestRunScan(t *testing.T) {
 	}{
 		{
 			name: "a clean file", args: []string{file}, backend: clean, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantStderr: "galahad: analyze", wantJob: true,
-			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024, 1025}}, wantTimeout: 300,
+			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024, 1025}}, wantTimeout: 600,
+		},
+		{
+			name: "the re image gets a longer default timeout", args: []string{"--image", "re", file}, backend: clean,
+			wantCode: cli.ExitClean, wantStdout: "CLEAN", wantJob: true,
+			wantSpec: sandbox.Spec{Image: "re", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024, 1025}}, wantTimeout: 1200,
 		},
 		{
 			name: "flags reach the machine and the job", args: []string{"--image", "re", "--timeout", "3m", "--cpus", "4", "--memory", "2048", file}, backend: clean,
@@ -157,7 +162,7 @@ func TestRunScan(t *testing.T) {
 		},
 		{
 			name: "no network serves no proxy port", args: []string{"--no-network", file}, backend: clean, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantJob: true,
-			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024}}, wantTimeout: 300,
+			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072, Ports: []uint32{1024}}, wantTimeout: 600,
 		},
 		{name: "-h prints usage", args: []string{"-h"}, wantCode: cli.ExitClean, wantStdout: "Usage: galahad"},
 		{name: "no path", wantCode: cli.ExitUsage, wantStderr: "want exactly one path, got 0"},

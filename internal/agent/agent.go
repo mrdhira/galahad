@@ -45,7 +45,7 @@ Commands:
   analyze [-o dir] [-timeout d] [--memory-limit size] [--unsafe-host] <path>
             Analyze a file or directory and write report.json, summary.md and report.html to dir.
             --memory-limit sets the soft memory limit in bytes, with an optional KiB, MiB or GiB
-            suffix; the default is 75% of the memory, at most 4 GiB, unless GOMEMLIMIT is set.
+            suffix; the default is 50% of the memory, at most 4 GiB, unless GOMEMLIMIT is set.
             Refuses to run outside a VM unless --unsafe-host is given.
   guest --control <addr> [--proxy <addr>] [--memory-limit size] [--unsafe-host]
             Run one job for the host: dial the host, take a job and its tar stream, analyze it and

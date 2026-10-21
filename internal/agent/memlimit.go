@@ -16,8 +16,8 @@ const (
 // one. ram is the physical memory in bytes, 0 when it could not be read.
 // gomemlimit says the GOMEMLIMIT environment variable is set, which the agent
 // leaves alone. flag is the value of --memory-limit, 0 when absent, and it
-// overrides both. Otherwise the limit is 75% of ram, at most 4 GiB, or 2 GiB when
-// ram is unknown.
+// overrides both. Otherwise the limit is 50% of ram, which leaves room for clamscan, at most
+// 4 GiB, or 2 GiB when ram is unknown.
 func MemoryLimit(ram uint64, gomemlimit bool, flag int64) (limit int64, set bool) {
 	switch {
 	case flag > 0:
@@ -27,7 +27,7 @@ func MemoryLimit(ram uint64, gomemlimit bool, flag int64) (limit int64, set bool
 	case ram == 0:
 		return fallbackMemoryLimit, true
 	}
-	return int64(min(ram/4*3, maxMemoryLimit)), true
+	return int64(min(ram/2, maxMemoryLimit)), true
 }
 
 // ParseSize parses a byte count with an optional KiB, MiB or GiB suffix, such as

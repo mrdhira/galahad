@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +67,42 @@ func path(name, rel string) string {
 	return name + "/" + filepath.ToSlash(rel)
 }
 
+// buildStubs builds a clamscan and a yara that report a hit in main.go of the scanned directory,
+// and returns the directory that holds them.
+func buildStubs(t *testing.T, exe string) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(t.TempDir(), "main.go")
+	const code = `package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	hit := filepath.Join(os.Args[len(os.Args)-1], "main.go")
+	if strings.HasPrefix(filepath.Base(os.Args[0]), "clamscan") {
+		fmt.Printf("%s: Test.Sig-1 FOUND\n", hit)
+		os.Exit(1)
+	}
+	fmt.Printf("Test_Rule %s\n", hit)
+}
+`
+	if err := os.WriteFile(src, []byte(code), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"clamscan", "yara"} {
+		build := exec.Command("go", "build", "-o", filepath.Join(dir, name+exe), src)
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build %s stub: %v\n%s", name, err, out)
+		}
+	}
+	return dir
+}
+
 // TestGuestThroughFakeBackend builds the agent, starts it through the fake sandbox backend
 // and acts as the host: the Result for a corpus fixture shows that the backend and the guest fit.
 func TestGuestThroughFakeBackend(t *testing.T) {
@@ -72,10 +110,21 @@ func TestGuestThroughFakeBackend(t *testing.T) {
 		name string
 		// inputs
 		fixture string
+		stubs   bool // clamscan and yara stubs on PATH that report a hit in main.go, with signatures for them
 		// want*
-		wantTool string
+		wantTool      string
+		wantAnalyzers []string // tools that must be in the coverage
+		wantMissing   []string // tools that must not be, and tools.log says so
+		wantFindings  []string // "rule path" of the findings of the tools
 	}{
-		{name: "benign Go CLI", fixture: "benign-go-cli", wantTool: "galahad-agent"},
+		{
+			name: "no signatures leaves the tools out", fixture: "benign-go-cli", wantTool: "galahad-agent",
+			wantMissing: []string{"clamav", "yara"},
+		},
+		{
+			name: "stub scanners report their hits", fixture: "benign-go-cli", stubs: true, wantTool: "galahad-agent",
+			wantAnalyzers: []string{"clamav", "yara"}, wantFindings: []string{"GAL-AV-001 main.go", "GAL-YARA-001 main.go"},
+		},
 	}
 	exe := ""
 	if runtime.GOOS == "windows" {
@@ -88,8 +137,23 @@ func TestGuestThroughFakeBackend(t *testing.T) {
 	}
 	t.Setenv("GALAHAD_FAKE_AGENT", bin)
 
+	stubDir := buildStubs(t, exe)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			sigs := t.TempDir()
+			t.Setenv("GALAHAD_TEST_SIG_DIR", sigs)
+			if tt.stubs {
+				t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+				for dir, name := range map[string]string{"clamav": "main.cvd", "yara": "core.yarc"} {
+					if err := os.MkdirAll(filepath.Join(sigs, dir), 0o750); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(sigs, dir, name), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			jobDir := t.TempDir()
@@ -115,6 +179,26 @@ func TestGuestThroughFakeBackend(t *testing.T) {
 			got := readGuest(t, c)
 			if got.result == nil || got.result.Tool.Name != tt.wantTool || got.result.Target.Name != tt.fixture {
 				t.Fatalf("result = %+v, error = %+v", got.result, got.errMsg)
+			}
+			for _, name := range tt.wantAnalyzers {
+				if !slices.Contains(got.result.Coverage.Analyzers, name) {
+					t.Errorf("analyzers = %v, want %s", got.result.Coverage.Analyzers, name)
+				}
+			}
+			for _, name := range tt.wantMissing {
+				if slices.Contains(got.result.Coverage.Analyzers, name) || !strings.Contains(got.toolsLog, name+": left out: ") {
+					t.Errorf("analyzers = %v, tools.log = %q, want %s left out and explained", got.result.Coverage.Analyzers, got.toolsLog, name)
+				}
+			}
+			var findings []string
+			for _, f := range got.result.Findings {
+				if f.Analyzer == "clamav" || f.Analyzer == "yara" {
+					findings = append(findings, f.RuleID+" "+f.Evidence[0].Path)
+				}
+			}
+			slices.Sort(findings)
+			if !slices.Equal(findings, tt.wantFindings) {
+				t.Errorf("tool findings = %v, want %v", findings, tt.wantFindings)
 			}
 			if err := m.Wait(); err != nil {
 				console, _ := os.ReadFile(filepath.Join(jobDir, "console.log")) // capped by the backend
