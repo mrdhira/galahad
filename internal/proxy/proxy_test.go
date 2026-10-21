@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -350,11 +351,14 @@ func TestServeBadConnect(t *testing.T) {
 		raw []byte
 		// expectations: the proxy refuses and logs a line without a host
 		wantReason string
+		// The proxy refuses on the header and never reads the rest, so on some systems the
+		// guest sees a reset instead of the reply.
+		wantMaySeeReset bool
 	}{
 		{name: "unknown field", raw: frame(protocol.FrameConnect, `{"host":"api.osv.dev","port":443,"extra":1}`), wantReason: "bad connect frame"},
 		{name: "frame over the Connect limit", raw: oversize, wantReason: "bad connect frame"},
 		{name: "wrong frame type", raw: frame(protocol.FrameHello, `{}`), wantReason: "bad connect frame"},
-		{name: "wrong frame type with a 64 MiB length", raw: hugeResult, wantReason: "bad connect frame"},
+		{name: "wrong frame type with a 64 MiB length", raw: hugeResult, wantReason: "bad connect frame", wantMaySeeReset: true},
 		{name: "not JSON", raw: frame(protocol.FrameConnect, `host=api.osv.dev`), wantReason: "bad connect frame"},
 		{name: "trailing data", raw: frame(protocol.FrameConnect, `{"host":"api.osv.dev","port":443} {}`), wantReason: "bad connect frame"},
 		{name: "upper case host", raw: frame(protocol.FrameConnect, `{"host":"API.osv.dev","port":443}`), wantReason: "bad connect frame"},
@@ -376,16 +380,23 @@ func TestServeBadConnect(t *testing.T) {
 			if _, err := c.Write(tt.raw); err != nil {
 				t.Fatal(err)
 			}
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
 			began := time.Now()
 			reply, err := readReply(c)
-			if err != nil {
+			if err != nil && !tt.wantMaySeeReset {
 				t.Fatalf("reading the reply: %v", err)
 			}
 			// The proxy must not wait for a payload that never comes (its deadline is 10 s).
 			if d := time.Since(began); d > 2*time.Second {
 				t.Errorf("refusal took %v, want a prompt one", d)
 			}
-			if reply.OK || reply.Reason != tt.wantReason {
+			// Nothing near the 64 MiB the header claims may be allocated.
+			runtime.ReadMemStats(&after)
+			if grown := after.TotalAlloc - before.TotalAlloc; grown > 8<<20 {
+				t.Errorf("host allocated %d bytes for a refused frame", grown)
+			}
+			if err == nil && (reply.OK || reply.Reason != tt.wantReason) {
 				t.Errorf("reply = %+v, want refusal %q", reply, tt.wantReason)
 			}
 			line := log.lines(t, 1)[0]
@@ -394,6 +405,44 @@ func TestServeBadConnect(t *testing.T) {
 			}
 			if events := p.Events(); len(events) != 0 {
 				t.Errorf("events = %+v, want none for an unreadable request", events)
+			}
+		})
+	}
+}
+
+func TestServeDrainIsBounded(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		extra int // junk bytes the guest keeps sending after the bad frame
+		// expectations
+		wantMaxTime time.Duration
+	}{
+		{name: "guest that keeps sending is cut off", extra: 64 << 20, wantMaxTime: 4 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, _, _ := start(t, relayPolicy(t), nil)
+			c, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = c.Close() }()
+			if _, err := c.Write(frame(protocol.FrameHello, `{}`)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readReply(c); err != nil {
+				t.Fatalf("reading the reply: %v", err)
+			}
+			// The proxy reads at most 64 KiB, then closes, so the rest of the junk
+			// cannot be written: the write fails instead of finishing.
+			began := time.Now()
+			_ = c.SetWriteDeadline(began.Add(tt.wantMaxTime))
+			if _, err := c.Write(make([]byte, tt.extra)); err == nil {
+				t.Errorf("guest wrote %d junk bytes without a failure", tt.extra)
+			}
+			if d := time.Since(began); d > tt.wantMaxTime {
+				t.Errorf("connection stayed open for %v, want at most %v", d, tt.wantMaxTime)
 			}
 		})
 	}
@@ -501,6 +550,8 @@ func TestServeByteLimits(t *testing.T) {
 				case <-time.After(5 * time.Second):
 					t.Fatalf("tunnel %d: backend saw no connection end", i)
 				}
+				// A tunnel logs after the guest has seen it close; wait, so the lines keep their order.
+				log.lines(t, i+1)
 			}
 			line := log.lines(t, len(tt.payloads))[len(tt.payloads)-1]
 			if line["reason"] != tt.wantReason || line["up"] != tt.wantUp || line["down"] != tt.wantDown {
@@ -705,6 +756,53 @@ func TestServeShutdown(t *testing.T) {
 	}
 }
 
+func TestServeShutdownDuringDrain(t *testing.T) {
+	tests := []struct {
+		name string
+		// expectations
+		wantMaxTime time.Duration
+	}{
+		{name: "a handler that drains stops at once on cancel", wantMaxTime: 500 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := proxy.New(relayPolicy(t), nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- p.Serve(ctx, l) }()
+			c, err := net.Dial("tcp", l.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = c.Close() }()
+			if _, err := c.Write(frame(protocol.FrameHello, `{}`)); err != nil {
+				t.Fatal(err)
+			}
+			// The guest stays silent after the refusal, so the proxy is draining now.
+			if _, err := readReply(c); err != nil {
+				t.Fatalf("reading the reply: %v", err)
+			}
+			began := time.Now()
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Serve returned %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Serve did not return")
+			}
+			if d := time.Since(began); d > tt.wantMaxTime {
+				t.Errorf("Serve took %v to return, want at most %v", d, tt.wantMaxTime)
+			}
+		})
+	}
+}
+
 func TestLog(t *testing.T) {
 	tests := []struct {
 		name string
@@ -724,9 +822,12 @@ func TestLog(t *testing.T) {
 				p.Limits.LogLines = tt.maxLines
 			})
 			for range tt.requests {
-				if _, _, err := open(t, addr, "example.com", 443); err != nil {
+				// Close after the reply, as a guest does, so the proxy does not drain the connection.
+				c, _, err := open(t, addr, "example.com", 443)
+				if err != nil {
 					t.Fatal(err)
 				}
+				_ = c.Close()
 			}
 			lines := log.lines(t, tt.wantLines)
 			for _, l := range lines {
@@ -789,9 +890,11 @@ func TestEvents(t *testing.T) {
 				}
 			})
 			for _, h := range tt.hosts {
-				if _, _, err := open(t, addr, h, 443); err != nil {
+				c, _, err := open(t, addr, h, 443)
+				if err != nil {
 					t.Fatal(err)
 				}
+				_ = c.Close()
 			}
 			log.lines(t, len(tt.hosts))
 			events := p.Events()

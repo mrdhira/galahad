@@ -89,9 +89,17 @@ func WriteFrame(w io.Writer, t FrameType, payload []byte) error {
 // over the limit of its type before it allocates the payload. At a clean end of the
 // stream, before any header byte, it returns io.EOF.
 func ReadFrame(r io.Reader) (FrameType, []byte, error) {
-	return ReadFrameOf(r, FrameHello, FrameJob, FrameData, FrameEnd, FrameProgress,
-		FrameArtifact, FrameResult, FrameError, FrameConnect, FrameConnectReply)
+	return ReadFrameOf(r, allTypes...)
 }
+
+// allTypes lists every type in frameLimits, so a new type cannot be forgotten.
+var allTypes = func() []FrameType {
+	out := make([]FrameType, 0, len(frameLimits))
+	for t := range frameLimits {
+		out = append(out, t)
+	}
+	return out
+}()
 
 // ReadFrameOf is ReadFrame for a reader that expects only some types. It rejects
 // a type that is not in allowed, and a length over the limit of its type, on the

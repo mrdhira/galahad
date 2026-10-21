@@ -315,7 +315,29 @@ func (p *Proxy) refuse(c net.Conn, d decision) {
 	// Log and count before the reply, so whoever sees the reply also sees both.
 	p.logLine(d, Denied, 0, 0)
 	p.addEvent(d, Denied)
-	p.reply(c, protocol.ConnectReply{Reason: d.reason})
+	if p.reply(c, protocol.ConnectReply{Reason: d.reason}) {
+		drain(c)
+	}
+}
+
+// Limits of drain.
+const (
+	drainBytes = 64 << 10
+	drainTime  = time.Second
+)
+
+// drain ends a conversation after a denial. The guest may have sent bytes the
+// proxy did not read, and closing a socket with unread bytes makes some systems
+// (Windows) reset the connection, which can destroy the reply before the guest
+// reads it. So it closes the write side, then reads and throws away at most
+// drainBytes or for at most drainTime. The caller closes the conn after that, and
+// a shutdown closes it sooner, which ends the read. The bytes are never looked at.
+func drain(c net.Conn) {
+	if cw, ok := c.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+	_ = c.SetReadDeadline(time.Now().Add(drainTime))
+	_, _ = io.CopyN(io.Discard, c, drainBytes)
 }
 
 // budget is a byte count shared by the tunnels of a job.
