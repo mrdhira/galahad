@@ -4,13 +4,85 @@ Galahad inspects untrusted files, links and Git repositories inside an isolated 
 
 It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archive which runs code when you open it in VS Code, run `npm install`, or start the app.
 
-> Status: early development. Do not rely on it yet.
+> Status: v0.1 is a preview. It is static analysis only, and you must run it inside a VM you already have.
 
 New to the security terms (IOC, defang, sandbox, zip-slip, ...)? See the [glossary](docs/glossary.md).
 
+## Quick start (preview)
+
+v0.1 ships `galahad-agent`, a static analyzer. It reads a folder, a repo checkout, an archive, a PDF, an Office file, an email or a binary and reports a verdict, risk score and evidence. It never runs or detonates anything, and a `clean` verdict is not a guarantee that the item is safe.
+
+The analyzer parses untrusted bytes, so run it inside a VM, not on your real machine:
+
+- macOS: a UTM or Parallels VM.
+- Windows: a Hyper-V VM (on Windows Home, which has no Hyper-V, use VirtualBox or VMware Workstation).
+- Any OS: a cloud VM or a throwaway Linux VM.
+
+Do not use WSL. All WSL2 distributions and Docker Desktop share one kernel, and WSL can reach your Windows files and start Windows programs, so a bug in the analyzer could reach your Windows account. Turning off automount and interop in `/etc/wsl.conf` does not make it a real boundary. Galahad refuses to run in WSL; use a Hyper-V VM instead. `--unsafe-host` is the only way to run there, at your own risk.
+
+A VM only isolates the item if you keep it that way:
+
+- Turn off shared folders, drive redirection and clipboard sharing. Parallels Tools can share your Mac home folder, a Hyper-V enhanced session redirects your drives, and UTM can share folders (VirtFS) and the clipboard (SPICE).
+- Keep no credentials or SSH keys in the VM.
+- Use a snapshot or a throwaway VM, and revert or delete it after each check.
+
+Steps:
+
+1. In the VM, download the archive for the VM's OS and CPU from [GitHub Releases](https://github.com/mrdhira/galahad/releases) and verify it (see Install below).
+2. Unpack it. On Linux or macOS: `tar -xzf galahad_<version>_<os>_<arch>.tar.gz`. On Windows (PowerShell): `Expand-Archive galahad_<version>_windows_<arch>.zip .`
+3. Get the suspicious item inside the VM: download it there, or `git clone` it there. Do not pass it in through a shared folder.
+4. Run the binary by its path. On Linux or macOS:
+
+   ```sh
+   ./galahad_<version>_<os>_<arch>/galahad-agent analyze -o out <path>
+   ```
+
+   On Windows:
+
+   ```powershell
+   .\galahad_<version>_windows_<arch>\galahad-agent.exe analyze -o out <path>
+   ```
+
+5. Open `out/report.html` or read `out/summary.md`. `out/report.json` holds the same result for tools. Links in the HTML and Markdown reports are defanged.
+
+The exit code is the verdict:
+
+| Code | Meaning |
+|---|---|
+| 0 | clean |
+| 10 | suspicious |
+| 20 | malicious |
+| 1 | error |
+| 2 | usage error, including a refusal to run outside a VM |
+
+On macOS, Gatekeeper blocks a downloaded binary that is not signed. Remove the quarantine flag once you have verified the download: `xattr -d com.apple.quarantine <path-to>/galahad-agent`.
+
+`galahad-agent` refuses to run when it does not detect a VM (WSL never counts as a VM). `--unsafe-host` overrides the check. It is risky: the analyzer then parses untrusted bytes on your real machine, so a bug in a parser could be exploited by the file you are checking. Use it only for the harmless fixtures in `testdata/corpus/`.
+
+### What it detects
+
+| Problem | What Galahad looks for |
+|---|---|
+| P1 | Code that runs when you open a folder: VS Code `folderOpen` tasks and devcontainer lifecycle commands |
+| P2 | Code that runs at install time: npm lifecycle scripts, husky, pre-commit, pip; typosquatted dependencies |
+| P3 | Obfuscated JavaScript and Python (hidden or encoded code), secret theft and exfiltration |
+| P4 | Malicious PDFs: auto-run actions, embedded JavaScript, launch actions, URIs |
+| P5 | Office macros, remote templates and DDE; LNK files and double-extension tricks inside archives; suspicious binaries |
+| P6 | Email lures: attachments and links are scanned as child items, and the sender domain is reported |
+| P7 | No false alarms: benign repos and normal PDFs are meant to come out clean |
+
+The problems are defined in [docs/plan.md](docs/plan.md).
+
+### Limitations
+
+- Static analysis only. Nothing is executed, so code that hides its behavior until run is not seen.
+- Galahad does not manage a VM yet. M2 adds `galahad scan`, which runs the analysis in its own VM.
+- The bundled fixtures are the tested baseline. Real-world files can be missed or flagged wrongly. A repo whose only automation is a harmless install script can come out suspicious.
+- Archive formats are limited to zip, tar, gzip and bzip2. Files that are too large, encrypted or unsupported are listed as skipped in the report.
+
 ## Install
 
-Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum --ignore-missing -c checksums.txt` (macOS: `shasum -a 256 --ignore-missing -c checksums.txt`) and `gh attestation verify <file> --repo mrdhira/galahad`.
+Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum --ignore-missing -c checksums.txt` (macOS: `shasum -a 256 --ignore-missing -c checksums.txt`) and `gh attestation verify <file> --repo mrdhira/galahad`. Do the checks before you unpack the archive. Each archive holds `galahad` and `galahad-agent`; for the preview, use `galahad-agent`.
 
 ## Development
 

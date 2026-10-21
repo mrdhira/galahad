@@ -8,6 +8,7 @@ package scoring
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -97,7 +98,8 @@ func Apply(res *protocol.Result) {
 	if res.Coverage.FilesSeen > 0 {
 		cov = float64(res.Coverage.FilesAnalyzed) / float64(res.Coverage.FilesSeen)
 	}
-	if verdict == protocol.VerdictClean && cov < minCoverage {
+	clean := verdict == protocol.VerdictClean
+	if clean && cov < minCoverage {
 		verdict = protocol.VerdictSuspicious
 		why := "less than half of the files could be analyzed"
 		if res.Coverage.FilesSeen == 0 {
@@ -105,6 +107,15 @@ func Apply(res *protocol.Result) {
 		}
 		reasons = append(reasons,
 			fmt.Sprintf("coverage %d%% < %d%%", int(math.Round(cov*100)), int(minCoverage*100)), why)
+	}
+
+	if clean && slices.ContainsFunc(res.Coverage.Skipped, protocol.Skip.HidesContent) {
+		verdict = protocol.VerdictSuspicious
+		reasons = append(reasons, "part of the input could not be analyzed")
+	}
+
+	if verdict == protocol.VerdictClean && res.Coverage.Truncated {
+		reasons = append(reasons, "a limit cut the analysis short")
 	}
 
 	agree := len(analyzers) >= 2
@@ -126,9 +137,14 @@ func Apply(res *protocol.Result) {
 	default:
 		a := 1.0
 		switch {
-		case verdict == protocol.VerdictClean && hasLow:
-			a = 0.9
-		case verdict != protocol.VerdictClean && !agree:
+		case verdict == protocol.VerdictClean:
+			if hasLow {
+				a = 0.9
+			}
+			if res.Coverage.Truncated {
+				a *= 0.5
+			}
+		case !agree:
 			a = 0.75
 		}
 		conf = int(math.Round(100 * cov * a))
