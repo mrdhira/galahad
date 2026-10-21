@@ -36,6 +36,7 @@ const usage = `Usage: galahad <command> [flags]
 Commands:
   scan      Scan a local file or folder in the sandbox: galahad scan [flags] <path>
               --image core|re  --timeout <duration>  --cpus <n>  --memory <MiB>  --no-network
+              --timeout 0, or no --timeout, means the default of the image: 10m for core, 20m for re
   setup     Download and verify the pinned Firecracker and guest images: galahad setup [--image core|re]
   doctor    Check that this host can run scans, and say how to fix what is wrong
   report    Show the report of a past scan: galahad report <id> [--json]

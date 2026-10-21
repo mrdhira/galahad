@@ -132,7 +132,7 @@ func renderMarkdown(res *protocol.Result) string {
 		w("- **Warning:** %s\n", warn)
 	}
 	if c.Truncated {
-		w("- Truncated: the file or finding limit was reached\n")
+		w("- Truncated: a file or finding limit was reached, or a guest tool did not run (see artifacts/tools.log)\n")
 	}
 	if len(c.Skipped) == 0 {
 		w("- Skipped: none\n")

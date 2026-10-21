@@ -109,7 +109,7 @@ footer{margin-top:32px;border-top:1px solid var(--line)}
 </section>
 {{end}}<section aria-labelledby="coverage">
 <h2 id="coverage">Coverage</h2>
-<p>{{.CoverageLine}}.{{if .Truncated}} The file or finding limit was reached.{{end}}</p>
+<p>{{.CoverageLine}}.{{if .Truncated}} A file or finding limit was reached, or a guest tool did not run (see artifacts/tools.log).{{end}}</p>
 {{if .CoverageWarning}}<p class="warn">{{.CoverageWarning}}.</p>{{end}}
 {{if .Skips}}<div class="scroll" tabindex="0" role="region" aria-label="Skipped items">
 <table>

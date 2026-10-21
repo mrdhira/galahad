@@ -94,10 +94,11 @@ func sendInput(c net.Conn, data []byte, end protocol.End) error {
 
 // guestFrames is what a test host read from the guest.
 type guestFrames struct {
-	stages []string
-	result *protocol.Result
-	errMsg *protocol.Error
-	probe  []byte // the data of the probe artifact
+	stages   []string
+	toolsLog string
+	result   *protocol.Result
+	errMsg   *protocol.Error
+	probe    []byte // the data of the probe artifact
 }
 
 // readGuest reads the frames of the guest as the host would: in order, then EOF.
@@ -133,8 +134,11 @@ func readGuest(t *testing.T, c net.Conn) guestFrames {
 			if err != nil {
 				t.Fatalf("artifact: %v", err)
 			}
-			if a.ID == protocol.ArtifactProbeJSON {
+			switch a.ID {
+			case protocol.ArtifactProbeJSON:
 				got.probe = a.Data
+			case protocol.ArtifactToolsLog:
+				got.toolsLog += string(a.Data)
 			}
 		case protocol.FrameResult:
 			var r protocol.Result
@@ -333,8 +337,11 @@ func TestGuest(t *testing.T) {
 			if got.errMsg != nil || got.result == nil {
 				t.Fatalf("want a Result, got %+v; stderr %q", got.errMsg, ex.stderr)
 			}
-			if want := []string{protocol.StageIngest, protocol.StageAnalyze}; !slices.Equal(got.stages, want) {
+			if want := []string{protocol.StageIngest, protocol.StageAnalyze, protocol.StageClamAV, protocol.StageYARA}; !slices.Equal(got.stages, want) {
 				t.Errorf("stages = %v, want %v", got.stages, want)
+			}
+			if !strings.Contains(got.toolsLog, "clamav: ") || !strings.Contains(got.toolsLog, "yara: ") {
+				t.Errorf("tools.log = %q, want a line for each tool", got.toolsLog)
 			}
 			res := got.result
 			if res.Target.Name != job.Name || res.Target.Kind != tt.wantTargetKind {

@@ -115,7 +115,7 @@ func Apply(res *protocol.Result) {
 	}
 
 	if verdict == protocol.VerdictClean && res.Coverage.Truncated {
-		reasons = append(reasons, "a limit cut the analysis short")
+		reasons = append(reasons, "a limit or a guest tool that did not run cut the analysis short")
 	}
 
 	agree := len(analyzers) >= 2
