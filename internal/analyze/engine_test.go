@@ -162,6 +162,7 @@ func TestRun(t *testing.T) {
 		wantErr          bool
 		wantTargetKind   string
 		wantTargetSHA    string
+		wantTargetSize   int64
 		wantFileCount    int
 		wantFiles        []string
 		wantSeen         int
@@ -183,6 +184,7 @@ func TestRun(t *testing.T) {
 			},
 			analyzers:      stamp,
 			wantTargetKind: protocol.TargetDir,
+			wantTargetSize: 7,
 			wantFileCount:  2,
 			wantFiles:      []string{"a/x.txt", "b.txt"},
 			wantSeen:       3, wantAnalyzed: 2, // the encrypted member counts as seen
@@ -209,9 +211,23 @@ func TestRun(t *testing.T) {
 			analyzers:      []analyze.Analyzer{nothing},
 			wantTargetKind: protocol.TargetFile,
 			wantTargetSHA:  "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+			wantTargetSize: 6,
 			wantFileCount:  1,
 			wantFiles:      []string{"b.txt"},
 			wantSeen:       1, wantAnalyzed: 1,
+		},
+		{
+			name: "file target with members records the sha256 of the top-level file",
+			setup: func(t *testing.T, dir string) string {
+				return write(t, dir, "a.zip", []byte("hello\n"))
+			},
+			analyzers:      []analyze.Analyzer{children("a.zip", analyze.File{Name: "m1", Data: []byte("one")}, analyze.File{Name: "m2", Data: []byte("two")})},
+			wantTargetKind: protocol.TargetFile,
+			wantTargetSHA:  "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+			wantTargetSize: 6,
+			wantFileCount:  1,
+			wantFiles:      []string{"a.zip", "a.zip!/m1", "a.zip!/m2"},
+			wantSeen:       3, wantAnalyzed: 3,
 		},
 		{
 			name: "directories nested deeper than MaxDirDepth are skipped",
@@ -752,6 +768,9 @@ func TestRun(t *testing.T) {
 			}
 			if res.Target.Kind != tt.wantTargetKind || res.Target.SHA256 != tt.wantTargetSHA || res.Target.FileCount != tt.wantFileCount {
 				t.Errorf("target = %+v, want kind %q sha %q file_count %d", res.Target, tt.wantTargetKind, tt.wantTargetSHA, tt.wantFileCount)
+			}
+			if tt.wantTargetSize > 0 && res.Target.Size != tt.wantTargetSize {
+				t.Errorf("target size = %d, want %d", res.Target.Size, tt.wantTargetSize)
 			}
 			var files []string
 			for _, f := range res.Files {

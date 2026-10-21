@@ -7,6 +7,7 @@ package report
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -145,9 +146,91 @@ func stripControl(s string) string {
 	}, s)
 }
 
+// text is clean for free text (snippets, titles, reasons): it also defangs the bare domains and
+// IP addresses that are in the IOC list. Paths are never passed through it.
+func text(hosts map[string]bool, s string) string {
+	return defang.DefangHosts(clean(s), hosts)
+}
+
+// iocHosts returns the lowercase domains and IP addresses of the IOC list. Renderers build it once.
+func iocHosts(res *protocol.Result) map[string]bool {
+	hosts := map[string]bool{}
+	for _, i := range res.IOCs {
+		if i.Type == "domain" || i.Type == "ip" {
+			hosts[strings.ToLower(stripControl(i.Value))] = true
+		}
+	}
+	return hosts
+}
+
+// percent rounds like scoring does. It never shows 100% when a file was not analyzed.
 func percent(analyzed, seen int) string {
 	if seen <= 0 {
 		return "0%"
 	}
-	return fmt.Sprintf("%d%%", analyzed*100/seen)
+	p := int(math.Round(float64(analyzed) / float64(seen) * 100))
+	if p >= 100 && analyzed < seen {
+		p = 99
+	}
+	return fmt.Sprintf("%d%%", p)
+}
+
+// plural returns "1 file" or "2 files".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// humanSize formats a byte count as bytes, KiB, MiB or GiB.
+func humanSize(n int64) string {
+	if n < 1024 {
+		return plural(int(n), "byte")
+	}
+	v := float64(n)
+	unit := ""
+	for _, u := range []string{"KiB", "MiB", "GiB"} {
+		v /= 1024
+		unit = u
+		if v < 1024 {
+			break
+		}
+	}
+	if v < 10 {
+		return fmt.Sprintf("%.1f %s", v, unit)
+	}
+	return fmt.Sprintf("%.0f %s", v, unit)
+}
+
+// targetInfo is how renderers describe the target. Kind and Size are built here from validated
+// numbers; SHA256 is raw, empty for a folder, and the renderer must escape it.
+type targetInfo struct{ Kind, Size, SHA256 string }
+
+func describeTarget(t protocol.Target) targetInfo {
+	if t.Kind == protocol.TargetDir {
+		return targetInfo{Kind: "folder, " + plural(t.FileCount, "file"), Size: humanSize(t.Size)}
+	}
+	return targetInfo{Kind: "file", Size: humanSize(t.Size), SHA256: t.SHA256}
+}
+
+// coverageLine is the coverage sentence. Some skipped items are not in FilesSeen, so with skips
+// it names them next to the counts instead of showing 100%.
+func coverageLine(c protocol.Coverage) string {
+	if len(c.Skipped) > 0 && c.FilesSeen > 0 && c.FilesAnalyzed >= c.FilesSeen {
+		return fmt.Sprintf("Files analyzed: %d of %d (%s also skipped)", c.FilesAnalyzed, c.FilesSeen, plural(len(c.Skipped), "item"))
+	}
+	return fmt.Sprintf("Files analyzed: %d of %d (%s)", c.FilesAnalyzed, c.FilesSeen, percent(c.FilesAnalyzed, c.FilesSeen))
+}
+
+// coverageWarning is empty when nothing was skipped.
+func coverageWarning(c protocol.Coverage) string {
+	switch n := len(c.Skipped); n {
+	case 0:
+		return ""
+	case 1:
+		return "1 item was not analyzed; the verdict does not cover it"
+	default:
+		return fmt.Sprintf("%d items were not analyzed; the verdict does not cover them", n)
+	}
 }

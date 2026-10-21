@@ -87,6 +87,7 @@ type job struct {
 	analyzers []Analyzer
 	res       protocol.Result
 	topFiles  int
+	topBytes  int64
 	bytes     int64
 	queue     []File
 	perRule   map[string]int
@@ -182,7 +183,8 @@ func (j *job) walkFile(ctx context.Context, path string) error {
 	j.admit()
 	name := filepath.Base(path)
 	j.top(ctx, f, name, protocol.CleanPath(name), false)
-	if len(j.res.Files) == 1 {
+	// The top-level file is the first one accepted, whatever its members add after it.
+	if len(j.res.Files) > 0 {
 		j.res.Target.SHA256 = j.res.Files[0].SHA256
 	}
 	return nil
@@ -225,6 +227,7 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) 
 		return
 	}
 	j.bytes += size
+	j.topBytes += size
 	if f, ok := j.accept(cp, name, 0, data, size, h.Sum(nil)); ok {
 		j.dispatch(ctx, f)
 	}
@@ -456,6 +459,9 @@ func (j *job) skip(path, reason string) {
 func (j *job) finish() protocol.Result {
 	res := j.res
 	res.Target.FileCount = j.topFiles
+	if res.Target.Kind == protocol.TargetDir {
+		res.Target.Size = j.topBytes
+	}
 	res.FinishedAt = time.Now().UTC()
 	sort.SliceStable(res.Findings, func(a, b int) bool {
 		x, y := res.Findings[a], res.Findings[b]

@@ -3,6 +3,8 @@ package report_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -155,6 +157,199 @@ func TestWrite(t *testing.T) {
 	}
 }
 
+func TestWriteContent(t *testing.T) {
+	sha := strings.Repeat("a", 64)
+	tests := []struct {
+		name string
+		// inputs
+		mutate func(*protocol.Result)
+		// expectations
+		wantBoth       []string // in summary.md and report.html
+		wantMD         []string
+		wantHTML       []string
+		wantNeitherHas []string // absent from both
+		wantMDAbsent   []string
+		wantHTMLAbsent []string
+	}{
+		{
+			name: "full report: target, reasons, IOC hosts, coverage and tables together",
+			mutate: func(r *protocol.Result) {
+				r.Target = protocol.Target{Name: "pack.zip", Kind: protocol.TargetFile, Size: 208896, SHA256: sha, FileCount: 1}
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test", Path: "a.txt", Line: 1})
+				r.Reasons = []string{"beacon to collect.sinkhole.test"}
+				r.Coverage = protocol.Coverage{FilesSeen: 3, FilesAnalyzed: 3, Skipped: []protocol.Skip{{Path: "pack.zip!/enc", Reason: "parse_error"}}}
+			},
+			wantMD:         []string{"- beacon to collect[.]sinkhole[.]test", "- Kind: file\n", "- SHA-256: " + sha, "- Size: 204 KiB", "- Files analyzed: 3 of 3 (1 item also skipped)", "- **Warning:** 1 item was not analyzed; the verdict does not cover it"},
+			wantHTML:       []string{"beacon to collect[.]sinkhole[.]test", "<td>file</td>", "<td>204 KiB</td>", `<p class="warn">`, `aria-label="Findings"`},
+			wantNeitherHas: []string{"collect.sinkhole.test", "(100%)"},
+		},
+		{
+			name: "domains from the IOC list are defanged in free text only",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test", Path: "a.txt", Line: 1})
+				r.Findings[0].Title = "Beacon to collect.sinkhole.test"
+				r.Findings[0].Evidence[0].Snippet = "hostname: 'collect.sinkhole.test' // setup.js"
+				r.Reasons = []string{"calls COLLECT.sinkhole.test"}
+			},
+			wantBoth:       []string{"Beacon to collect[.]sinkhole[.]test", "setup.js", "calls COLLECT[.]sinkhole[.]test"},
+			wantMD:         []string{"hostname: 'collect[.]sinkhole[.]test'"},
+			wantHTML:       []string{"hostname: &#39;collect[.]sinkhole[.]test&#39;"},
+			wantNeitherHas: []string{"collect.sinkhole.test", "COLLECT.sinkhole.test"},
+		},
+		{
+			name: "paths are not treated as domains",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "setup.test", Path: "a.txt", Line: 1})
+				r.Findings[0].Evidence[0].Path = "setup.test"
+				r.Findings[0].Evidence[0].Snippet = "run setup.test"
+			},
+			wantBoth:       []string{"run setup[.]test", "setup.test:3"},
+			wantNeitherHas: []string{"setup[.]test:3"},
+		},
+		{
+			name: "a defanged domain after a non-alphanumeric stays safe in markdown",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "evil.test", Path: "a.txt", Line: 1})
+				r.Reasons = []string{"[.]: //evil.test/x", "(evil.test)"}
+			},
+			wantMD:       []string{`\[.\]: //evil[.]test/x`, `\(evil[.]test\)`},
+			wantMDAbsent: []string{"\n- [.]:"},
+		},
+		{
+			name: "directory target shows folder and file count without a hash",
+			mutate: func(r *protocol.Result) {
+				r.Target = protocol.Target{Name: "repo", Kind: protocol.TargetDir, Size: 208896, SHA256: sha, FileCount: 2}
+			},
+			wantMD:         []string{"- Kind: folder, 2 files", "- Size: 204 KiB"},
+			wantHTML:       []string{"<td>folder, 2 files</td>", "<td>204 KiB</td>"},
+			wantNeitherHas: []string{"SHA-256", sha, "208896"},
+		},
+		{
+			name:     "directory with one file is singular",
+			mutate:   func(r *protocol.Result) { r.Target.FileCount, r.Target.Size = 1, 1 },
+			wantBoth: []string{"folder, 1 file", "1 byte"},
+			wantNeitherHas: []string{
+				"1 files", "1 bytes",
+			},
+		},
+		{
+			name: "file target shows hash and size",
+			mutate: func(r *protocol.Result) {
+				r.Target = protocol.Target{Name: "a.zip", Kind: protocol.TargetFile, Size: 5 * 1024 * 1024, SHA256: sha, FileCount: 1}
+			},
+			wantMD:         []string{"- Kind: file\n", "- SHA-256: " + sha, "- Size: 5.0 MiB"},
+			wantHTML:       []string{"<td>file</td>", `<th scope="row">SHA-256</th><td><code>` + sha + `</code>`, "<td>5.0 MiB</td>"},
+			wantNeitherHas: []string{"1 file"},
+		},
+		{
+			name: "file target without a hash has no hash row",
+			mutate: func(r *protocol.Result) {
+				r.Target = protocol.Target{Name: "a.zip", Kind: protocol.TargetFile, Size: 12, FileCount: 1}
+			},
+			wantBoth:       []string{"12 bytes"},
+			wantNeitherHas: []string{"SHA-256"},
+		},
+		{
+			name: "ftp and file urls are defanged",
+			mutate: func(r *protocol.Result) {
+				r.Findings[0].Evidence[0].Snippet = "get ftp://f.test/a.bin, ftps://g.test/b and file:///C:/x.exe"
+			},
+			wantBoth:       []string{"fxp://f[.]test/a[.]bin", "fxps://g[.]test/b", "fxle:///C:/x[.]exe"},
+			wantNeitherHas: []string{"ftp://", "ftps://", "file://"},
+		},
+		{
+			name: "skips next to full analysis never read 100%",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 2, FilesAnalyzed: 2, Skipped: []protocol.Skip{{Path: "a.zip!/enc", Reason: "parse_error"}}}
+			},
+			wantMD:         []string{"- Files analyzed: 2 of 2 (1 item also skipped)", "- **Warning:** 1 item was not analyzed; the verdict does not cover it"},
+			wantHTML:       []string{"Files analyzed: 2 of 2 (1 item also skipped).", `<p class="warn">1 item was not analyzed; the verdict does not cover it.</p>`},
+			wantNeitherHas: []string{"(100%)"},
+		},
+		{
+			name: "several skips are counted and pluralized",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 3, FilesAnalyzed: 3, Skipped: []protocol.Skip{{Path: "a", Reason: "encrypted"}, {Path: "b", Reason: "depth"}}}
+			},
+			wantBoth:       []string{"(2 items also skipped)", "2 items were not analyzed; the verdict does not cover them"},
+			wantNeitherHas: []string{"(100%)"},
+		},
+		{
+			name: "almost all files with a skip is capped below 100%",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 1000, FilesAnalyzed: 999, Skipped: []protocol.Skip{{Path: "a", Reason: "timeout"}}}
+			},
+			wantBoth:       []string{"Files analyzed: 999 of 1000 (99%)", "1 item was not analyzed"},
+			wantNeitherHas: []string{"(100%)"},
+		},
+		{
+			name: "percentage is rounded like scoring and no warning without skips",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 3, FilesAnalyzed: 2, Skipped: []protocol.Skip{}}
+			},
+			wantMD:         []string{"- Files analyzed: 2 of 3 (67%)", "- Skipped: none"},
+			wantHTML:       []string{"Files analyzed: 2 of 3 (67%).", "Nothing skipped."},
+			wantNeitherHas: []string{"not analyzed", "66%"},
+		},
+		{
+			name: "percentage uses the same rounding as the scoring reasons",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 200, FilesAnalyzed: 29, Skipped: []protocol.Skip{}}
+			},
+			wantBoth: []string{"Files analyzed: 29 of 200 (14%)"},
+		},
+		{
+			name: "everything analyzed with nothing skipped is 100%",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 4, FilesAnalyzed: 4, Skipped: []protocol.Skip{}}
+			},
+			wantBoth:       []string{"Files analyzed: 4 of 4 (100%)"},
+			wantNeitherHas: []string{"not analyzed"},
+		},
+		{
+			name: "no files seen shows 0%",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{Skipped: []protocol.Skip{}}
+			},
+			wantBoth: []string{"Files analyzed: 0 of 0 (0%)"},
+		},
+		{
+			name:   "html tables keep table semantics and scroll in a region",
+			mutate: func(r *protocol.Result) {},
+			wantHTML: []string{
+				`<div class="scroll" tabindex="0" role="region" aria-label="Target">`,
+				`<div class="scroll" tabindex="0" role="region" aria-label="Findings">`,
+				`<div class="scroll" tabindex="0" role="region" aria-label="Auto-execution inventory">`,
+				`<div class="scroll" tabindex="0" role="region" aria-label="IOCs">`,
+				`<div class="scroll" tabindex="0" role="region" aria-label="Skipped items">`,
+				"<thead>", `<th scope="col">Severity</th>`, `<th scope="col">Value</th>`, `<th scope="col">Reason</th>`,
+				`<th scope="row">Name</th>`, "<tbody>", ".scroll{overflow-x:auto}",
+			},
+			wantHTMLAbsent: []string{"display:block", "<script", "href="},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := result("snippet", "a.txt")
+			tt.mutate(res)
+
+			paths, err := report.Write(t.TempDir(), res)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			md, html := read(t, paths.Markdown), read(t, paths.HTML)
+			check(t, "summary.md", md, append(tt.wantBoth, tt.wantMD...), append(tt.wantNeitherHas, tt.wantMDAbsent...))
+			check(t, "report.html", html, append(tt.wantBoth, tt.wantHTML...), append(tt.wantNeitherHas, tt.wantHTMLAbsent...))
+			for _, l := range strings.Split(md, "\n") {
+				if refDef.MatchString(l) {
+					t.Errorf("summary.md line %q can define a link reference", l)
+				}
+			}
+		})
+	}
+}
+
 func TestWriteLimits(t *testing.T) {
 	tests := []struct {
 		name string
@@ -195,6 +390,51 @@ func TestWriteLimits(t *testing.T) {
 			if n := strings.Count(read(t, paths.HTML), "192[.]0[.]2[.]1"); n != tt.wantHTMLIOCs {
 				t.Errorf("html IOCs = %d, want %d", n, tt.wantHTMLIOCs)
 			}
+		})
+	}
+}
+
+// TestWriteScalesWithIOCs guards against rendering time that grows with IOCs times text: a hostile
+// repository controls the number of IOC domains. It compares run times instead of using a fixed
+// limit, so a slow machine or the race detector does not make it flaky.
+func TestWriteScalesWithIOCs(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		findings, fewIOCs, manyIOCs int
+		// expectations
+		wantMaxRatio float64
+	}{
+		{name: "1000 domain IOCs over 2000 findings cost about the same as 1", findings: 2000, fewIOCs: 1, manyIOCs: 1000, wantMaxRatio: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := func(iocs int) time.Duration {
+				res := result("s", "a.txt")
+				snippet := "hostname: 'h5.sinkhole.test' " + strings.Repeat("x", 170)
+				res.Findings, res.IOCs = nil, nil
+				for i := 0; i < tt.findings; i++ {
+					res.Findings = append(res.Findings, protocol.Finding{RuleID: "GAL-R-001", Severity: protocol.SeverityLow, Title: "t", Evidence: []protocol.Evidence{{Path: "a", Line: i + 1, Snippet: snippet}}})
+				}
+				for i := 0; i < iocs; i++ {
+					res.IOCs = append(res.IOCs, protocol.IOC{Type: "domain", Value: fmt.Sprintf("h%d.sinkhole.test", i+5), Path: "a", Line: 1})
+				}
+				dir := t.TempDir()
+				best := time.Duration(math.MaxInt64)
+				for range 3 {
+					start := time.Now()
+					if _, err := report.Write(dir, res); err != nil {
+						t.Fatal(err)
+					}
+					best = min(best, time.Since(start))
+				}
+				return best
+			}
+			few, many := run(tt.fewIOCs), run(tt.manyIOCs)
+			if ratio := float64(many) / float64(few); ratio > tt.wantMaxRatio {
+				t.Errorf("Write took %v with %d IOCs and %v with %d, ratio %.1f, want at most %.1f", many, tt.manyIOCs, few, tt.fewIOCs, ratio, tt.wantMaxRatio)
+			}
+			t.Logf("%d IOCs: %v, %d IOCs: %v", tt.manyIOCs, many, tt.fewIOCs, few)
 		})
 	}
 }
@@ -263,6 +503,24 @@ func TestTerminal(t *testing.T) {
 				}
 			},
 			wantContain: []string{"... 5 more in report.json"},
+		},
+		{
+			name:        "skipped items get a warning",
+			wantContain: []string{"Warning: 1 item was not analyzed; the verdict does not cover it"},
+		},
+		{
+			name:       "no skips no warning",
+			mutate:     func(r *protocol.Result) { r.Coverage.Skipped = nil },
+			wantAbsent: []string{"Warning"},
+		},
+		{
+			name: "IOC domains are defanged in titles",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test"})
+				r.Findings[0].Title = "Beacon to collect.sinkhole.test"
+			},
+			wantContain: []string{"Beacon to collect[.]sinkhole[.]test"},
+			wantAbsent:  []string{"collect.sinkhole.test"},
 		},
 		{
 			name:        "suspicious verdict is yellow",
