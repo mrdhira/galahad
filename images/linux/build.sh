@@ -122,6 +122,9 @@ fetch() {
 install_re_tools() {
 	local rootfs=$1 capa_zip capa_license ghidra_zip
 	apt-get install -y curl ca-certificates unzip
+	# ca-certificates-java writes a Java trust store with a fresh salt or timestamp on every build,
+	# which would change the image bytes. The guest has no network of its own, so it is not needed.
+	rm -f "$rootfs/etc/ssl/certs/java/cacerts"
 
 	capa_zip=$(fetch "$CAPA_URL" "$CAPA_SHA256")
 	capa_license=$(fetch "$CAPA_LICENSE_URL" "$CAPA_LICENSE_SHA256")
@@ -223,6 +226,7 @@ chroot_run() {
 	# The inner shell expands its own arguments.
 	# shellcheck disable=SC2016
 	unshare --mount --propagation private bash -c '
+		set -eu
 		root=$1
 		shift
 		mount --bind "$root" "$root"

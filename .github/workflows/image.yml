@@ -39,6 +39,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           eval "$(grep -E '^GHIDRA_(VERSION|SHA256)=' images/linux/build.sh)"
+          if ! [[ "$GHIDRA_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::GHIDRA_SHA256 in images/linux/build.sh is not 64 lower-case hex digits"
+            exit 1
+          fi
           if ! gh api "repos/NationalSecurityAgency/ghidra/releases/tags/Ghidra_${GHIDRA_VERSION}_build" --jq .body | grep -qi "$GHIDRA_SHA256"; then
             echo "::error::the Ghidra $GHIDRA_VERSION release notes do not list sha256 $GHIDRA_SHA256"
             exit 1
