@@ -69,7 +69,8 @@ func New() analyze.Analyzer { return analyzer{} }
 func (analyzer) Name() string { return "archive" }
 
 func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
-	u := &unpack{ctx: ctx, f: f, left: allowance(ctx, len(f.Data))}
+	left, byJob := allowance(ctx, len(f.Data))
+	u := &unpack{ctx: ctx, f: f, left: left, byJob: byJob}
 
 	var err error
 	switch f.Kind {
@@ -101,13 +102,14 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 }
 
 // allowance is how many bytes an archive of n compressed bytes may expand to,
-// and never more than the job budget that is left.
-func allowance(ctx context.Context, n int) int64 {
-	left := min(MaxArchiveBytes, max(minRatioBytes, int64(n)*MaxRatio))
-	if b, ok := analyze.Budget(ctx); ok {
-		left = min(left, b)
+// and never more than the job budget that is left. byJob says the job budget is
+// the smaller limit.
+func allowance(ctx context.Context, n int) (left int64, byJob bool) {
+	left = min(MaxArchiveBytes, max(minRatioBytes, int64(n)*MaxRatio))
+	if b, ok := analyze.Budget(ctx); ok && b < left {
+		return b, true
 	}
-	return left
+	return left, false
 }
 
 // unsupported reports a 7z, rar or iso image, which are not expanded.
@@ -122,6 +124,7 @@ type unpack struct {
 	f       analyze.File
 	out     analyze.Output
 	left    int64 // decompressed bytes still allowed
+	byJob   bool  // the job budget, not the archive, sets left
 	entries int
 	bombed  bool
 
@@ -252,9 +255,12 @@ func (u *unpack) bomb(name string) {
 		return
 	}
 	u.bombed = true
-	u.out.Findings = append(u.out.Findings, ruleBomb.Finding(protocol.Evidence{
-		Path: u.f.Path, Snippet: "expands beyond 100:1 or 256 MiB at " + protocol.Snippet(name),
-	}))
+	if !u.byJob {
+		// Running out of the job budget says nothing about this archive, but the skip still hides content.
+		u.out.Findings = append(u.out.Findings, ruleBomb.Finding(protocol.Evidence{
+			Path: u.f.Path, Snippet: "expands beyond 100:1 or 256 MiB at " + protocol.Snippet(name),
+		}))
+	}
 	u.skip(u.member(name), protocol.SkipBudget)
 }
 

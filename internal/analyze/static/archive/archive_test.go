@@ -609,22 +609,26 @@ func TestAnalyzeBrokenZip64(t *testing.T) {
 }
 
 func TestAnalyzeBudget(t *testing.T) {
-	data := zipOf(t, entry{name: "a.txt", data: strings.Repeat("a", 600<<10)})
+	small := zipOf(t, entry{name: "a.txt", data: strings.Repeat("a", 600<<10)})
+	bomb := zipOf(t, entry{name: "a.txt", data: strings.Repeat("a", 3<<20)})
 	tests := []struct {
 		name string
 		// inputs
+		data   []byte
 		budget int64 // negative means the context carries none
 		// expectations
 		wantChildren []string
 		wantFindings []string
 		wantSkips    []string
 	}{
-		{name: "a member that fits in the budget is expanded", budget: 1 << 20, wantChildren: []string{"a.txt"}},
-		{name: "no budget leaves the archive limits alone", budget: -1, wantChildren: []string{"a.txt"}},
-		{name: "a member over the budget is a bomb and a budget skip", budget: 1 << 10,
+		{name: "a member that fits in the budget is expanded", data: small, budget: 1 << 20, wantChildren: []string{"a.txt"}},
+		{name: "no budget leaves the archive limits alone", data: small, budget: -1, wantChildren: []string{"a.txt"}},
+		{name: "a bomb is still a bomb when the budget is larger than the archive limit", data: bomb, budget: 1 << 30,
 			wantFindings: []string{"GAL-ARCHIVE-003 in.zip"}, wantSkips: []string{"in.zip!/a.txt budget"}},
-		{name: "a spent budget expands nothing", budget: 0,
-			wantFindings: []string{"GAL-ARCHIVE-003 in.zip"}, wantSkips: []string{"in.zip!/a.txt budget"}},
+		{name: "a member over the budget is a budget skip and not a bomb", data: small, budget: 1 << 10,
+			wantSkips: []string{"in.zip!/a.txt budget"}},
+		{name: "a spent budget expands nothing", data: small, budget: 0,
+			wantSkips: []string{"in.zip!/a.txt budget"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -632,7 +636,7 @@ func TestAnalyzeBudget(t *testing.T) {
 			if tt.budget >= 0 {
 				ctx = analyze.WithBudget(ctx, tt.budget)
 			}
-			f := analyze.File{Path: "in.zip", Name: "in.zip", Kind: ident.Zip, Data: data}
+			f := analyze.File{Path: "in.zip", Name: "in.zip", Kind: ident.Zip, Data: tt.data}
 
 			out, err := archive.New().Analyze(ctx, f)
 
