@@ -83,7 +83,11 @@ jobs:
 
       # Fails when the hashes differ from pins.json, and prints the new ones.
       - name: Compare with pins.json
-        run: images/linux/check-pins.sh out internal/images/pins.json images/linux/VERSION
+        run: |
+          set -o pipefail
+          images/linux/check-pins.sh out internal/images/pins.json images/linux/VERSION 2>&1 | tee pins.log && exit 0
+          grep -E 'pins.json:|^assets=' pins.log | head -n 9 | sed 's/^/::error::/'
+          exit 1
 
       - name: Collect the release files
         if: startsWith(github.ref, 'refs/tags/')

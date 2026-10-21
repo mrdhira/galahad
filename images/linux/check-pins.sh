@@ -28,6 +28,7 @@ fi
 if [ "$(jq -c --sort-keys '.assets' "$pins")" != "$(jq -c --sort-keys '.' <<<"$assets")" ]; then
 	echo "pins.json: the built assets differ from the pinned ones. Use this \"assets\" block:" >&2
 	jq '.' <<<"$assets" >&2
+	echo "assets=$(jq -c '.' <<<"$assets")" >&2
 	status=1
 fi
 # Firecracker is downloaded by galahad setup, not built here. Check the pin against the file
