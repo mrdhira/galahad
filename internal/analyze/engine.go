@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -182,7 +183,7 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string) {
 	j.topFiles++
 	if j.bytes >= MaxTotalBytes {
 		j.res.Coverage.Truncated = true
-		j.skip(cp, protocol.SkipBudget)
+		j.skip(cp, protocol.SkipTooLarge)
 		return
 	}
 	limit := MaxTotalBytes - j.bytes
@@ -204,7 +205,7 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string) {
 	}
 	if size > limit {
 		j.res.Coverage.Truncated = true
-		j.skip(cp, protocol.SkipBudget)
+		j.skip(cp, protocol.SkipTooLarge)
 		return
 	}
 	j.bytes += size
@@ -290,22 +291,43 @@ func call(ctx context.Context, a Analyzer, f File) (out Output, reason string) {
 	return out, ""
 }
 
+// evictFor makes room for fd in a full findings list by replacing the newest
+// finding of the lowest severity, if fd is more severe than it. Low findings can
+// then never push out a critical one. It reports whether fd was added.
+func (j *job) evictFor(fd protocol.Finding) bool {
+	fs := j.res.Findings
+	lowest := len(fs) - 1
+	for i := lowest; i >= 0; i-- {
+		if severityRank[fs[i].Severity] < severityRank[fs[lowest].Severity] {
+			lowest = i
+		}
+	}
+	if severityRank[fd.Severity] <= severityRank[fs[lowest].Severity] {
+		return false
+	}
+	fs[lowest] = fd
+	return true
+}
+
 func (j *job) merge(analyzer string, parent File, out Output) {
 	for _, fd := range out.Findings {
 		if len(fd.Evidence) == 0 {
 			continue
 		}
 		key := fd.RuleID + "\x00" + fd.Evidence[0].Path
-		switch {
-		case j.perRule[key] >= protocol.MaxFindingsPerRulePerFile:
-			continue
-		case len(j.res.Findings) >= protocol.MaxFindings:
-			j.res.Coverage.Truncated = true
+		if j.perRule[key] >= protocol.MaxFindingsPerRulePerFile {
 			continue
 		}
-		j.perRule[key]++
 		fd.Analyzer = analyzer
-		j.res.Findings = append(j.res.Findings, fd)
+		if len(j.res.Findings) >= protocol.MaxFindings {
+			j.res.Coverage.Truncated = true
+			if !j.evictFor(fd) {
+				continue
+			}
+		} else {
+			j.res.Findings = append(j.res.Findings, fd)
+		}
+		j.perRule[key]++
 	}
 	for _, ioc := range out.IOCs {
 		key := ioc.Type + "\x00" + ioc.Value
@@ -315,8 +337,17 @@ func (j *job) merge(analyzer string, parent File, out Output) {
 		j.iocs[key] = true
 		j.res.IOCs = append(j.res.IOCs, ioc)
 	}
+	for _, s := range out.Skips {
+		if s.Unread() {
+			// The skipped member was seen but never analyzed.
+			j.admit()
+		}
+	}
 	j.res.Coverage.Skipped = append(j.res.Coverage.Skipped, out.Skips...)
 	for _, c := range out.Children {
+		// Extractors on Windows split member names at a backslash, and any extractor
+		// ignores empty and "." segments, so path rules must see the same path.
+		c.Name = path.Clean(strings.ReplaceAll(c.Name, `\`, "/"))
 		c.Path = protocol.CleanPath(parent.Path + "!/" + c.Name)
 		c.Name = c.Name[strings.LastIndexByte(c.Name, '/')+1:]
 		c.Depth = parent.Depth + 1

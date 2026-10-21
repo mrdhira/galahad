@@ -212,3 +212,31 @@ func TestResultJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestSkipUnreadAndHidesContent(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		reason string
+		// expectations
+		wantUnread bool
+		wantHides  bool
+	}{
+		{name: "too large is unread but hides nothing", reason: protocol.SkipTooLarge, wantUnread: true},
+		{name: "budget", reason: protocol.SkipBudget, wantUnread: true, wantHides: true},
+		{name: "depth", reason: protocol.SkipDepth, wantUnread: true, wantHides: true},
+		{name: "encrypted", reason: protocol.SkipEncrypted, wantUnread: true, wantHides: true},
+		{name: "unsupported", reason: protocol.SkipUnsupported},
+		{name: "parse error", reason: protocol.SkipParseError},
+		{name: "timeout", reason: protocol.SkipTimeout},
+		{name: "panic", reason: protocol.SkipPanic},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := protocol.Skip{Path: "a", Reason: tt.reason}
+			if s.Unread() != tt.wantUnread || s.HidesContent() != tt.wantHides {
+				t.Errorf("Unread() = %v, HidesContent() = %v, want %v, %v", s.Unread(), s.HidesContent(), tt.wantUnread, tt.wantHides)
+			}
+		})
+	}
+}
