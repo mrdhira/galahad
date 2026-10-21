@@ -37,14 +37,16 @@ At most 3 fix loops per task. After that, escalate to opus with high effort, the
 
 ## Scope
 - Each release has a written definition of done before work starts: the problems it must answer, the repos it must keep clean, and the known gaps it may ship with. Work outside that list waits for the next release.
-- One PR has one purpose. A finding outside that purpose becomes a backlog item, not a new commit on the PR.
+- One PR has one purpose. A finding outside that purpose becomes a backlog item, not a new commit on the PR. The backlog is GitHub issues with the `backlog` label.
 - A review finding blocks a PR only when it is one of these:
   1. a regression against `main`;
   2. a bypass of exactly what the PR claims to fix;
   3. a false alarm on a common, popular repo;
   4. a crash or a hang.
   Everything else is a follow-up in the backlog.
-- PRs that touch the same files merge one at a time. The next one merges `main` and runs `make gate` before its review.
+- A violation of a Hard rule or of the commit and attribution rules always blocks, whatever the bar above says.
+- Only `CHANGES REQUIRED` items count as open review findings. Follow-ups listed with an `APPROVE` do not block the merge; file them as backlog issues.
+- PRs that touch the same files merge one at a time. The next one merges `main` into its branch and runs `make gate` before its review.
 - Run the false-positive sweep on popular repos before tuning detection, so the fixes target real false alarms.
 
 ## Quality gate

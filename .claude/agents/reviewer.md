@@ -19,7 +19,7 @@ Check:
 9. No unrequested features, abstractions or dead code.
 10. Commit and doc text has no AI or tool attribution.
 
-A finding blocks the PR only when it meets the bar in "Scope" in `CLAUDE.md`: a regression against `main`, a bypass of exactly what the PR claims to fix, a false alarm on a common repo, or a crash or hang. List anything else as a follow-up.
+A finding blocks the PR only when it meets the bar in "Scope" in `CLAUDE.md`: a regression against `main`, a bypass of exactly what the PR claims to fix, a false alarm on a common repo, or a crash or hang. List anything else as a follow-up. A violation of a Hard rule or of the commit and attribution rules always blocks.
 
 Output exactly one of:
 - `APPROVE` plus at most 3 optional notes and any follow-ups.
