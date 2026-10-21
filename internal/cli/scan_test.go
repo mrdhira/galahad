@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,12 +29,28 @@ func (brokenBackend) Start(context.Context, sandbox.Spec) (sandbox.Machine, erro
 	return nil, errors.New("no kvm")
 }
 
-// cleanBackend runs a guest that takes the input and answers that a file is clean.
-type cleanBackend struct{ fileSHA string }
+// spy records what the host asked of the machine and the guest.
+type spy struct {
+	mu         sync.Mutex
+	spec       sandbox.Spec
+	jobTimeout int // seconds, from the Job frame
+}
+
+// cleanBackend runs a guest that takes the input and answers that a file is clean. A non-nil spy
+// records the machine spec and the job timeout.
+type cleanBackend struct {
+	fileSHA string
+	spy     *spy
+}
 
 func (cleanBackend) Name() string { return "clean" }
 
-func (b cleanBackend) Start(context.Context, sandbox.Spec) (sandbox.Machine, error) {
+func (b cleanBackend) Start(_ context.Context, s sandbox.Spec) (sandbox.Machine, error) {
+	if b.spy != nil {
+		b.spy.mu.Lock()
+		b.spy.spec = s
+		b.spy.mu.Unlock()
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -59,6 +76,11 @@ func (b cleanBackend) Start(context.Context, sandbox.Spec) (sandbox.Machine, err
 			}
 			if t == protocol.FrameJob {
 				_ = protocol.DecodeStrict(payload, &job)
+				if b.spy != nil {
+					b.spy.mu.Lock()
+					b.spy.jobTimeout = job.Timeouts.Job
+					b.spy.mu.Unlock()
+				}
 			}
 			if t == protocol.FrameEnd {
 				break
@@ -94,7 +116,10 @@ func TestRunScan(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte("hello\n"))
-	clean := func() (sandbox.Backend, error) { return cleanBackend{fileSHA: hex.EncodeToString(sum[:])}, nil }
+	var seen spy
+	clean := func() (sandbox.Backend, error) {
+		return cleanBackend{fileSHA: hex.EncodeToString(sum[:]), spy: &seen}, nil
+	}
 	broken := func() (sandbox.Backend, error) { return brokenBackend{}, nil }
 	hostile := filepath.Join(t.TempDir(), "\x1b]0;PWNED\a\x1b[2J")
 	tests := []struct {
@@ -103,16 +128,35 @@ func TestRunScan(t *testing.T) {
 		args    []string
 		backend func() (sandbox.Backend, error)
 		// expectations
-		wantCode   int
-		wantStdout string // substring
-		wantStderr string // substring
-		wantJob    bool   // a job directory exists
+		wantCode    int
+		wantStdout  string // substring
+		wantStderr  string // substring
+		wantJob     bool   // a job directory exists
+		wantSpec    sandbox.Spec
+		wantTimeout int // seconds of the job timeout the guest got; 0 means it was not checked
 	}{
-		{name: "a clean file", args: []string{file}, backend: clean, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantStderr: "galahad: analyze", wantJob: true},
+		{
+			name: "a clean file", args: []string{file}, backend: clean, wantCode: cli.ExitClean, wantStdout: "CLEAN", wantStderr: "galahad: analyze", wantJob: true,
+			wantSpec: sandbox.Spec{Image: "core", CPUs: 2, MemoryMiB: 3072}, wantTimeout: 300,
+		},
+		{
+			name: "flags reach the machine and the job", args: []string{"--image", "re", "--timeout", "3m", "--cpus", "4", "--memory", "2048", file}, backend: clean,
+			wantCode: cli.ExitClean, wantStdout: "CLEAN", wantJob: true,
+			wantSpec: sandbox.Spec{Image: "re", CPUs: 4, MemoryMiB: 2048}, wantTimeout: 180,
+		},
 		{name: "-h prints usage", args: []string{"-h"}, wantCode: cli.ExitClean, wantStdout: "Usage: galahad"},
 		{name: "no path", wantCode: cli.ExitUsage, wantStderr: "want exactly one path, got 0"},
 		{name: "two paths", args: []string{"a", "b"}, wantCode: cli.ExitUsage, wantStderr: "want exactly one path, got 2"},
 		{name: "unknown flag", args: []string{"--nope", file}, wantCode: cli.ExitUsage, wantStderr: "flag provided but not defined"},
+		{name: "cpus is not a number", args: []string{"--cpus", "many", file}, wantCode: cli.ExitUsage, wantStderr: "invalid value"},
+		{name: "unknown image", args: []string{"--image", "full", file}, wantCode: cli.ExitUsage, wantStderr: `--image "full": want core or re`},
+		{name: "unknown image with escape codes", args: []string{"--image", "\x1b[2J", file}, wantCode: cli.ExitUsage, wantStderr: `--image "\\u001b[2J"`},
+		{name: "timeout below the minimum", args: []string{"--timeout", "119s", file}, wantCode: cli.ExitUsage, wantStderr: "--timeout 1m59s: want 2m0s to 24h0m0s"},
+		{name: "timeout above the maximum", args: []string{"--timeout", "25h", file}, wantCode: cli.ExitUsage, wantStderr: "--timeout 25h0m0s"},
+		{name: "no cpus", args: []string{"--cpus", "0", file}, wantCode: cli.ExitUsage, wantStderr: "--cpus 0: want 1 to 8"},
+		{name: "too many cpus", args: []string{"--cpus", "9", file}, wantCode: cli.ExitUsage, wantStderr: "--cpus 9: want 1 to 8"},
+		{name: "memory below the minimum", args: []string{"--memory", "1023", file}, wantCode: cli.ExitUsage, wantStderr: "--memory 1023: want 1024 to 16384 MiB"},
+		{name: "memory above the maximum", args: []string{"--memory", "16385", file}, wantCode: cli.ExitUsage, wantStderr: "--memory 16385: want 1024 to 16384 MiB"},
 		{
 			name: "no sandbox backend", args: []string{file}, wantCode: cli.ExitError, wantStderr: "sandbox not supported",
 			backend: func() (sandbox.Backend, error) { return nil, sandbox.ErrUnsupported },
@@ -124,6 +168,7 @@ func TestRunScan(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
+			seen = spy{}
 			env := cli.Env{Home: home, Backend: tt.backend, Now: time.Now}
 			var out, errb bytes.Buffer
 			if got := cli.RunWithEnv(append([]string{"scan"}, tt.args...), &out, &errb, env); got != tt.wantCode {
@@ -141,6 +186,17 @@ func TestRunScan(t *testing.T) {
 			entries, _ := os.ReadDir(filepath.Join(home, "jobs"))
 			if (len(entries) > 0) != tt.wantJob {
 				t.Errorf("job directories = %v, want one: %v", entries, tt.wantJob)
+			}
+			if tt.wantTimeout > 0 {
+				seen.mu.Lock()
+				defer seen.mu.Unlock()
+				if got := seen.spec; got.Image != tt.wantSpec.Image || got.CPUs != tt.wantSpec.CPUs || got.MemoryMiB != tt.wantSpec.MemoryMiB {
+					t.Errorf("machine spec = %+v, want image %q, %d CPUs, %d MiB", got, tt.wantSpec.Image, tt.wantSpec.CPUs, tt.wantSpec.MemoryMiB)
+				}
+				// The guest sees what is left of the timeout, a moment after the start.
+				if seen.jobTimeout > tt.wantTimeout || seen.jobTimeout < tt.wantTimeout-5 {
+					t.Errorf("job timeout = %ds, want about %ds", seen.jobTimeout, tt.wantTimeout)
+				}
 			}
 		})
 	}

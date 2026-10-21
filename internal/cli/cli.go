@@ -32,7 +32,10 @@ var (
 const usage = `Usage: galahad <command> [flags]
 
 Commands:
-  scan      Scan a local file or folder in the sandbox: galahad scan <path>
+  scan      Scan a local file or folder in the sandbox: galahad scan [flags] <path>
+              --image core|re  --timeout <duration>  --cpus <n>  --memory <MiB>
+  report    Show the report of a past scan: galahad report <id> [--json]
+  jobs      List past scans, or remove them: galahad jobs [rm <id>...]
   version   Print version information
   help      Show this help
 `
@@ -69,6 +72,10 @@ func RunWithEnv(args []string, stdout, stderr io.Writer, env Env) int {
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitClean
+	case "jobs":
+		return runJobs(args[1:], stdout, stderr, env)
+	case "report":
+		return runReport(args[1:], stdout, stderr, env)
 	case "scan":
 		return runScan(args[1:], stdout, stderr, env)
 	case "version":

@@ -150,6 +150,36 @@ func TestScan(t *testing.T) {
 			wantCode: 2, wantStderr: "flag provided but not defined",
 		},
 		{
+			name:     "flags in range",
+			args:     []string{"--image", "re", "--timeout", "3m", "--cpus", "4", "--memory", "2048"},
+			target:   func(t *testing.T) string { return writeEICAR(t, t.TempDir()) },
+			wantCode: 20, wantStdout: "MALICIOUS", wantState: "done", wantKind: "file",
+		},
+		{
+			name:     "unknown image",
+			args:     []string{"--image", "full"},
+			target:   func(t *testing.T) string { return t.TempDir() },
+			wantCode: 2, wantStderr: "want core or re",
+		},
+		{
+			name:     "timeout below the minimum",
+			args:     []string{"--timeout", "1m"},
+			target:   func(t *testing.T) string { return t.TempDir() },
+			wantCode: 2, wantStderr: "--timeout 1m0s",
+		},
+		{
+			name:     "cpus out of range",
+			args:     []string{"--cpus", "99"},
+			target:   func(t *testing.T) string { return t.TempDir() },
+			wantCode: 2, wantStderr: "--cpus 99: want 1 to 8",
+		},
+		{
+			name:     "memory out of range",
+			args:     []string{"--memory", "1"},
+			target:   func(t *testing.T) string { return t.TempDir() },
+			wantCode: 2, wantStderr: "--memory 1: want 1024 to 16384 MiB",
+		},
+		{
 			name:     "no sandbox backend",
 			target:   func(t *testing.T) string { return t.TempDir() },
 			sandbox:  new(string),

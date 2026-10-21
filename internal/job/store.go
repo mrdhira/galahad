@@ -17,7 +17,13 @@ const (
 	fileName    = "job.json"
 	maxFileSize = 1 << 20
 	createTries = 5
+	// maxListEntries is how many directory entries List reads.
+	maxListEntries = 10000
 )
+
+// ErrListTruncated is returned by List, next to the jobs it did read, when the jobs directory
+// holds more than maxListEntries entries.
+var ErrListTruncated = errors.New("too many entries in the jobs directory")
 
 // Dir returns the directory of the job with the given ID.
 func Dir(jobsDir, id string) string { return filepath.Join(jobsDir, id) }
@@ -55,22 +61,67 @@ func Create(jobsDir string, now time.Time, target Target, image, backend string)
 	return Job{}, errors.New("create job directory: no free job id")
 }
 
-// Load reads and strictly decodes job.json of the job with the given ID.
-func Load(jobsDir, id string) (Job, error) {
+// openJob opens the directory of the job with the given ID as a root, so nothing read through it
+// can leave the directory. A job directory that is a symlink is refused, even when it points
+// inside the jobs directory.
+func openJob(jobsDir, id string) (*os.Root, error) {
 	if !ValidID(id) {
-		return Job{}, fmt.Errorf("invalid job id %q", id)
+		return nil, fmt.Errorf("invalid job id %q", id)
 	}
-	f, err := os.Open(filepath.Join(Dir(jobsDir, id), fileName)) // #nosec G304 -- the id matches the job id format
+	jobs, err := os.OpenRoot(jobsDir)
 	if err != nil {
-		return Job{}, fmt.Errorf("load job %s: %w", id, err)
+		return nil, err
+	}
+	defer func() { _ = jobs.Close() }() // read-only handle
+	fi, err := jobs.Lstat(id)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("%s is not a job directory", id)
+	}
+	return jobs.OpenRoot(id)
+}
+
+// ReadFile reads the regular file name of the job with the given ID. It refuses a file larger
+// than limit bytes, a symlink that leaves the job directory, and anything that is not a regular
+// file.
+func ReadFile(jobsDir, id, name string, limit int64) ([]byte, error) {
+	root, err := openJob(jobsDir, id)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }() // read-only handle
+	fi, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	f, err := root.OpenFile(name, readFlags, 0) // without blocking: the file may have become a FIFO since the Lstat
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = f.Close() }() // read-only file
-	data, err := io.ReadAll(io.LimitReader(f, maxFileSize+1))
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is larger than %d bytes", name, limit)
+	}
+	return data, nil
+}
+
+// Load reads and strictly decodes job.json of the job with the given ID.
+func Load(jobsDir, id string) (Job, error) {
+	data, err := ReadFile(jobsDir, id, fileName, maxFileSize)
 	if err != nil {
 		return Job{}, fmt.Errorf("load job %s: %w", id, err)
-	}
-	if len(data) > maxFileSize {
-		return Job{}, fmt.Errorf("load job %s: %s is larger than %d bytes", id, fileName, maxFileSize)
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -112,18 +163,29 @@ func Save(jobsDir string, j Job) error {
 }
 
 // List returns the jobs in jobsDir, newest first. A job whose job.json cannot be read is
-// listed with the state unreadable. A missing jobs directory is an empty list.
+// listed with the state unreadable, and so is an entry with a job ID that is not a directory.
+// A missing jobs directory is an empty list. List reads at most maxListEntries entries; when
+// there are more, it returns the jobs it read and ErrListTruncated.
 func List(jobsDir string) ([]Job, error) {
-	entries, err := os.ReadDir(jobsDir)
+	d, err := os.Open(jobsDir) // #nosec G304 -- the jobs directory is galahad's own state directory
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
+	defer func() { _ = d.Close() }() // read-only directory
+	entries, err := d.ReadDir(maxListEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	var truncated error
+	if len(entries) > maxListEntries {
+		entries, truncated = entries[:maxListEntries], ErrListTruncated
+	}
 	var jobs []Job
 	for _, e := range entries {
-		if !e.IsDir() || !ValidID(e.Name()) {
+		if !ValidID(e.Name()) {
 			continue
 		}
 		j, err := Load(jobsDir, e.Name())
@@ -133,16 +195,29 @@ func List(jobsDir string) ([]Job, error) {
 		jobs = append(jobs, j)
 	}
 	sort.Slice(jobs, func(a, b int) bool { return jobs[a].ID > jobs[b].ID })
-	return jobs, nil
+	return jobs, truncated
 }
 
-// Remove deletes the directory of the job with the given ID. It refuses anything that is
-// not a job ID, so a path cannot leave the jobs directory.
+// Remove deletes the directory of the job with the given ID. The error wraps fs.ErrNotExist
+// when there is no such job. It refuses anything that is not a job ID and a job directory that
+// is a symlink, and it never follows a symlink inside the job directory.
 func Remove(jobsDir, id string) error {
 	if !ValidID(id) {
 		return fmt.Errorf("invalid job id %q", id)
 	}
-	if err := os.RemoveAll(Dir(jobsDir, id)); err != nil {
+	jobs, err := os.OpenRoot(jobsDir)
+	if err != nil {
+		return fmt.Errorf("remove job %s: %w", id, err)
+	}
+	defer func() { _ = jobs.Close() }() // the handle only scopes the removal
+	fi, err := jobs.Lstat(id)
+	if err != nil {
+		return fmt.Errorf("remove job %s: %w", id, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("remove job %s: not a job directory", id)
+	}
+	if err := jobs.RemoveAll(id); err != nil {
 		return fmt.Errorf("remove job %s: %w", id, err)
 	}
 	return nil
