@@ -59,11 +59,13 @@ type Fetcher struct {
 	DriveBase string
 }
 
-// File is what a download leaves in the directory. SHA256 is the hash of the bytes written.
+// File is what a download leaves in the directory. SHA256 is the hash of the bytes written. RawName
+// is the name the server gave, before cleaning and without the folders in front of it.
 type File struct {
-	Name   string
-	Size   int64
-	SHA256 string
+	Name    string
+	RawName string
+	Size    int64
+	SHA256  string
 }
 
 // URL downloads rawURL, an http or https address, into dir under a cleaned name. It follows
@@ -151,7 +153,8 @@ func (f Fetcher) save(resp *http.Response, dir string) (File, error) {
 		return File{}, err
 	}
 	defer func() { _ = root.Close() }() // the file is closed and checked below
-	name := FileName(resp.Header.Get("Content-Disposition"), resp.Request.URL)
+	raw := rawName(resp.Header.Get("Content-Disposition"), resp.Request.URL)
+	name := CleanName(raw)
 	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return File{}, fmt.Errorf("create the file: %w", err)
@@ -167,27 +170,35 @@ func (f Fetcher) save(resp *http.Response, dir string) (File, error) {
 	case n > limit:
 		return File{}, fmt.Errorf("%w: the download is larger than %d bytes", ErrTooLarge, limit)
 	}
-	return File{Name: name, Size: n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
+	return File{Name: name, RawName: raw, Size: n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
 // FileName chooses the name of a download: the filename of the Content-Disposition header when it
 // has one, else the last element of the URL path. The result is a single clean path element.
 func FileName(contentDisposition string, u *url.URL) string {
+	return CleanName(rawName(contentDisposition, u))
+}
+
+// rawName is the name FileName cleans.
+func rawName(contentDisposition string, u *url.URL) string {
 	// A malformed parameter still leaves the ones before it, so the error is not checked.
 	if _, params, _ := mime.ParseMediaType(contentDisposition); params["filename"] != "" {
-		return CleanName(params["filename"])
+		return lastElement(params["filename"])
 	}
-	return CleanName(u.Path) // already unescaped; CleanName keeps the part after the last separator
+	return lastElement(u.Path) // already unescaped
+}
+
+// lastElement keeps the part of name after the last "/" or "\".
+func lastElement(name string) string {
+	return name[strings.LastIndexAny(name, `/\`)+1:]
 }
 
 // CleanName makes a name from the network safe to use as a file name and to print. It keeps the
 // part after the last "/" or "\", writes control and bidirectional characters and invalid UTF-8
-// as visible \u and \x text, trims dots and spaces from both ends, and cuts the name to
+// as visible _u and _x text, trims dots and spaces from both ends, and cuts the name to
 // 128 bytes, keeping a short extension. An empty result becomes "download".
 func CleanName(raw string) string {
-	if i := strings.LastIndexAny(raw, `/\`); i >= 0 {
-		raw = raw[i+1:]
-	}
+	raw = lastElement(raw)
 	// CleanPath writes hostile bytes out as \u and \x text; a \ would be a separator on Windows.
 	name := strings.Trim(strings.ReplaceAll(protocol.CleanPath(raw), `\`, "_"), ". ")
 	if len(name) > maxNameBytes {

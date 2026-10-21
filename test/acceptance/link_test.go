@@ -34,6 +34,9 @@ func linkServer(t *testing.T, pdf, drivePDF []byte) *httptest.Server {
 		switch {
 		case r.Host == "files.test" && r.URL.Path == "/invoice.pdf":
 			_, _ = w.Write(pdf)
+		case r.Host == "files.test" && r.URL.Path == "/rlo":
+			w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''invoice%E2%80%AEfdp.exe`)
+			_, _ = w.Write([]byte("harmless\n"))
 		case r.Host == "files.test" && r.URL.Path == "/to-metadata":
 			http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
 		case r.Host == "files.test" && r.URL.Path == "/to-evil":
@@ -66,6 +69,7 @@ func TestScanLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rtlo := corpusCaseNamed(t, "p5-rtlo-name")
 	const driveLink = "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view"
 	tests := []struct {
 		name string
@@ -76,6 +80,7 @@ func TestScanLink(t *testing.T) {
 		// expectations
 		wantCode    int
 		wantCorpus  string // the corpus case whose evidence the report must show
+		wantFinding string // "RULE path:line" the report must show, when no corpus case fits
 		wantKind    string // target kind in job.json
 		wantName    string // target name in report.json
 		wantState   string
@@ -98,6 +103,11 @@ func TestScanLink(t *testing.T) {
 			target: driveLink, driveBase: "/download",
 			wantCode: 0, wantCorpus: "benign-pdf: destination", wantKind: "drive", wantName: "report.pdf", wantState: "done",
 			wantLog: []string{`"host":"drive.test"`, `"decision":"allowed"`},
+		},
+		{
+			name:     "a download named with a right-to-left override exits like the local file of that name",
+			target:   "http://files.test/rlo",
+			wantCode: rtlo.wantCode, wantFinding: "GAL-NAME-002 invoice_u202efdp.exe:0", wantKind: "url", wantName: "invoice_u202efdp.exe", wantState: "done",
 		},
 		{
 			name:     "a redirect to a host that is not allowed is refused and the flag comes from the proxy",
@@ -202,6 +212,13 @@ func TestScanLink(t *testing.T) {
 			}
 			if rep.Target.Name != tt.wantName || rep.Target.Kind != "file" || len(rep.Target.SHA256) != 64 {
 				t.Errorf("report target = %+v, want file %s with a sha256", rep.Target, tt.wantName)
+			}
+			if tt.wantFinding != "" {
+				rule, at, _ := strings.Cut(tt.wantFinding, " ")
+				if !hasFinding(rep, rule, at) {
+					t.Errorf("no %s at %s in %+v", rule, at, rep.Findings)
+				}
+				return
 			}
 			checkCorpus(t, corpusCaseNamed(t, tt.wantCorpus), rep, dir)
 		})

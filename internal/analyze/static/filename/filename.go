@@ -63,9 +63,27 @@ func New() analyze.Analyzer { return analyzer{} }
 func (analyzer) Name() string { return "filename" }
 
 func (analyzer) Analyze(_ context.Context, f analyze.File) (analyze.Output, error) {
-	var out analyze.Output
+	out := analyze.Output{Findings: nameFindings(f)}
+	if f.Kind == ident.LNK || lastExt(f.Name) == "lnk" {
+		if s := launchString(f.Data[:min(len(f.Data), maxLNKScan)]); s != "" {
+			out.Findings = append(out.Findings, ruleLNK.Finding(protocol.Evidence{Path: f.Path, Snippet: protocol.Snippet(s)}))
+		}
+	}
+	return out, nil
+}
+
+// RawName returns the findings the analyzer gives to a file at path whose raw name is name. A
+// download is saved under a cleaned name, so the analyzer never sees the bidi controls of the
+// name it came with; the caller asks for the findings of the raw one, as for a local file.
+func RawName(path, name string) []protocol.Finding {
+	return nameFindings(analyze.File{Path: path, Name: name})
+}
+
+// nameFindings applies the rules that read only the name of f, and the kind of f for shortcuts.
+func nameFindings(f analyze.File) []protocol.Finding {
+	var fs []protocol.Finding
 	add := func(r protocol.Rule, snippet string) {
-		out.Findings = append(out.Findings, r.Finding(protocol.Evidence{Path: f.Path, Snippet: protocol.Snippet(snippet)}))
+		fs = append(fs, r.Finding(protocol.Evidence{Path: f.Path, Snippet: protocol.Snippet(snippet)}))
 	}
 	if isDoubleExt(f.Name) {
 		r := ruleDouble
@@ -77,16 +95,10 @@ func (analyzer) Analyze(_ context.Context, f analyze.File) (analyze.Output, erro
 	if hasBidi(f.Name) {
 		add(ruleBidi, f.Name)
 	}
-	isLNK := f.Kind == ident.LNK || lastExt(f.Name) == "lnk"
-	if isLNK || shortcutExts[lastExt(f.Name)] {
+	if f.Kind == ident.LNK || shortcutExts[lastExt(f.Name)] {
 		add(ruleShort, f.Name)
 	}
-	if isLNK {
-		if s := launchString(f.Data[:min(len(f.Data), maxLNKScan)]); s != "" {
-			add(ruleLNK, s)
-		}
-	}
-	return out, nil
+	return fs
 }
 
 // isPadding reports characters Windows or a viewer ignores at the end of a

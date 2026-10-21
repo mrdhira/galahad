@@ -8,11 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/mrdhira/galahad/internal/analyze"
 	"github.com/mrdhira/galahad/internal/analyze/static"
+	"github.com/mrdhira/galahad/internal/analyze/static/filename"
 	"github.com/mrdhira/galahad/internal/analyze/tools"
 	"github.com/mrdhira/galahad/internal/ingest"
 	"github.com/mrdhira/galahad/internal/protocol"
@@ -200,14 +202,13 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	if err := host.sendJSON(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageAnalyze}); err != nil {
 		return fmt.Errorf("send progress: %w", err)
 	}
-	// The name comes from the host or from a download: it must be one local path element. A clone
-	// has no name, because the repository is the whole directory.
-	if !clone && (job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name) {
-		return fail(protocol.CodeIngest, "the input name %q is not a single local name", protocol.CleanPath(job.Name))
-	}
-	target := filepath.Join(dir, job.Name)
-	if clone {
-		target = dir // the repository is the whole directory
+	target := dir // a clone has no name: the repository is the whole directory
+	if !clone {
+		// The name comes from the host or from a download: it must be one local path element.
+		if job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name {
+			return fail(protocol.CodeIngest, "the input name %q is not a single local name", protocol.CleanPath(job.Name))
+		}
+		target = filepath.Join(dir, job.Name)
 	}
 	info, err := os.Lstat(target)
 	if err != nil {
@@ -236,6 +237,9 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	if remote && !clone && res.Target.SHA256 != downloaded.SHA256 {
 		return fmt.Errorf("the analyzed file has sha256 %s, the download had %s", res.Target.SHA256, downloaded.SHA256)
 	}
+	if remote && downloaded.RawName != downloaded.Name {
+		addRawNameFindings(&res, downloaded.RawName)
+	}
 	if stream.TooDeep > 0 && len(res.Coverage.Skipped) < protocol.MaxSkipped {
 		// The extractor dropped entries the analyzer never saw. A full list already ends with a budget skip.
 		shallowest := protocol.CleanPath(strings.TrimPrefix(stream.Shallowest, job.Name+"/"))
@@ -262,6 +266,21 @@ func download(ctx context.Context, job protocol.Job, relayAddr, dir string) (ing
 		return f.Drive(ctx, job.URL, dir)
 	}
 	return f.URL(ctx, job.URL, dir)
+}
+
+// addRawNameFindings adds the name findings of the name the server gave. The file is saved under a
+// cleaned name, which has no bidi control to find, so a link would get a lower verdict than the
+// same file scanned locally. A finding the cleaned name already has is not added twice.
+func addRawNameFindings(res *protocol.Result, rawName string) {
+	var fs []protocol.Finding
+	for _, fd := range filename.RawName(res.Target.Name, rawName) {
+		if !slices.ContainsFunc(res.Findings, func(g protocol.Finding) bool {
+			return g.RuleID == fd.RuleID && g.Evidence[0].Path == fd.Evidence[0].Path
+		}) {
+			fs = append(fs, fd)
+		}
+	}
+	analyze.AddFindings(res, "filename", fs)
 }
 
 // ingestCode is the Error code for a failed extraction or download. A failure the control

@@ -102,6 +102,43 @@ func TestAnalyze(t *testing.T) {
 	}
 }
 
+func TestRawName(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		raw string
+		// expectations
+		wantRules   []string
+		wantSnippet string // snippet of the first finding
+	}{
+		{name: "bidi override is reported with the escaped raw name", raw: "invoice\u202efdp.exe", wantRules: []string{"GAL-NAME-002"}, wantSnippet: `invoice\u202efdp.exe`},
+		{name: "a bidi control hides the padding of a double extension", raw: "invoice.pdf\u202e.exe", wantRules: []string{"GAL-NAME-001", "GAL-NAME-002"}},
+		{name: "a bidi control after a shortcut extension", raw: "invoice.lnk\u202e", wantRules: []string{"GAL-NAME-002", "GAL-NAME-003"}},
+		{name: "a plain name has no finding", raw: "report.pdf"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const cleaned = "cleaned-name.exe"
+
+			got := filename.RawName(cleaned, tt.raw)
+
+			var rules []string
+			for _, fd := range got {
+				rules = append(rules, fd.RuleID)
+				if fd.Evidence[0].Path != cleaned {
+					t.Errorf("%s evidence path = %q, want %q", fd.RuleID, fd.Evidence[0].Path, cleaned)
+				}
+			}
+			if !slices.Equal(rules, tt.wantRules) {
+				t.Fatalf("rules = %v, want %v", rules, tt.wantRules)
+			}
+			if tt.wantSnippet != "" && got[0].Evidence[0].Snippet != tt.wantSnippet {
+				t.Errorf("snippet = %q, want %q", got[0].Evidence[0].Snippet, tt.wantSnippet)
+			}
+		})
+	}
+}
+
 func TestRuleMetadata(t *testing.T) {
 	tests := []struct {
 		name       string
