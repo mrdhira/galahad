@@ -350,7 +350,7 @@ func TestApply(t *testing.T) {
 			wantVerdict: protocol.VerdictClean,
 			wantConf:    50,
 			wantLevel:   "medium",
-			wantReasons: []string{"no findings", "a limit cut the analysis short"},
+			wantReasons: []string{"no findings", "a limit or a guest tool that did not run cut the analysis short"},
 		},
 		{
 			name: "truncation and a low finding multiply",
@@ -362,7 +362,7 @@ func TestApply(t *testing.T) {
 			wantScore:   5,
 			wantConf:    45,
 			wantLevel:   "low",
-			wantReasons: []string{"score 5 < 15", "a limit cut the analysis short"},
+			wantReasons: []string{"score 5 < 15", "a limit or a guest tool that did not run cut the analysis short"},
 		},
 		{
 			name: "truncation does not change a suspicious verdict",
