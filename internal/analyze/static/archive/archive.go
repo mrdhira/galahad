@@ -15,6 +15,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"path"
 	"slices"
 	"strings"
 
@@ -52,7 +53,7 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	u := &unpack{ctx: ctx, f: f, left: allowance(len(f.Data))}
 	var err error
 	switch f.Kind {
-	case ident.Zip:
+	case ident.Zip, ident.OOXML:
 		err = u.zip()
 	case ident.Tar:
 		err = u.tar(u.cap(bytes.NewReader(f.Data)))
@@ -182,6 +183,31 @@ func (u *unpack) bomb(name string) {
 	u.skip(u.member(name), protocol.SkipBudget)
 }
 
+// ooxmlPart reports a member the office analyzer already reads, or that is
+// plain package markup it has nothing to find in: the root [Content_Types].xml
+// (any case), a vbaProject.bin anywhere (office scans it on the parent), and
+// .xml or .rels files below the standard package folders when no path segment
+// is hidden (the package's own .rels files aside). Everything else, such as media, embeddings, scripts and
+// dot-folders, is unpacked like any other zip member. The names are not
+// normalized, so a backslash name stays a plain member.
+func ooxmlPart(name string) bool {
+	lower := strings.ToLower(name)
+	if lower == "[content_types].xml" || path.Base(lower) == "vbaproject.bin" {
+		return true
+	}
+	segs := strings.Split(lower, "/")
+	if len(segs) < 2 || !slices.Contains([]string{"_rels", "docprops", "customxml", "word", "xl", "ppt"}, segs[0]) {
+		return false
+	}
+	if ext := path.Ext(lower); ext != ".xml" && ext != ".rels" {
+		return false
+	}
+	if segs[len(segs)-1] == ".rels" { // the package relationships part
+		segs = segs[:len(segs)-1]
+	}
+	return !slices.ContainsFunc(segs, func(seg string) bool { return strings.HasPrefix(seg, ".") })
+}
+
 func (u *unpack) zip() error {
 	zr, err := zip.NewReader(bytes.NewReader(u.f.Data), int64(len(u.f.Data)))
 	if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
@@ -202,6 +228,8 @@ func (u *unpack) zip() error {
 		case mode&fs.ModeSymlink != 0:
 			u.link(zf.Name, "")
 			continue
+		case u.f.Kind == ident.OOXML && ooxmlPart(zf.Name):
+			continue // the office analyzer reads it or it is inert markup
 		case zf.Flags&1 != 0:
 			u.out.Findings = append(u.out.Findings, ruleEncrypted.Finding(protocol.Evidence{
 				Path: u.member(zf.Name), Snippet: "encrypted entry",

@@ -3,8 +3,10 @@
 package ident
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"strings"
 	"unicode/utf8"
@@ -18,7 +20,7 @@ const (
 	Text    Kind = "text"
 	PDF     Kind = "pdf"
 	Zip     Kind = "zip"
-	OOXML   Kind = "ooxml" // zip with [Content_Types].xml
+	OOXML   Kind = "ooxml" // zip with [Content_Types].xml at its root
 	Gzip    Kind = "gzip"
 	Bzip2   Kind = "bzip2"
 	Tar     Kind = "tar"
@@ -39,7 +41,7 @@ func Identify(name string, data []byte) Kind {
 	case bytes.HasPrefix(data, []byte("%PDF-")):
 		return PDF
 	case bytes.HasPrefix(data, []byte("PK\x03\x04")), bytes.HasPrefix(data, []byte("PK\x05\x06")):
-		if bytes.Contains(data, []byte("[Content_Types].xml")) {
+		if isOOXML(data) {
 			return OOXML
 		}
 		return Zip
@@ -63,6 +65,22 @@ func Identify(name string, data []byte) Kind {
 		return Text
 	}
 	return Unknown
+}
+
+// isOOXML reports a zip whose central directory lists [Content_Types].xml at the
+// archive root. Part names are case-insensitive in OPC, so the case is ignored.
+// A zip that cannot be read is not OOXML.
+func isOOXML(data []byte) bool {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
+		return false
+	}
+	for _, zf := range zr.File {
+		if strings.EqualFold(zf.Name, "[Content_Types].xml") {
+			return true
+		}
+	}
+	return false
 }
 
 func isPE(data []byte) bool {
