@@ -7,6 +7,11 @@
 // commands, npm lifecycle scripts, husky hooks, local pre-commit hooks, git
 // config and .envrc. Makefile, build.rs and CI workflows are inventory only,
 // so a tool installer such as "curl ... | sh" in a Makefile is not graded.
+//
+// Package manager and build configuration that changes what an ordinary install
+// runs is reported as well (rules 013 to 018): .npmrc, .yarnrc, .yarnrc.yml,
+// .pnpmfile.cjs, Prisma generator providers and node-gyp command expansions.
+// Command values in them are graded with the same checks.
 package autoexec
 
 import (
@@ -33,6 +38,12 @@ var (
 	ruleExfil     = protocol.Rule{ID: "GAL-AUTOEXEC-010", Severity: protocol.SeverityCritical, Title: "Auto-run command sends secrets to the network", Attack: "T1041"}
 	ruleDownload  = protocol.Rule{ID: "GAL-AUTOEXEC-011", Severity: protocol.SeverityCritical, Title: "Auto-run command downloads and executes code", Attack: "T1105"}
 	ruleObfuscate = protocol.Rule{ID: "GAL-AUTOEXEC-012", Severity: protocol.SeverityHigh, Title: "Auto-run command is obfuscated", Attack: "T1027"}
+	ruleConfig    = protocol.Rule{ID: "GAL-AUTOEXEC-013", Severity: protocol.SeverityMedium, Title: "Package manager config changes what install runs or fetches", Attack: "T1195.001"}
+	ruleVendored  = protocol.Rule{ID: "GAL-AUTOEXEC-014", Severity: protocol.SeverityLow, Title: "Package manager runtime or plugin committed to the repo"}
+	rulePnpm      = protocol.Rule{ID: "GAL-AUTOEXEC-015", Severity: protocol.SeverityMedium, Title: "pnpm runs .pnpmfile on install", Attack: "T1195.001"}
+	rulePrisma    = protocol.Rule{ID: "GAL-AUTOEXEC-016", Severity: protocol.SeverityMedium, Title: "Prisma generator provider is a command, not a package", Attack: "T1059"}
+	ruleGypExpand = protocol.Rule{ID: "GAL-AUTOEXEC-017", Severity: protocol.SeverityMedium, Title: "node-gyp command expansion runs at build", Attack: "T1059"}
+	ruleGypAction = protocol.Rule{ID: "GAL-AUTOEXEC-018", Severity: protocol.SeverityLow, Title: "node-gyp build actions"}
 )
 
 var (
@@ -106,6 +117,20 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 		run = s.preCommit
 	case base == "config" && parent == ".git":
 		run = s.gitConfig
+	case base == ".npmrc":
+		run = s.npmrc
+	case base == ".yarnrc":
+		run = s.yarnrc
+	case base == ".yarnrc.yml":
+		run = s.yarnrcYML
+	case base == ".pnpmfile.cjs", base == ".pnpmfile.mjs":
+		// Reported before the size check, so a padded file is not a way past the rule.
+		s.add(rulePnpm, 0)
+		run = s.riskFile
+	case strings.HasSuffix(base, ".prisma"):
+		run = s.prisma
+	case path.Ext(base) == ".gyp", path.Ext(base) == ".gypi":
+		run = s.gyp
 	case base == "setup.py":
 		run = s.setupPy
 	case base == "pyproject.toml":

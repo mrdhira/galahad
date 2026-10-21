@@ -5,77 +5,98 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Galahad report</title>
+<title>{{.Verdict}}: {{.TargetName}} – Galahad</title>
 <style>
-:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f24;--muted:#59636e;--line:#d0d7de;--clean:#1a7f37;--suspicious:#9a6700;--malicious:#cf222e}
-@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--line:#30363d;--clean:#3fb950;--suspicious:#d29922;--malicious:#f85149}}
-body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0 auto;max-width:1100px;padding:16px}
-h1,h2{line-height:1.2}
-.banner{border-left:8px solid var(--line);padding:8px 16px;margin-bottom:24px}
-.banner.clean{border-color:var(--clean)}.banner.suspicious{border-color:var(--suspicious)}.banner.malicious{border-color:var(--malicious)}
-.verdict{font-size:28px;font-weight:700;text-transform:uppercase}
+:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f24;--muted:#59636e;--line:#d0d7de;--soft:#f6f8fa;--on:#fff;--clean:#1a7f37;--suspicious:#9a6700;--malicious:#cf222e}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--line:#30363d;--soft:#161b22;--on:#0d1117;--clean:#3fb950;--suspicious:#d29922;--malicious:#f85149}}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;margin:0 auto;max-width:960px;padding:16px}
+h1,h2,h3{line-height:1.25;margin:0}
+h2{font-size:20px;margin:32px 0 8px}
+code,pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+code{overflow-wrap:anywhere}
+pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--soft);border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .muted{color:var(--muted)}
-table{border-collapse:collapse;width:100%}
+.verdict{border:2px solid var(--v);border-left-width:10px;border-radius:6px;padding:16px 20px;--v:var(--line)}
+.verdict.clean{--v:var(--clean)}.verdict.suspicious{--v:var(--suspicious)}.verdict.malicious{--v:var(--malicious)}
+.eyebrow{margin:0 0 4px;color:var(--muted);font-size:14px}
+.verdict h1{font-size:26px;overflow-wrap:anywhere}
+.badge{display:inline-block;background:var(--v);color:var(--on);font-weight:800;letter-spacing:.04em;padding:2px 10px;border-radius:4px;margin-right:4px;font-size:22px}
+.action{font-size:17px;margin:8px 0}
+.meta{color:var(--muted);margin:0 0 8px}
+.why-title{font-size:16px;margin:12px 0 0}
+.why,.auto{margin:8px 0 0;padding-left:20px}
+.why li,.auto li{margin:4px 0}
+.sev{display:inline-block;min-width:76px;text-align:center;font:700 12px/1.6 system-ui,sans-serif;text-transform:uppercase;border:1.5px solid currentColor;border-radius:3px;padding:0 4px}
+.sev-critical{color:var(--on);background:var(--malicious);border-color:var(--malicious)}.sev-high{color:var(--malicious)}.sev-medium{color:var(--suspicious)}.sev-low,.sev-info,.sev-unknown{color:var(--muted);border-style:dashed}
+ol.findings{list-style:none;padding:0;margin:0}
+.findings>li{border-top:1px solid var(--line);padding:10px 0}
+.fh{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;margin-bottom:2px}
+.fh h3{font-size:16px;overflow-wrap:anywhere}
+.rid{color:var(--muted);font-size:13px}
+.tag{font-size:12px;border:1px solid var(--line);border-radius:10px;padding:0 6px;color:var(--muted)}
+.loc{margin:2px 0 6px;font-size:13px;overflow-wrap:anywhere}
 .scroll{overflow-x:auto}
-.warn{font-weight:700;color:var(--suspicious)}
-th,td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
-code{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;word-break:break-all}
-.sev{font-weight:700;text-transform:uppercase}
-.sev-critical,.sev-high{color:var(--malicious)}.sev-medium{color:var(--suspicious)}.sev-low,.sev-info,.sev-unknown{color:var(--muted)}
+table{border-collapse:collapse;width:100%}
+th,td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+thead th{border-bottom-width:2px}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 16px;margin:0}
+dt{font-weight:600}
+dd{margin:0;overflow-wrap:anywhere}
+.warn{font-weight:700;border-left:4px solid var(--suspicious);padding:4px 10px}
+details summary{cursor:pointer;color:var(--muted)}
+footer{margin-top:32px;border-top:1px solid var(--line)}
+@media print{body{max-width:none;font-size:12px}h2{break-after:avoid}.findings>li,tr{break-inside:avoid}thead{display:table-header-group}.verdict,.badge,.sev{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
 </style>
 </head>
 <body>
-<h1>Galahad report</h1>
-<div class="banner {{.VerdictClass}}">
-<div class="verdict">{{.Verdict}}</div>
-<div>Score {{.Score}}/100, confidence {{.Confidence}}% ({{.ConfidenceLevel}})</div>
-{{if .Reasons}}<ul>{{range .Reasons}}<li>{{.}}</li>{{end}}</ul>{{end}}
-</div>
-
-<h2>Target</h2>
-<div class="scroll" tabindex="0" role="region" aria-label="Target">
-<table>
-<tbody>
-<tr><th scope="row">Name</th><td>{{.TargetName}}</td></tr>
-<tr><th scope="row">Kind</th><td>{{.Target.Kind}}</td></tr>
-{{if .Target.SHA256}}<tr><th scope="row">SHA-256</th><td><code>{{.Target.SHA256}}</code></td></tr>
-{{end}}<tr><th scope="row">Size</th><td>{{.Target.Size}}</td></tr>
-</tbody>
-</table>
-</div>
-
-<h2>Findings ({{len .Findings}})</h2>
-{{if .Findings}}<div class="scroll" tabindex="0" role="region" aria-label="Findings">
-<table>
-<thead><tr><th scope="col">Severity</th><th scope="col">Rule</th><th scope="col">Title</th><th scope="col">ATT&amp;CK</th><th scope="col">Location</th><th scope="col">Snippet</th></tr></thead>
-<tbody>
-{{range .Findings}}<tr><td class="sev sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td><td>{{.Title}}</td><td>{{.Attack}}</td><td><code>{{.Location}}</code></td><td><code>{{.Snippet}}</code></td></tr>
-{{end}}</tbody>
-</table>
-</div>{{else}}<p class="muted">None.</p>{{end}}
-
-<h2>Auto-execution inventory ({{len .AutoExec}})</h2>
-{{if .AutoExec}}<div class="scroll" tabindex="0" role="region" aria-label="Auto-execution inventory">
-<table>
-<thead><tr><th scope="col">Severity</th><th scope="col">Rule</th><th scope="col">Title</th><th scope="col">Location</th><th scope="col">Snippet</th></tr></thead>
-<tbody>
-{{range .AutoExec}}<tr><td class="sev sev-{{.Severity}}">{{.Severity}}</td><td>{{.Rule}}</td><td>{{.Title}}</td><td><code>{{.Location}}</code></td><td><code>{{.Snippet}}</code></td></tr>
-{{end}}</tbody>
-</table>
-</div>{{else}}<p class="muted">None.</p>{{end}}
-
-<h2>IOCs ({{len .IOCs}})</h2>
-<p class="muted">Defanged: not clickable, safe to copy into a ticket.</p>
-{{if .IOCs}}<div class="scroll" tabindex="0" role="region" aria-label="IOCs">
+<header class="verdict {{.VerdictClass}}">
+<p class="eyebrow">Galahad report</p>
+<h1><span class="badge">{{.Verdict}}</span> {{.TargetName}}</h1>
+<p class="action">{{.Action}}</p>
+<p class="meta">{{.Meta}}</p>
+{{if .CoverageWarning}}<p class="warn">{{.CoverageWarning}}.</p>
+{{end}}{{if .Why}}<h2 class="why-title">Why</h2>
+<ul class="why">
+{{range .Why}}<li><span class="sev sev-{{.Severity}}">{{.Severity}}</span> {{.Title}}{{if .Location}} <span class="muted">in</span> <code>{{.Location}}</code>{{end}}</li>
+{{end}}</ul>
+{{end}}</header>
+<main>
+{{if .AutoExec}}<section aria-labelledby="auto">
+<h2 id="auto">Runs automatically ({{len .AutoExec}})</h2>
+<p class="muted">These run without you choosing to, when you open the folder, install dependencies, build or commit.</p>
+<ul class="auto">
+{{range .AutoExec}}<li><span class="sev sev-{{.Severity}}">{{.Severity}}</span> {{.Title}}{{if .Location}} <span class="muted">in</span> <code>{{.Location}}</code>{{end}}</li>
+{{end}}</ul>
+</section>
+{{end}}<section aria-labelledby="findings">
+<h2 id="findings">{{.FindingsHeading}}</h2>
+{{if .Findings}}<ol class="findings">
+{{range .Findings}}<li>
+{{range .Entries}}<div class="fh"><span class="sev sev-{{.Severity}}">{{.Severity}}</span><h3>{{.Title}}</h3>{{if .Auto}}<span class="tag">runs automatically</span>{{end}}<span class="rid">{{.Rule}}{{if .Attack}} · ATT&amp;CK {{.Attack}}{{end}}</span></div>
+{{end}}{{if .Location}}<div class="loc"><code>{{.Location}}</code></div>
+{{end}}{{if .Snippet}}<pre>{{.Snippet}}</pre>
+{{end}}</li>
+{{end}}</ol>{{else}}<p class="muted">None.</p>{{end}}
+</section>
+<section aria-labelledby="iocs">
+<h2 id="iocs">{{.IOCHeading}}</h2>
+{{if .IOCs}}<p class="muted">Defanged: not clickable, safe to copy into a ticket.</p>
+<div class="scroll" tabindex="0" role="region" aria-label="IOCs">
 <table>
 <thead><tr><th scope="col">Type</th><th scope="col">Value</th><th scope="col">Location</th></tr></thead>
 <tbody>
 {{range .IOCs}}<tr><td>{{.Type}}</td><td><code>{{.Value}}</code></td><td><code>{{.Location}}</code></td></tr>
 {{end}}</tbody>
 </table>
-</div>{{else}}<p class="muted">None.</p>{{end}}
-
-<h2>Coverage</h2>
+</div>
+<details open><summary>Plain list for copying</summary>
+<pre>{{range .IOCValues}}{{.}}
+{{end}}</pre>
+</details>{{else}}<p class="muted">None.</p>{{end}}
+</section>
+<section aria-labelledby="coverage">
+<h2 id="coverage">Coverage</h2>
 <p>{{.CoverageLine}}.{{if .Truncated}} The file or finding limit was reached.{{end}}</p>
 {{if .CoverageWarning}}<p class="warn">{{.CoverageWarning}}.</p>{{end}}
 {{if .Skips}}<div class="scroll" tabindex="0" role="region" aria-label="Skipped items">
@@ -86,5 +107,20 @@ code{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;word
 {{end}}</tbody>
 </table>
 </div>{{else}}<p class="muted">Nothing skipped.</p>{{end}}
+</section>
+<section aria-labelledby="target">
+<h2 id="target">Target</h2>
+<dl>
+<dt>Name</dt><dd>{{.TargetName}}</dd>
+<dt>Kind</dt><dd>{{.Target.Kind}}</dd>
+{{if .Target.SHA256}}<dt>SHA-256</dt><dd><code>{{.Target.SHA256}}</code></dd>
+{{end}}<dt>Size</dt><dd>{{.Target.Size}}</dd>
+</dl>
+</section>
+</main>
+<footer>
+<h2>Scoring details</h2>
+{{if .Reasons}}<ul>{{range .Reasons}}<li>{{.}}</li>{{end}}</ul>{{else}}<p class="muted">No scoring reasons.</p>{{end}}
+</footer>
 </body>
 </html>

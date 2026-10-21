@@ -1,0 +1,2 @@
+-r deps/base.txt
+flask>=3.0

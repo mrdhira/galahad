@@ -69,29 +69,31 @@ func renderMarkdown(res *protocol.Result) string {
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
 	hosts := iocHosts(res)
 
+	all := groups(res, nil)
 	w("# Galahad report\n\n")
-	w("**Verdict: %s** | score %d/100 | confidence %d%% (%s)\n\n", mdEscape(strings.ToUpper(string(res.Verdict))), res.Score, res.Confidence, mdEscape(res.ConfidenceLevel))
-	for _, r := range res.Reasons {
-		w("- %s\n", mdText(hosts, r))
+	w("**Verdict: %s**\n\n%s\n\n%s\n", mdEscape(strings.ToUpper(string(res.Verdict))), actionLine(res.Verdict), metaLine(res))
+	if top := why(res.Verdict, all); len(top) > 0 {
+		w("\n## Why\n\n")
+		for _, g := range top {
+			mdLine(&b, hosts, g.Entries[0].Severity, g.Entries[0].Title, g.Location)
+		}
 	}
 
-	w("\n## Target\n\n")
-	t := describeTarget(res.Target)
-	w("- Name: %s\n- Kind: %s\n", mdEscape(res.Target.Name), t.Kind)
-	if t.SHA256 != "" {
-		w("- SHA-256: %s\n", mdEscape(t.SHA256))
+	if auto := groups(res, isAutoexec); len(auto) > 0 {
+		w("\n## Runs automatically (%d)\n\n", len(auto))
+		for i, g := range auto {
+			if i == mdMaxFindings {
+				w("\nShowing %d of %d. See report.json for the rest.\n", mdMaxFindings, len(auto))
+				break
+			}
+			mdLine(&b, hosts, g.severity(), g.titles(), g.Location)
+		}
 	}
-	w("- Size: %s\n", t.Size)
 
-	all := rows(res, nil)
-	w("\n## Findings (%d)\n\n", len(all))
+	w("\n## %s\n\n", findingsHeading(res, all))
 	mdFindings(&b, hosts, all, mdMaxFindings)
 
-	auto := rows(res, isAutoexec)
-	w("\n## Auto-execution inventory (%d)\n\n", len(auto))
-	mdFindings(&b, hosts, auto, mdMaxFindings)
-
-	w("\n## IOCs (%d)\n\n", len(res.IOCs))
+	w("\n## %s\n\n", iocHeading(res))
 	if len(res.IOCs) == 0 {
 		w("None.\n")
 	} else {
@@ -124,10 +126,35 @@ func renderMarkdown(res *protocol.Result) string {
 		}
 		w("- Skipped %s: %s\n", mdEscape(s.Path), mdEscape(s.Reason))
 	}
+
+	w("\n## Target\n\n")
+	t := describeTarget(res.Target)
+	w("- Name: %s\n- Kind: %s\n", mdEscape(res.Target.Name), t.Kind)
+	if t.SHA256 != "" {
+		w("- SHA-256: %s\n", mdEscape(t.SHA256))
+	}
+	w("- Size: %s\n", t.Size)
+
+	w("\n## Scoring details\n\n")
+	if len(res.Reasons) == 0 {
+		w("No scoring reasons.\n")
+	}
+	for _, r := range res.Reasons {
+		w("- %s\n", mdText(hosts, r))
+	}
 	return b.String()
 }
 
-func mdFindings(b *strings.Builder, hosts map[string]bool, rs []row, limit int) {
+// mdLine writes one list item of the Why and Runs automatically lists.
+func mdLine(b *strings.Builder, hosts map[string]bool, sev protocol.Severity, title, loc string) {
+	fmt.Fprintf(b, "- %s: %s", mdEscape(string(sev)), mdText(hosts, title))
+	if loc != "" {
+		fmt.Fprintf(b, " in %s", mdEscape(loc))
+	}
+	b.WriteString("\n")
+}
+
+func mdFindings(b *strings.Builder, hosts map[string]bool, rs []group, limit int) {
 	if len(rs) == 0 {
 		b.WriteString("None.\n")
 		return
@@ -135,10 +162,10 @@ func mdFindings(b *strings.Builder, hosts map[string]bool, rs []row, limit int) 
 	b.WriteString("| Severity | Rule | Title | ATT&CK | Location | Snippet |\n|---|---|---|---|---|---|\n")
 	for i, r := range rs {
 		if i == limit {
-			fmt.Fprintf(b, "\nShowing %d of %d. See report.json for the rest.\n", limit, len(rs))
+			fmt.Fprintf(b, "\nShowing %d of %d locations. See report.json for the rest.\n", limit, len(rs))
 			break
 		}
-		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(string(r.Severity)), mdEscape(r.Rule), mdText(hosts, r.Title), mdEscape(r.Attack), mdEscape(r.Location), mdText(hosts, r.Snippet))
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(string(r.severity())), mdEscape(r.rules()), mdText(hosts, r.titles()), mdEscape(r.attacks()), mdEscape(r.Location), mdText(hosts, r.Snippet))
 	}
 }
 
