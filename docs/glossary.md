@@ -132,7 +132,7 @@ Security and project terms used in Galahad's code, reports and docs, in plain la
 : A private host-to-guest socket that does not use any network. Galahad's guest has no network card, so vsock is its only channel to the host.
 
 **WSL2 (Windows Subsystem for Linux 2)**
-: A Linux environment on Windows that runs in a lightweight Hyper-V VM. By default it mounts your Windows drives and can start Windows programs, so Galahad treats it as part of the host and refuses to run in it. It counts as a VM only when automount and interop are both turned off in `/etc/wsl.conf`. WSL1 has no VM and never counts.
+: A Linux environment on Windows. All WSL2 distributions and Docker Desktop share one kernel, and WSL can reach your Windows files and start Windows programs. Galahad never treats WSL as a VM and refuses to run in it; use a real VM such as Hyper-V instead.
 
 ## File formats
 

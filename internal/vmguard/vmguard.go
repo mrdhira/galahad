@@ -15,9 +15,8 @@ type Signals struct {
 	DeviceTreeHV   string // device tree hypervisor/compatible (arm64 guests without DMI), trimmed
 	KernelRelease  string // kernel release string, for example /proc/sys/kernel/osrelease
 	WSLEnv         bool   // WSL_DISTRO_NAME or WSL_INTEROP is set
-	WSLInterop     bool   // a WSLInterop binfmt_misc entry exists
-	InteropEnabled bool   // a WSLInterop entry is enabled: Windows programs can be launched
-	WindowsMounts  bool   // a drvfs or 9p mount of a Windows drive exists
+	WSLInterop     bool   // a WSLInterop binfmt_misc entry or a /run/WSL/*_interop socket exists
+	WindowsMounts  bool   // a mount of a Windows drive exists
 	Vendor         string // DMI sys_vendor, or the BIOS system manufacturer
 	Product        string // DMI product_name, or the BIOS system product name
 	Container      bool   // a container marker file exists; containers share the host kernel
@@ -30,21 +29,18 @@ var vmVendors = []string{
 	"openstack", "digitalocean", "bochs", "oracle cloud", "alibaba cloud", "nutanix ahv",
 }
 
-// wslKernel and wsl2Kernel are lower-case fragments of the kernel release of WSL and WSL2.
-// WSL2 runs in a Hyper-V utility VM; WSL1 has no VM.
-const (
-	wslKernel  = "microsoft"
-	wsl2Kernel = "microsoft-standard-wsl2"
-)
+// wslKernel is a lower-case fragment of the kernel release of WSL1 and WSL2.
+const wslKernel = "microsoft"
 
 // FromSignals decides from the raw signals whether the process is in a VM and why.
 func FromSignals(s Signals) (inVM bool, reason string) {
 	if s.GalahadGuest {
 		return true, "galahad guest"
 	}
-	kernel := strings.ToLower(s.KernelRelease)
-	if s.WSLEnv || s.WSLInterop || strings.Contains(kernel, wslKernel) {
-		return wsl(s, kernel)
+	// WSL never counts as a VM, even on x86 where it reports the hypervisor flag below.
+	if s.WSLEnv || s.WSLInterop || s.WindowsMounts || strings.Contains(strings.ToLower(s.KernelRelease), wslKernel) {
+		return false, "WSL shares a kernel with the other distributions and Docker Desktop, " +
+			"and can reach Windows files and programs; use a real VM"
 	}
 	switch {
 	case s.CPUHypervisor:
@@ -68,19 +64,6 @@ func FromSignals(s Signals) (inVM bool, reason string) {
 		return false, "container detected; a container shares the host kernel and is not a VM"
 	}
 	return false, "no virtualization detected"
-}
-
-// wsl decides for WSL. By default WSL mounts the Windows drives read-write and can start Windows programs,
-// so a parser exploit inside it reaches the host. Only a WSL2 with both turned off counts as a VM.
-// This check runs before the CPU flag, because WSL2 on x86 reports the hypervisor flag.
-func wsl(s Signals, kernel string) (inVM bool, reason string) {
-	if s.InteropEnabled || s.WindowsMounts {
-		return false, "WSL shares the Windows host's files (interop or Windows drive mounts are on)"
-	}
-	if strings.Contains(kernel, wsl2Kernel) {
-		return true, "wsl2 kernel " + s.KernelRelease + ", interop and Windows drive mounts off"
-	}
-	return false, "WSL without a VM (WSL1)"
 }
 
 // Detect gathers the signals of the current OS and decides with FromSignals.

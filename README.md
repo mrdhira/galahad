@@ -18,16 +18,7 @@ The analyzer parses untrusted bytes, so run it inside a VM, not on your real mac
 - Windows: a Hyper-V VM.
 - Any OS: a cloud VM or a throwaway Linux VM.
 
-WSL2 is not recommended. By default it mounts your Windows drives read-write under `/mnt/c` and can start Windows programs, so a bug in the analyzer would reach your Windows files. Galahad refuses to run in WSL until both are turned off. To do that, add this to `/etc/wsl.conf` inside the distribution, then run `wsl --shutdown` from Windows and start the distribution again:
-
-```ini
-[automount]
-enabled = false
-
-[interop]
-enabled = false
-appendWindowsPath = false
-```
+Do not use WSL. All WSL2 distributions and Docker Desktop share one kernel, and WSL can reach your Windows files and start Windows programs, so a bug in the analyzer could reach your Windows account. Turning off automount and interop in `/etc/wsl.conf` does not make it a real boundary. Galahad refuses to run in WSL; use a Hyper-V VM instead. `--unsafe-host` is the only way to run there, at your own risk.
 
 A VM only isolates the item if you keep it that way:
 
@@ -66,7 +57,7 @@ The exit code is the verdict:
 
 On macOS, Gatekeeper blocks a downloaded binary that is not signed. Remove the quarantine flag once you have verified the download: `xattr -d com.apple.quarantine <path-to>/galahad-agent`.
 
-`galahad-agent` refuses to run when it does not detect a VM, and in WSL unless it is locked down as above. `--unsafe-host` overrides the check. It is risky: the analyzer then parses untrusted bytes on your real machine, so a bug in a parser could be exploited by the file you are checking. Use it only for the harmless fixtures in `testdata/corpus/`.
+`galahad-agent` refuses to run when it does not detect a VM (WSL never counts as a VM). `--unsafe-host` overrides the check. It is risky: the analyzer then parses untrusted bytes on your real machine, so a bug in a parser could be exploited by the file you are checking. Use it only for the harmless fixtures in `testdata/corpus/`.
 
 ### What it detects
 
