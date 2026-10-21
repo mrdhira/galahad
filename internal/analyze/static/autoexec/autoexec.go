@@ -58,12 +58,36 @@ func New() analyze.Analyzer { return analyzer{} }
 
 func (analyzer) Name() string { return "autoexec" }
 
-func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
-	var out analyze.Output
-	if err := ctx.Err(); err != nil {
-		return out, err
-	}
-	rel := f.Path
+// Priority reports whether the file at path is one that runs code on its own, or
+// lists where it does. The engine reads such a file even when the job is past its
+// file or byte limits, so padding a repository cannot hide it.
+func (analyzer) Priority(path string) bool { return route(path) != none }
+
+// trigger is a kind of file that Analyze handles.
+type trigger int
+
+const (
+	none trigger = iota
+	toolBinFile
+	tasksFile
+	workspaceFile
+	settingsFile
+	devcontainerFile
+	packageFile
+	huskyHook
+	huskyGenerated
+	preCommitFile
+	gitConfigFile
+	setupFile
+	pyprojectFile
+	envrcFile
+	inventoryFile
+)
+
+// route says which kind of file the path names. The path is matched
+// case-insensitively, and a path inside a container is matched by the member path.
+func route(path string) trigger {
+	rel := path
 	if i := strings.LastIndex(rel, "!/"); i >= 0 {
 		rel = rel[i+2:]
 	}
@@ -74,45 +98,82 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 	if len(dirs) > 0 {
 		parent = dirs[len(dirs)-1]
 	}
-	toolBin := underDir(dirs, "node_modules", ".bin") || underDir(dirs, ".venv", "bin") || underDir(dirs, "venv", "bin") ||
+	inToolBin := underDir(dirs, "node_modules", ".bin") || underDir(dirs, ".venv", "bin") || underDir(dirs, "venv", "bin") ||
 		underDir(dirs, ".venv", "scripts") || underDir(dirs, "venv", "scripts")
-	if slicesContains(dirs, "node_modules") && !toolBin {
-		return out, nil
+	if slicesContains(dirs, "node_modules") && !inToolBin {
+		return none
+	}
+
+	switch {
+	case inToolBin:
+		// Package manager output. repoPath exempts these paths from the settings check, so a script
+		// committed here is graded instead. A real venv's bin/python is a symlink, which is never read.
+		return toolBinFile
+	case base == "tasks.json" && parent == ".vscode":
+		return tasksFile
+	case strings.HasSuffix(base, ".code-workspace"):
+		return workspaceFile
+	case base == "settings.json" && parent == ".vscode":
+		return settingsFile
+	case base == ".devcontainer.json", base == "devcontainer.json" && slicesContains(dirs, ".devcontainer"):
+		return devcontainerFile
+	case base == "package.json":
+		return packageFile
+	case parent == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
+		return huskyHook
+	case parent == "_" && len(dirs) > 1 && dirs[len(dirs)-2] == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
+		// Files husky generates: core.hooksPath may point here, so grade them without an inventory finding.
+		return huskyGenerated
+	case base == ".pre-commit-config.yaml":
+		return preCommitFile
+	case base == "config" && parent == ".git":
+		return gitConfigFile
+	case base == "setup.py":
+		return setupFile
+	case base == "pyproject.toml":
+		return pyprojectFile
+	case base == ".envrc":
+		return envrcFile
+	case base == "build.rs", base == "makefile", base == "gnumakefile", isWorkflow(dirs, base):
+		return inventoryFile
+	}
+	return none
+}
+
+func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, error) {
+	var out analyze.Output
+	if err := ctx.Err(); err != nil {
+		return out, err
 	}
 	s := &scan{ctx: ctx, f: f, out: &out, counts: map[string]int{}}
 
 	var run func()
-	switch {
-	case toolBin:
-		// Package manager output. repoPath exempts these paths from the settings check, so a script
-		// committed here is graded instead. A real venv's bin/python is a symlink, which is never read.
+	switch route(f.Path) {
+	case toolBinFile, huskyGenerated:
 		run = s.riskFile
-	case base == "tasks.json" && parent == ".vscode":
+	case tasksFile:
 		run = func() { s.json(s.tasks, s.tasksLexical) }
-	case strings.HasSuffix(base, ".code-workspace"):
+	case workspaceFile:
 		run = func() { s.json(func(root *node) { s.tasks(root.get("tasks")) }, s.tasksLexical) }
-	case base == "settings.json" && parent == ".vscode":
+	case settingsFile:
 		run = func() { s.json(s.settings, nil) }
-	case base == ".devcontainer.json", base == "devcontainer.json" && slicesContains(dirs, ".devcontainer"):
+	case devcontainerFile:
 		run = func() { s.json(s.devcontainer, s.devcontainerLexical) }
-	case base == "package.json":
+	case packageFile:
 		run = func() { s.json(s.packageJSON, nil) }
-	case parent == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
+	case huskyHook:
 		run = s.husky
-	case parent == "_" && len(dirs) > 1 && dirs[len(dirs)-2] == ".husky" && !strings.HasPrefix(base, ".") && base != "husky.sh":
-		// Files husky generates: core.hooksPath may point here, so grade them without an inventory finding.
-		run = s.riskFile
-	case base == ".pre-commit-config.yaml":
+	case preCommitFile:
 		run = s.preCommit
-	case base == "config" && parent == ".git":
+	case gitConfigFile:
 		run = s.gitConfig
-	case base == "setup.py":
+	case setupFile:
 		run = s.setupPy
-	case base == "pyproject.toml":
+	case pyprojectFile:
 		run = s.pyproject
-	case base == ".envrc":
+	case envrcFile:
 		run = s.envrc
-	case base == "build.rs", base == "makefile", base == "gnumakefile", isWorkflow(dirs, base):
+	case inventoryFile:
 		s.add(ruleOther, 0)
 		return out, nil
 	default:

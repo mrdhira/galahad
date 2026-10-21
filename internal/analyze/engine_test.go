@@ -38,9 +38,40 @@ func write(t *testing.T, dir, rel string, data []byte) string {
 	return p
 }
 
+// pad adds n empty files named f000000, f000001 and so on to dir/sub. They are
+// hard links to a few files, which is much faster than creating n files. A file
+// system caps the links to one file, so each template serves 50000 of them.
+func pad(t *testing.T, dir, sub string, n int) {
+	t.Helper()
+	var template string
+	for i := range n {
+		if i%50000 == 0 {
+			template = write(t, t.TempDir(), "template", nil)
+		}
+		if err := os.Link(template, filepath.Join(dir, sub, fmt.Sprintf("f%06d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func finding(id string, sev protocol.Severity, path string, line int, snippet string) protocol.Finding {
 	r := protocol.Rule{ID: id, Severity: sev, Title: "t"}
 	return r.Finding(protocol.Evidence{Path: path, Line: line, Snippet: snippet})
+}
+
+// prioritized is an analyzer that asks for every file whose name ends in ".cfg"
+// and reports one finding on each file it is given.
+type prioritized struct{}
+
+func (prioritized) Name() string { return "prioritized" }
+
+func (prioritized) Priority(path string) bool { return strings.HasSuffix(path, ".cfg") }
+
+func (prioritized) Analyze(_ context.Context, f analyze.File) (analyze.Output, error) {
+	if !strings.HasSuffix(f.Name, ".cfg") {
+		return analyze.Output{}, nil
+	}
+	return analyze.Output{Findings: []protocol.Finding{finding("GAL-T-006", protocol.SeverityHigh, f.Path, 1, "cfg")}}, nil
 }
 
 // nothing is an analyzer that finds nothing.
@@ -137,7 +168,7 @@ func TestRun(t *testing.T) {
 		wantSkips        []protocol.Skip
 		wantFindings     []string // "rule@path:line analyzer snippet", in order; nil means do not check
 		wantFindingCount int      // checked when > 0
-		wantRule         string   // a finding with this rule ID must be present
+		wantRules        []string // findings with these rule IDs must be present
 		wantIOCs         int
 		wantAnalyzerList []string
 		wantTruncated    bool
@@ -512,21 +543,126 @@ func TestRun(t *testing.T) {
 			wantSeen:         1,
 			wantAnalyzed:     1,
 			wantFindingCount: protocol.MaxFindings,
-			wantRule:         "GAL-T-005",
+			wantRules:        []string{"GAL-T-005"},
 			wantTruncated:    true,
 		},
 		{
 			name: "files over MaxFiles are counted but not analyzed",
 			setup: func(t *testing.T, dir string) string {
-				for i := range analyze.MaxFiles + 1 {
-					write(t, dir, fmt.Sprintf("f%05d", i), nil)
-				}
+				write(t, dir, "a/.keep", nil)
+				pad(t, dir, "a", analyze.MaxFiles)
 				return dir
 			},
 			analyzers:      []analyze.Analyzer{nothing},
 			wantTargetKind: protocol.TargetDir,
 			wantFileCount:  analyze.MaxFiles,
 			wantSeen:       analyze.MaxFiles + 1, wantAnalyzed: analyze.MaxFiles,
+			wantTruncated: true,
+		},
+		{
+			name: "the only finding of a rule is never replaced by a more severe finding",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a", []byte("x"))
+				return dir
+			},
+			analyzers: []analyze.Analyzer{fake{name: "flood", fn: func(_ context.Context, f analyze.File) (analyze.Output, error) {
+				// The only finding of GAL-T-007 comes last, so it would be the newest of the lowest severity.
+				var out analyze.Output
+				for i := range protocol.MaxFindings - 1 {
+					out.Findings = append(out.Findings, finding("GAL-T-004", protocol.SeverityMedium, fmt.Sprintf("%s#%d", f.Path, i/protocol.MaxFindingsPerRulePerFile), 1, ""))
+				}
+				out.Findings = append(out.Findings, finding("GAL-T-007", protocol.SeverityLow, f.Path, 1, "only"))
+				out.Findings = append(out.Findings, finding("GAL-T-005", protocol.SeverityCritical, f.Path, 1, "payload"))
+				return out, nil
+			}}},
+			wantTargetKind:   protocol.TargetDir,
+			wantFileCount:    1,
+			wantFiles:        []string{"a"},
+			wantSeen:         1,
+			wantAnalyzed:     1,
+			wantFindingCount: protocol.MaxFindings,
+			wantRules:        []string{"GAL-T-005", "GAL-T-007"},
+			wantTruncated:    true,
+		},
+		{
+			name: "a file the analyzers ask for is analyzed past MaxFiles",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a/.keep", nil)
+				pad(t, dir, "a", analyze.MaxFiles+4)
+				write(t, dir, "z/last.cfg", []byte("x"))
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{prioritized{}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  analyze.MaxFiles + 1,
+			wantSeen:       analyze.MaxFiles + 6, wantAnalyzed: analyze.MaxFiles + 1,
+			wantRules:     []string{"GAL-T-006"},
+			wantTruncated: true,
+		},
+		{
+			name: "a file the analyzers ask for is analyzed once the byte budget is spent",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a.zip", []byte("x"))
+				write(t, dir, "y.txt", []byte("x"))
+				write(t, dir, "z.cfg", []byte("x"))
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{children("a.zip", fillBudget()...), prioritized{}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  3,
+			wantSeen:       3 + 32, wantAnalyzed: 3,
+			wantSkips:     append(fillBudgetSkips(), protocol.Skip{Path: "y.txt", Reason: protocol.SkipTooLarge}),
+			wantRules:     []string{"GAL-T-006"},
+			wantTruncated: true,
+		},
+		{
+			name: "files the analyzers ask for beyond the extra allowance become one budget skip",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a/.keep", nil)
+				pad(t, dir, "a", analyze.MaxFiles-1)
+				for i := range analyze.MaxExtraFiles + 2 {
+					write(t, dir, fmt.Sprintf("z/f%05d.cfg", i), []byte("x"))
+				}
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{prioritized{}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  analyze.MaxFiles + analyze.MaxExtraFiles + 2,
+			wantSeen:       analyze.MaxFiles + analyze.MaxExtraFiles + 2, wantAnalyzed: analyze.MaxFiles + analyze.MaxExtraFiles,
+			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("z/f%05d.cfg", analyze.MaxExtraFiles), Reason: protocol.SkipBudget}},
+			wantRules:     []string{"GAL-T-006"},
+			wantTruncated: true,
+		},
+		{
+			name: "a file the analyzers ask for over MaxFileSize past MaxFiles is skipped as too_large",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a/.keep", nil)
+				pad(t, dir, "a", analyze.MaxFiles-1)
+				p := write(t, dir, "z/big.cfg", nil)
+				if err := os.Truncate(p, analyze.MaxFileSize+1); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{prioritized{}},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  analyze.MaxFiles + 1,
+			wantSeen:       analyze.MaxFiles + 1, wantAnalyzed: analyze.MaxFiles,
+			wantSkips:     []protocol.Skip{{Path: "z/big.cfg", Reason: protocol.SkipTooLarge}},
+			wantTruncated: true,
+		},
+		{
+			name: "the walk stops at maxFilesSeen with a budget skip",
+			setup: func(t *testing.T, dir string) string {
+				write(t, dir, "a/.keep", nil)
+				pad(t, dir, "a", analyze.MaxFiles*10)
+				return dir
+			},
+			analyzers:      []analyze.Analyzer{nothing},
+			wantTargetKind: protocol.TargetDir,
+			wantFileCount:  analyze.MaxFiles,
+			wantSeen:       analyze.MaxFiles * 10, wantAnalyzed: analyze.MaxFiles,
+			wantSkips:     []protocol.Skip{{Path: fmt.Sprintf("a/f%06d", analyze.MaxFiles*10-1), Reason: protocol.SkipBudget}},
 			wantTruncated: true,
 		},
 	}
@@ -593,8 +729,10 @@ func TestRun(t *testing.T) {
 			if tt.wantFindingCount > 0 && len(res.Findings) != tt.wantFindingCount {
 				t.Errorf("%d findings, want %d", len(res.Findings), tt.wantFindingCount)
 			}
-			if tt.wantRule != "" && !slices.ContainsFunc(res.Findings, func(f protocol.Finding) bool { return f.RuleID == tt.wantRule }) {
-				t.Errorf("no finding of %s in %d findings", tt.wantRule, len(res.Findings))
+			for _, rule := range tt.wantRules {
+				if !slices.ContainsFunc(res.Findings, func(f protocol.Finding) bool { return f.RuleID == rule }) {
+					t.Errorf("no finding of %s in %d findings", rule, len(res.Findings))
+				}
 			}
 			if len(res.IOCs) != tt.wantIOCs {
 				t.Errorf("%d iocs, want %d", len(res.IOCs), tt.wantIOCs)
@@ -633,4 +771,106 @@ func nestedBudgetSkips(fitFirst int) []protocol.Skip {
 		}
 	}
 	return skips
+}
+
+// fillBudget returns members that, with a one-byte parent, use the whole job
+// budget: 31 that are too large to analyze and one that takes the rest.
+func fillBudget() []analyze.File {
+	shared := make([]byte, analyze.MaxFileSize+1)
+	var kids []analyze.File
+	for i := range 31 {
+		kids = append(kids, analyze.File{Name: fmt.Sprintf("m%d", i), Data: shared})
+	}
+	rest := analyze.MaxTotalBytes - 1 - 31*(analyze.MaxFileSize+1)
+	return append(kids, analyze.File{Name: "rest", Data: make([]byte, rest)})
+}
+
+// fillBudgetSkips lists the members of fillBudget that are skipped as too large.
+func fillBudgetSkips() []protocol.Skip {
+	var skips []protocol.Skip
+	for i := range 31 {
+		skips = append(skips, protocol.Skip{Path: fmt.Sprintf("a.zip!/m%d", i), Reason: protocol.SkipTooLarge})
+	}
+	return skips
+}
+
+func TestBudget(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		ctx context.Context
+		// expectations
+		wantBudget int64
+		wantSet    bool
+	}{
+		{name: "a budget set on the context is returned", ctx: analyze.WithBudget(context.Background(), 1234), wantBudget: 1234, wantSet: true},
+		{name: "a zero budget is still set", ctx: analyze.WithBudget(context.Background(), 0), wantBudget: 0, wantSet: true},
+		{name: "a negative budget counts as zero", ctx: analyze.WithBudget(context.Background(), -5), wantBudget: 0, wantSet: true},
+		{name: "a context without a budget reports none", ctx: context.Background(), wantBudget: 0, wantSet: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := analyze.Budget(tt.ctx)
+			if got != tt.wantBudget || ok != tt.wantSet {
+				t.Errorf("Budget = %d, %v, want %d, %v", got, ok, tt.wantBudget, tt.wantSet)
+			}
+		})
+	}
+}
+
+func TestRunBudget(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		files map[string]int // file name to size
+		kids  []analyze.File // members the file "a" yields
+		// expectations: the budget each analyzer call saw, by file path
+		wantBudget map[string]int64
+	}{
+		{
+			name:       "a file sees the budget left after its own bytes",
+			files:      map[string]int{"a": 10},
+			wantBudget: map[string]int64{"a": analyze.MaxTotalBytes - 10},
+		},
+		{
+			name:  "a member sees the budget left after the file and every member",
+			files: map[string]int{"a": 10},
+			kids:  []analyze.File{{Name: "m", Data: make([]byte, 100)}, {Name: "n", Data: make([]byte, 1000)}},
+			wantBudget: map[string]int64{
+				"a":    analyze.MaxTotalBytes - 10,
+				"a!/m": analyze.MaxTotalBytes - 1110,
+				"a!/n": analyze.MaxTotalBytes - 1110,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, size := range tt.files {
+				write(t, dir, name, make([]byte, size))
+			}
+			got := map[string]int64{}
+			spy := fake{name: "spy", fn: func(ctx context.Context, f analyze.File) (analyze.Output, error) {
+				n, ok := analyze.Budget(ctx)
+				if !ok {
+					t.Errorf("%s: context has no budget", f.Path)
+				}
+				got[f.Path] = n
+				if f.Path == "a" {
+					return analyze.Output{Children: tt.kids}, nil
+				}
+				return analyze.Output{}, nil
+			}}
+
+			if _, err := analyze.Run(context.Background(), dir, []analyze.Analyzer{spy}); err != nil {
+				t.Fatal(err)
+			}
+
+			for path, want := range tt.wantBudget {
+				if got[path] != want {
+					t.Errorf("budget for %s = %d, want %d", path, got[path], want)
+				}
+			}
+		})
+	}
 }

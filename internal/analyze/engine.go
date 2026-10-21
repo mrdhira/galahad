@@ -91,6 +91,10 @@ type job struct {
 	queue     []File
 	perRule   map[string]int
 	iocs      map[string]bool
+
+	extraFiles int   // files read past the file cap or byte budget
+	extraBytes int64 // their size
+	extraFull  bool  // an extra file was refused for want of allowance
 }
 
 func newJob(analyzers []Analyzer) *job {
@@ -145,8 +149,10 @@ func (j *job) walkDir(ctx context.Context, path string) error {
 		ok, more := j.admit()
 		switch {
 		case !more:
+			// Everything after this point is unread, and a payload could be in it.
+			j.skip(cp, protocol.SkipBudget)
 			return fs.SkipAll
-		case !ok:
+		case !ok && !j.priority(cp):
 			return nil
 		case !d.Type().IsRegular():
 			j.skip(cp, protocol.SkipUnsupported)
@@ -158,7 +164,7 @@ func (j *job) walkDir(ctx context.Context, path string) error {
 			return nil
 		}
 		defer func() { _ = f.Close() }() // read-only handle
-		j.top(ctx, f, d.Name(), cp)
+		j.top(ctx, f, d.Name(), cp, !ok)
 		return nil
 	})
 }
@@ -171,17 +177,19 @@ func (j *job) walkFile(ctx context.Context, path string) error {
 	defer func() { _ = f.Close() }() // read-only handle
 	j.admit()
 	name := filepath.Base(path)
-	j.top(ctx, f, name, protocol.CleanPath(name))
+	j.top(ctx, f, name, protocol.CleanPath(name), false)
 	if len(j.res.Files) == 1 {
 		j.res.Target.SHA256 = j.res.Files[0].SHA256
 	}
 	return nil
 }
 
-// top reads one file from disk, dispatches it and then its members.
-func (j *job) top(ctx context.Context, r io.Reader, name, cp string) {
+// top reads one file from disk, dispatches it and then its members. A late file
+// is past the file cap: it has no share of the job budget and is analyzed only as
+// an extra file.
+func (j *job) top(ctx context.Context, r io.Reader, name, cp string, late bool) {
 	j.topFiles++
-	if j.bytes >= MaxTotalBytes {
+	if !late && j.bytes >= MaxTotalBytes && !j.priority(cp) {
 		j.res.Coverage.Truncated = true
 		j.skip(cp, protocol.SkipTooLarge)
 		return
@@ -195,7 +203,7 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string) {
 	}
 	size := int64(len(data))
 	_, _ = h.Write(data) // hash.Hash never fails
-	if size > MaxFileSize {
+	if size > MaxFileSize && !late {
 		n, err := io.Copy(h, io.LimitReader(r, limit-size+1))
 		size += n
 		if err != nil {
@@ -203,13 +211,47 @@ func (j *job) top(ctx context.Context, r io.Reader, name, cp string) {
 			return
 		}
 	}
-	if size > limit {
+	if late || size > limit {
 		j.res.Coverage.Truncated = true
-		j.skip(cp, protocol.SkipTooLarge)
+		if size > MaxFileSize || !j.priority(cp) {
+			j.skip(cp, protocol.SkipTooLarge)
+			return
+		}
+		j.extra(ctx, cp, name, data, h.Sum(nil))
 		return
 	}
 	j.bytes += size
 	if f, ok := j.accept(cp, name, 0, data, size, h.Sum(nil)); ok {
+		j.dispatch(ctx, f)
+	}
+	j.drain(ctx)
+}
+
+// priority reports whether an analyzer must see the file at cp.
+func (j *job) priority(cp string) bool {
+	for _, a := range j.analyzers {
+		if p, ok := a.(Priority); ok && p.Priority(cp) {
+			return true
+		}
+	}
+	return false
+}
+
+// extra analyzes a small file that an analyzer must see although the file cap or
+// the byte budget is spent. It draws on its own allowance and does not charge the
+// job budget. Once the allowance is gone, further files are unread, which hides
+// content, so one budget skip says so.
+func (j *job) extra(ctx context.Context, cp, name string, data, sum []byte) {
+	if j.extraFiles >= MaxExtraFiles || j.extraBytes+int64(len(data)) > MaxExtraBytes {
+		if !j.extraFull {
+			j.extraFull = true
+			j.skip(cp, protocol.SkipBudget)
+		}
+		return
+	}
+	j.extraFiles++
+	j.extraBytes += int64(len(data))
+	if f, ok := j.accept(cp, name, 0, data, int64(len(data)), sum); ok {
 		j.dispatch(ctx, f)
 	}
 	j.drain(ctx)
@@ -256,7 +298,7 @@ func (j *job) accept(cp, name string, depth int, data []byte, size int64, sum []
 func (j *job) dispatch(ctx context.Context, f File) {
 	failed := false
 	for _, a := range j.analyzers {
-		out, reason := call(ctx, a, f)
+		out, reason := call(WithBudget(ctx, MaxTotalBytes-j.bytes), a, f)
 		if reason != "" {
 			if !failed {
 				j.skip(f.Path, reason)
@@ -272,7 +314,7 @@ func (j *job) dispatch(ctx context.Context, f File) {
 }
 
 // call runs one analyzer with the per-file timeout. A panic, an error or a
-// timeout yields a skip reason.
+// timeout yields a skip reason. ctx carries the job budget left.
 func call(ctx context.Context, a Analyzer, f File) (out Output, reason string) {
 	ctx, cancel := context.WithTimeout(ctx, PerFileTimeout)
 	defer cancel()
@@ -293,19 +335,25 @@ func call(ctx context.Context, a Analyzer, f File) (out Output, reason string) {
 
 // evictFor makes room for fd in a full findings list by replacing the newest
 // finding of the lowest severity, if fd is more severe than it. Low findings can
-// then never push out a critical one. It reports whether fd was added.
+// then never push out a critical one. Only a finding whose rule occurs more than
+// once can be replaced, so the only finding of a rule always stays. It reports
+// whether fd was added.
 func (j *job) evictFor(fd protocol.Finding) bool {
 	fs := j.res.Findings
-	lowest := len(fs) - 1
-	for i := lowest; i >= 0; i-- {
-		if severityRank[fs[i].Severity] < severityRank[fs[lowest].Severity] {
-			lowest = i
+	rules := map[string]int{}
+	for _, f := range fs {
+		rules[f.RuleID]++
+	}
+	victim := -1
+	for i := len(fs) - 1; i >= 0; i-- {
+		if rules[fs[i].RuleID] > 1 && (victim < 0 || severityRank[fs[i].Severity] < severityRank[fs[victim].Severity]) {
+			victim = i
 		}
 	}
-	if severityRank[fd.Severity] <= severityRank[fs[lowest].Severity] {
+	if victim < 0 || severityRank[fd.Severity] <= severityRank[fs[victim].Severity] {
 		return false
 	}
-	fs[lowest] = fd
+	fs[victim] = fd
 	return true
 }
 

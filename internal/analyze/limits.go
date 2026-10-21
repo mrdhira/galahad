@@ -11,6 +11,11 @@ const (
 	MaxDirDepth   = 64
 	MaxLineScan   = 1 << 20 // bytes per line scanned by line heuristics
 	MaxConfigSize = 1 << 20 // JSON, JSONC and YAML-ish config files
+
+	// Extra files: auto-run files past MaxFiles or MaxTotalBytes are still read,
+	// from this allowance, so padding a repository cannot hide them.
+	MaxExtraFiles = 2000
+	MaxExtraBytes = 64 << 20
 )
 
 // Time limits.
@@ -19,7 +24,8 @@ const (
 	DefaultJobTimeout = 5 * time.Minute
 )
 
-// maxFilesSeen is where counting stops: files beyond MaxFiles are counted but not analyzed.
+// maxFilesSeen is where counting stops: files beyond MaxFiles are counted but not analyzed,
+// except for the extra files above.
 const maxFilesSeen = MaxFiles * 10
 
 // identifyWindow is how many leading bytes identify a file too large to keep.

@@ -363,6 +363,47 @@ func TestStripJSONC(t *testing.T) {
 	}
 }
 
+func TestPriority(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		path string
+		// expectations
+		wantPriority bool
+	}{
+		{name: "VS Code tasks file", path: "src/.vscode/tasks.json", wantPriority: true},
+		{name: "tasks.json outside .vscode", path: "src/tasks.json", wantPriority: false},
+		{name: "workspace file", path: "app.code-workspace", wantPriority: true},
+		{name: "VS Code settings", path: ".vscode/settings.json", wantPriority: true},
+		{name: "devcontainer file", path: ".devcontainer/devcontainer.json", wantPriority: true},
+		{name: "package.json", path: "pkg/package.json", wantPriority: true},
+		{name: "husky hook", path: ".husky/pre-commit", wantPriority: true},
+		{name: "husky generated file", path: ".husky/_/h", wantPriority: true},
+		{name: "pre-commit config", path: ".pre-commit-config.yaml", wantPriority: true},
+		{name: "git config", path: ".git/config", wantPriority: true},
+		{name: "setup.py", path: "setup.py", wantPriority: true},
+		{name: "pyproject.toml", path: "pyproject.toml", wantPriority: true},
+		{name: ".envrc", path: ".envrc", wantPriority: true},
+		{name: "Makefile in any case", path: "build/Makefile", wantPriority: true},
+		{name: "CI workflow", path: ".github/workflows/ci.yml", wantPriority: true},
+		{name: "package manager output", path: "node_modules/.bin/tool", wantPriority: true},
+		{name: "member of a container is matched by its member path", path: "repo.zip!/.vscode/tasks.json", wantPriority: true},
+		{name: "package.json inside node_modules", path: "node_modules/dep/package.json", wantPriority: false},
+		{name: "ordinary source file", path: "src/main.go", wantPriority: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, ok := autoexec.New().(analyze.Priority)
+			if !ok {
+				t.Fatal("analyzer does not implement analyze.Priority")
+			}
+			if got := p.Priority(tt.path); got != tt.wantPriority {
+				t.Errorf("Priority(%q) = %v, want %v", tt.path, got, tt.wantPriority)
+			}
+		})
+	}
+}
+
 func TestName(t *testing.T) {
 	tests := []struct {
 		name     string
