@@ -10,12 +10,6 @@ import (
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
-var allFrameTypes = []protocol.FrameType{
-	protocol.FrameHello, protocol.FrameJob, protocol.FrameData, protocol.FrameEnd,
-	protocol.FrameProgress, protocol.FrameArtifact, protocol.FrameResult, protocol.FrameError,
-	protocol.FrameConnect, protocol.FrameConnectReply,
-}
-
 func TestFrameRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -85,7 +79,8 @@ func TestReadFrameLimits(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		typ     protocol.FrameType
+		typ protocol.FrameType
+		// expectations
 		wantMax int
 	}{
 		{name: "hello", typ: protocol.FrameHello, wantMax: 1 << 10},
@@ -157,7 +152,16 @@ func TestFrameTypeString(t *testing.T) {
 		typ  protocol.FrameType
 		want string
 	}{
-		{name: "known", typ: protocol.FrameConnectReply, want: "connect_reply"},
+		{name: "hello", typ: protocol.FrameHello, want: "hello"},
+		{name: "job", typ: protocol.FrameJob, want: "job"},
+		{name: "data", typ: protocol.FrameData, want: "data"},
+		{name: "end", typ: protocol.FrameEnd, want: "end"},
+		{name: "progress", typ: protocol.FrameProgress, want: "progress"},
+		{name: "artifact", typ: protocol.FrameArtifact, want: "artifact"},
+		{name: "result", typ: protocol.FrameResult, want: "result"},
+		{name: "error", typ: protocol.FrameError, want: "error"},
+		{name: "connect", typ: protocol.FrameConnect, want: "connect"},
+		{name: "connect reply", typ: protocol.FrameConnectReply, want: "connect_reply"},
 		{name: "unknown", typ: 42, want: "unknown(42)"},
 	}
 	for _, tt := range tests {
@@ -166,11 +170,6 @@ func TestFrameTypeString(t *testing.T) {
 				t.Errorf("String() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-	for _, typ := range allFrameTypes {
-		if strings.HasPrefix(typ.String(), "unknown") {
-			t.Errorf("frame type %d has no name", byte(typ))
-		}
 	}
 }
 

@@ -495,8 +495,8 @@ func TestApplyReasonCount(t *testing.T) {
 		// expectations
 		wantReasons int
 	}{
-		{name: "one hard trigger per critical rule, cut at the cap", rules: protocol.MaxReasonCount + 50, wantReasons: protocol.MaxReasonCount},
 		{name: "under the cap nothing is cut", rules: 3, wantReasons: 3},
+		{name: "one hard trigger per critical rule, cut at the cap", rules: protocol.MaxReasonCount + 50, wantReasons: protocol.MaxReasonCount},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

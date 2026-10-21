@@ -1,6 +1,7 @@
 package protocol_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -100,8 +101,11 @@ func TestValidate(t *testing.T) {
 		{name: "wrong schema version", mutate: func(r *protocol.Result) { r.SchemaVersion = 2 }, wantErr: "schema_version"},
 		{name: "tool name has control character", mutate: func(r *protocol.Result) { r.Tool.Name = "a\x1b" }, wantErr: "tool.name"},
 		{name: "tool version has invalid UTF-8", mutate: func(r *protocol.Result) { r.Tool.Version = "\xff" }, wantErr: "tool.version"},
+		{name: "tool name too long", mutate: func(r *protocol.Result) { r.Tool.Name = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "tool.name is 65 bytes"},
+		{name: "tool version too long", mutate: func(r *protocol.Result) { r.Tool.Version = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "tool.version is 65 bytes"},
 		{name: "target name too long", mutate: func(r *protocol.Result) { r.Target.Name = strings.Repeat("a", protocol.MaxPath+1) }, wantErr: "target.name is"},
 		{name: "target name has bidi character", mutate: func(r *protocol.Result) { r.Target.Name = "a\u202eb" }, wantErr: "target.name has"},
+		{name: "target sha256 too long", mutate: func(r *protocol.Result) { r.Target.SHA256 = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "target.sha256 is 65 bytes"},
 		{name: "target kind unknown", mutate: func(r *protocol.Result) { r.Target.Kind = "repo" }, wantErr: "target.kind"},
 		{name: "target kind dir", mutate: func(r *protocol.Result) { r.Target.Kind = protocol.TargetDir }},
 		{name: "unknown verdict", mutate: func(r *protocol.Result) { r.Verdict = "evil" }, wantErr: "verdict"},
@@ -124,13 +128,20 @@ func TestValidate(t *testing.T) {
 		}},
 		{name: "file path empty", mutate: func(r *protocol.Result) { r.Files[0].Path = "" }, wantErr: "files[0]: path is empty"},
 		{name: "file kind has control character", mutate: func(r *protocol.Result) { r.Files[0].Kind = "a\x1b" }, wantErr: "files[0]: kind"},
+		{name: "file kind too long", mutate: func(r *protocol.Result) { r.Files[0].Kind = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "files[0]: kind is 65 bytes"},
+		{name: "file sha256 has control character", mutate: func(r *protocol.Result) { r.Files[0].SHA256 = "a\x1b" }, wantErr: "files[0]: sha256 has control"},
+		{name: "file sha256 too long", mutate: func(r *protocol.Result) { r.Files[0].SHA256 = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "files[0]: sha256 is 65 bytes"},
 		{name: "rule id malformed", mutate: func(r *protocol.Result) { r.Findings[0].RuleID = "gal-exec-1" }, wantErr: "rule_id"},
+		{name: "rule id category too long", mutate: func(r *protocol.Result) { r.Findings[0].RuleID = "GAL-" + strings.Repeat("A", 17) + "-001" }, wantErr: "rule_id"},
 		{name: "severity unknown", mutate: func(r *protocol.Result) { r.Findings[0].Severity = "huge" }, wantErr: "severity"},
 		{name: "attack malformed", mutate: func(r *protocol.Result) { r.Findings[0].Attack = "T12" }, wantErr: "attack"},
 		{name: "attack empty is allowed", mutate: func(r *protocol.Result) { r.Findings[0].Attack = "" }},
 		{name: "attack without sub-technique is allowed", mutate: func(r *protocol.Result) { r.Findings[0].Attack = "T1204" }},
 		{name: "analyzer has control character", mutate: func(r *protocol.Result) { r.Findings[0].Analyzer = "a\x1b" }, wantErr: "analyzer"},
+		{name: "analyzer too long", mutate: func(r *protocol.Result) { r.Findings[0].Analyzer = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "analyzer is 65 bytes"},
 		{name: "title has invalid UTF-8", mutate: func(r *protocol.Result) { r.Findings[0].Title = "\xff" }, wantErr: "title"},
+		{name: "title too long", mutate: func(r *protocol.Result) { r.Findings[0].Title = strings.Repeat("é", protocol.MaxTitle+1) }, wantErr: "title has 201 runes"},
+		{name: "title at the limit", mutate: func(r *protocol.Result) { r.Findings[0].Title = strings.Repeat("é", protocol.MaxTitle) }},
 		{name: "title has control character", mutate: func(r *protocol.Result) { r.Findings[0].Title = "a\x1bb" }, wantErr: "title"},
 		{name: "title has bidi character", mutate: func(r *protocol.Result) { r.Findings[0].Title = "a\u202eb" }, wantErr: "title"},
 		{name: "no evidence", mutate: func(r *protocol.Result) { r.Findings[0].Evidence = nil }, wantErr: "no evidence"},
@@ -168,10 +179,12 @@ func TestValidate(t *testing.T) {
 		{name: "ioc type unknown", mutate: func(r *protocol.Result) { r.IOCs[0].Type = "hash" }, wantErr: "iocs[0]: type"},
 		{name: "ioc value has control character", mutate: func(r *protocol.Result) { r.IOCs[0].Value = "http://a\x1b" }, wantErr: "value has control"},
 		{name: "ioc value has bidi character", mutate: func(r *protocol.Result) { r.IOCs[0].Value = "http://a\u202e" }, wantErr: "value has control"},
+		{name: "ioc value too long", mutate: func(r *protocol.Result) { r.IOCs[0].Value = strings.Repeat("a", protocol.MaxPath+1) }, wantErr: "value is 1025 bytes"},
 		{name: "ioc path is absolute", mutate: func(r *protocol.Result) { r.IOCs[0].Path = "/x" }, wantErr: "iocs[0]: path"},
 		{name: "skip path is absolute", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Path = "/x" }, wantErr: "coverage.skipped[0]: path"},
 		{name: "skip reason unknown", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Reason = "lazy" }, wantErr: "reason"},
 		{name: "coverage analyzer has control character", mutate: func(r *protocol.Result) { r.Coverage.Analyzers[0] = "a\x1b" }, wantErr: "coverage.analyzers[0]"},
+		{name: "coverage analyzer too long", mutate: func(r *protocol.Result) { r.Coverage.Analyzers[0] = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "coverage.analyzers[0]: name is 65 bytes"},
 		{name: "reason too long", mutate: func(r *protocol.Result) { r.Reasons[0] = strings.Repeat("a", protocol.MaxReason+1) }, wantErr: "reasons[0]: 401 runes"},
 		{name: "reason has control character", mutate: func(r *protocol.Result) { r.Reasons[0] = "a\nb" }, wantErr: "reasons[0]: text"},
 	}
@@ -263,60 +276,209 @@ func TestSkipUnreadAndHidesContent(t *testing.T) {
 	}
 }
 
-func TestWorstCaseResultSize(t *testing.T) {
-	// Every list is full and every bounded string is at its limit. Strings with no
-	// cap of their own (title, tool, kind) get a realistic length. Equal strings share
-	// their memory, which keeps the test cheap without changing the encoded size; 100
-	// rules with 20 findings each stay within the per-rule, per-file limit.
-	path := strings.Repeat("p", protocol.MaxPath)
-	snippet := strings.Repeat("é", protocol.MaxSnippet)
+func TestEncodeResult(t *testing.T) {
+	// Text at its worst: a quote or backslash takes 2 bytes, U+2028 takes 6 (3 raw), and
+	// EncodeResult does not escape HTML. Paths are capped in bytes, so quotes are their worst.
+	quotes := func(n int) string { return strings.Repeat(`"`, n) }
+	worstPath := quotes(protocol.MaxPath)
+	worstName := quotes(protocol.MaxName)
+	worstSnippet := strings.Repeat("\u2028", protocol.MaxSnippet)
+	worstTitle := strings.Repeat("\u2028", protocol.MaxTitle)
+	worstReason := strings.Repeat("\u2028", protocol.MaxReason)
+	// Equal strings share their memory, which keeps the test cheap without changing the encoded
+	// size. 100 rules with 20 findings each stay within the per-rule, per-file limit.
+	worst := func() protocol.Result {
+		r := validResult()
+		r.Tool = protocol.Tool{Name: worstName, Version: worstName}
+		r.Target.Name = quotes(protocol.MaxPath)
+		r.Target.SHA256 = worstName
+		r.Files = make([]protocol.FileInfo, protocol.MaxFiles)
+		for i := range r.Files {
+			r.Files[i] = protocol.FileInfo{Path: worstPath, Size: -1 << 62, Kind: worstName, SHA256: worstName, Entropy: -1.2345678901234567e-300}
+		}
+		ev := slices.Repeat([]protocol.Evidence{{Path: worstPath, Line: -1 << 62, Snippet: worstSnippet}}, protocol.MaxEvidence)
+		r.Findings = make([]protocol.Finding, protocol.MaxFindings)
+		for i := range r.Findings {
+			r.Findings[i] = protocol.Finding{
+				RuleID: fmt.Sprintf("GAL-%s-%03d", strings.Repeat("A", 16), i%100), Severity: protocol.SeverityCritical,
+				Title: worstTitle, Attack: "T1204.002", Analyzer: worstName, Evidence: ev,
+			}
+		}
+		r.IOCs = slices.Repeat([]protocol.IOC{{Type: "url", Value: quotes(protocol.MaxPath), Path: worstPath, Line: -1 << 62}}, protocol.MaxIOCs)
+		r.Coverage.Skipped = slices.Repeat([]protocol.Skip{{Path: worstPath, Reason: protocol.SkipUnsupported}}, protocol.MaxSkipped)
+		r.Coverage.Analyzers = slices.Repeat([]string{worstName}, protocol.MaxAnalyzers)
+		r.Reasons = slices.Repeat([]string{worstReason}, protocol.MaxReasonCount)
+		return r
+	}
+	// lean is a small valid result with one IOC and one evidence entry, no files and no skips.
+	// The cases below add one oversize list to it, beyond the caps, to reach each shrink step.
+	const big = 23 << 20 // three of these do not fit in the 64 MiB frame
+	bigText := strings.Repeat("a", big)
+	lean := func() protocol.Result {
+		r := validResult()
+		r.Files = nil
+		r.Coverage.Skipped = nil
+		return r
+	}
 	tests := []struct {
 		name string
+		// inputs
+		build   func() protocol.Result
+		measure bool // log the size before shrinking
 		// expectations
-		wantMax int
+		wantErr       string
+		wantPlain     bool // the output is the plain encoding of the result
+		wantValid     bool
+		wantTruncated bool
+		wantFiles     int
+		wantSkipped   int
+		wantEvidence  int // of the first finding
+		wantIOCs      int
 	}{
-		{name: "fits the Result frame", wantMax: 64 << 20},
+		{
+			name:      "a result that fits is encoded as it is",
+			build:     validResult,
+			wantPlain: true, wantValid: true,
+			wantFiles: 1, wantSkipped: 1, wantEvidence: 1, wantIOCs: 1,
+		},
+		{
+			name:  "every cap at its maximum with the worst text still fits after shrinking",
+			build: worst, measure: true,
+			wantValid: true, wantTruncated: true,
+			wantFiles: 0, wantSkipped: 1, wantEvidence: protocol.MaxEvidence, wantIOCs: protocol.MaxIOCs,
+		},
+		{
+			// What no step cuts, at its worst, is far under the limit, so the error below is
+			// unreachable for a result within the caps.
+			name: "the part that is never cut fits with room to spare",
+			build: func() protocol.Result {
+				r := worst()
+				r.Files, r.Coverage.Skipped, r.IOCs = nil, nil, nil
+				for i := range r.Findings {
+					r.Findings[i].Evidence = r.Findings[i].Evidence[:1]
+				}
+				return r
+			},
+			measure:   true,
+			wantPlain: true, wantValid: true,
+			wantFiles: 0, wantSkipped: 0, wantEvidence: 1, wantIOCs: 0,
+		},
+		{
+			name: "the files go first and the skipped list gets the budget skip",
+			build: func() protocol.Result {
+				r := lean()
+				r.Files = slices.Repeat([]protocol.FileInfo{{Path: bigText}}, 3)
+				return r
+			},
+			wantTruncated: true,
+			wantFiles:     0, wantSkipped: 1, wantEvidence: 1, wantIOCs: 1,
+		},
+		{
+			name: "the skipped list goes second",
+			build: func() protocol.Result {
+				r := lean()
+				r.Coverage.Skipped = slices.Repeat([]protocol.Skip{{Path: bigText, Reason: protocol.SkipTimeout}}, 3)
+				return r
+			},
+			wantTruncated: true,
+			wantFiles:     0, wantSkipped: 1, wantEvidence: 1, wantIOCs: 1,
+		},
+		{
+			name: "the evidence past the first entry goes third",
+			build: func() protocol.Result {
+				r := lean()
+				r.Findings[0].Evidence = slices.Repeat([]protocol.Evidence{{Path: "a", Snippet: bigText}}, 3)
+				return r
+			},
+			wantTruncated: true,
+			wantFiles:     0, wantSkipped: 1, wantEvidence: 1, wantIOCs: 1,
+		},
+		{
+			name: "the IOCs go last",
+			build: func() protocol.Result {
+				r := lean()
+				r.IOCs = slices.Repeat([]protocol.IOC{{Type: "url", Value: bigText, Path: "a"}}, 3)
+				return r
+			},
+			wantTruncated: true,
+			wantFiles:     0, wantSkipped: 1, wantEvidence: 1, wantIOCs: 0,
+		},
+		{
+			name: "findings are never cut, so an oversize finding is an error",
+			build: func() protocol.Result {
+				r := lean()
+				r.Findings[0].Title = strings.Repeat("a", 65<<20)
+				return r
+			},
+			wantErr: "after shrinking",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := validResult()
-			r.Files = make([]protocol.FileInfo, protocol.MaxFiles)
-			for i := range r.Files {
-				r.Files[i] = protocol.FileInfo{Path: path, Size: 1 << 40, Kind: "executable", SHA256: strings.Repeat("f", 64), Entropy: 7.123456789012345}
-			}
-			r.Findings = make([]protocol.Finding, protocol.MaxFindings)
-			for i := range r.Findings {
-				ev := make([]protocol.Evidence, protocol.MaxEvidence)
-				for k := range ev {
-					ev[k] = protocol.Evidence{Path: path, Line: 1 << 30, Snippet: snippet}
+			res := tt.build()
+			files, skipped := len(res.Files), len(res.Coverage.Skipped)
+
+			data, err := protocol.EncodeResult(&res)
+
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("EncodeResult = %v, want error containing %q", err, tt.wantErr)
 				}
-				f := testRule.Finding(ev...)
-				f.RuleID = fmt.Sprintf("GAL-EXEC-%03d", i%100)
-				f.Title = strings.Repeat("t", 100)
-				f.Analyzer = "autoexec"
-				r.Findings[i] = f
+				return
 			}
-			r.IOCs = make([]protocol.IOC, protocol.MaxIOCs)
-			for i := range r.IOCs {
-				r.IOCs[i] = protocol.IOC{Type: "url", Value: strings.Repeat("u", protocol.MaxPath), Path: path, Line: 1 << 30}
-			}
-			r.Coverage.Skipped = make([]protocol.Skip, protocol.MaxSkipped)
-			for i := range r.Coverage.Skipped {
-				r.Coverage.Skipped[i] = protocol.Skip{Path: path, Reason: protocol.SkipUnsupported}
-			}
-			r.Coverage.Analyzers = slices.Repeat([]string{strings.Repeat("a", 32)}, protocol.MaxAnalyzers)
-			r.Reasons = slices.Repeat([]string{strings.Repeat("é", protocol.MaxReason)}, protocol.MaxReasonCount)
-			if err := r.Validate(); err != nil {
-				t.Fatalf("worst-case result is not valid: %v", err)
-			}
-			data, err := json.Marshal(r)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("EncodeResult: %v", err)
 			}
-			if len(data) >= tt.wantMax {
-				t.Errorf("worst-case result is %d bytes, want under %d", len(data), tt.wantMax)
+			if len(data) > 64<<20 {
+				t.Errorf("encoded result is %d bytes, want at most %d", len(data), 64<<20)
 			}
-			t.Logf("worst-case result: %d bytes", len(data))
+			if bytes.HasSuffix(data, []byte("\n")) {
+				t.Error("encoded result ends in a newline")
+			}
+			if len(res.Files) != files || len(res.Coverage.Skipped) != skipped || res.Coverage.Truncated {
+				t.Error("EncodeResult changed its argument")
+			}
+			if tt.wantPlain {
+				want, err := json.Marshal(res)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(data, want) {
+					t.Error("output differs from the plain encoding")
+				}
+			}
+			if tt.measure {
+				var plain bytes.Buffer
+				enc := json.NewEncoder(&plain)
+				enc.SetEscapeHTML(false)
+				if err := enc.Encode(res); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("encoded size: %d bytes before shrinking, %d after", plain.Len(), len(data))
+			}
+			var got protocol.Result
+			if err := protocol.DecodeStrict(data, &got); err != nil {
+				t.Fatalf("DecodeStrict: %v", err)
+			}
+			if tt.wantValid {
+				if err := got.Validate(); err != nil {
+					t.Errorf("Validate() = %v", err)
+				}
+			}
+			if got.Coverage.Truncated != tt.wantTruncated {
+				t.Errorf("Truncated = %v, want %v", got.Coverage.Truncated, tt.wantTruncated)
+			}
+			if sk := got.Coverage.Skipped; tt.wantTruncated && (len(sk) == 0 || sk[len(sk)-1].Reason != protocol.SkipBudget || !sk[len(sk)-1].HidesContent()) {
+				t.Errorf("last skip = %+v, want a budget skip", sk)
+			}
+			if len(got.Findings) != len(res.Findings) || len(got.Reasons) != len(res.Reasons) {
+				t.Errorf("%d findings and %d reasons, want %d and %d", len(got.Findings), len(got.Reasons), len(res.Findings), len(res.Reasons))
+			}
+			if len(got.Files) != tt.wantFiles || len(got.Coverage.Skipped) != tt.wantSkipped || len(got.Findings[0].Evidence) != tt.wantEvidence || len(got.IOCs) != tt.wantIOCs {
+				t.Errorf("%d files, %d skipped, %d evidence, %d iocs; want %d, %d, %d, %d",
+					len(got.Files), len(got.Coverage.Skipped), len(got.Findings[0].Evidence), len(got.IOCs),
+					tt.wantFiles, tt.wantSkipped, tt.wantEvidence, tt.wantIOCs)
+			}
 		})
 	}
 }

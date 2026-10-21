@@ -41,13 +41,16 @@ const (
 	MaxIOCs                   = 1000
 	MaxSnippet                = 200  // runes
 	MaxPath                   = 1024 // bytes
+	MaxName                   = 64   // bytes: tool, analyzer, file kind, sha256
+	MaxTitle                  = 200  // runes
 	MaxEvidence               = 8    // entries per finding; the producers emit at most 3
 
-	// The caps below keep a worst-case Result under the 64 MiB Result frame.
+	// The caps below bound the size of a Result. EncodeResult guarantees the 64 MiB
+	// Result frame by cutting the files and skips of a Result that is still too big
+	// (TestEncodeResult); the findings, which decide the verdict, always fit.
 	// MaxFiles is analyze.MaxFiles + analyze.MaxExtraFiles (20 000 + 2 000); protocol
-	// must not import analyze, so the sum is repeated here. Files, skips, findings
-	// and evidence at their caps with paths and snippets at their limits come to
-	// about 63 MiB (TestWorstCaseResultSize), so MaxSkipped is lower than MaxFiles.
+	// must not import analyze, so the sum is repeated here. MaxSkipped is lower
+	// because the engine ends a longer list with one budget skip.
 	MaxFiles       = 22000
 	MaxSkipped     = 13000
 	MaxAnalyzers   = 32  // the engine has about a dozen, plus the guest tools
