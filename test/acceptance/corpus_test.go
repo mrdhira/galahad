@@ -65,14 +65,28 @@ func TestCorpus(t *testing.T) {
 			wantRules: []string{"GAL-AUTOEXEC-001 evade.zip!/p1-folderopen-curl/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 evade.zip!/p1-folderopen-curl/.vscode/tasks.json:7"},
 		},
 		{
-			name: "p1-ooxml-smuggle: a docx still has its extra members inspected (built)",
+			name: "p1-ooxml-smuggle: a docx still has its payload below word/ inspected (built)",
 			target: builtFile("smuggle.docx", func(t *testing.T, dest string) {
-				extra := dirEntries(t, corpus(t, "p1-folderopen-curl"), "extra/")
+				extra := dirEntries(t, corpus(t, "p1-folderopen-curl"), "word/x/")
 				zipEntries(t, dest, append(benignDocxEntries(), extra...))
 			}),
 			wantCode:  20,
-			wantRules: []string{"GAL-AUTOEXEC-001 smuggle.docx!/extra/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 smuggle.docx!/extra/.vscode/tasks.json:7"},
+			wantRules: []string{"GAL-AUTOEXEC-001 smuggle.docx!/word/x/.vscode/tasks.json:7", "GAL-AUTOEXEC-010 smuggle.docx!/word/x/.vscode/tasks.json:7"},
 			wantIOCs:  []string{"https://docs.sinkhole.test/guide"},
+		},
+		{
+			name: "p1-ooxml-embedded: a docx embeds a zip of the malicious repo (built)",
+			target: builtFile("embed.docx", func(t *testing.T, dest string) {
+				inner := filepath.Join(t.TempDir(), "pack.zip")
+				zipEntries(t, inner, dirEntries(t, corpus(t, "p1-folderopen-curl"), ""))
+				b, err := os.ReadFile(inner)
+				if err != nil {
+					t.Fatal(err)
+				}
+				zipEntries(t, dest, append(benignDocxEntries(), zipEntry{name: "word/embeddings/pack.zip", data: b}))
+			}),
+			wantCode:  20,
+			wantRules: []string{"GAL-AUTOEXEC-001 embed.docx!/word/embeddings/pack.zip!/.vscode/tasks.json:7"},
 		},
 		{
 			name:   "p1-devcontainer-init: initializeCommand pipes a download into sh",
@@ -218,6 +232,14 @@ func TestCorpus(t *testing.T) {
 		{
 			name:   "benign-docx: internal and external hyperlinks (built)",
 			target: builtFile("guide.docx", benignDocx), wantCode: 0, wantQuiet: true,
+			wantIOCs: []string{"https://docs.sinkhole.test/guide"},
+		},
+		{
+			name: "benign-docx-media: the same docx with an image member (built)",
+			target: builtFile("guide.docx", func(t *testing.T, dest string) {
+				zipEntries(t, dest, append(benignDocxEntries(), zipEntry{name: "word/media/image1.png", data: []byte("\x89PNG\r\n\x1a\n")}))
+			}),
+			wantCode: 0, wantQuiet: true,
 			wantIOCs: []string{"https://docs.sinkhole.test/guide"},
 		},
 		{
