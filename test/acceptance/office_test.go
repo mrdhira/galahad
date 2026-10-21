@@ -9,9 +9,6 @@ import (
 )
 
 func TestOffice(t *testing.T) {
-	const relsHead = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n" +
-		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` + "\n"
-	const relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 	tests := []struct {
 		name string
 		// build writes the document to dest
@@ -39,18 +36,9 @@ func TestOffice(t *testing.T) {
 			wantIOCs: []string{"http://templates.sinkhole.test/t.dotm"},
 		},
 		{
-			name: "benign-docx: internal and external hyperlinks are not suspicious",
-			file: "guide.docx",
-			build: func(t *testing.T, dest string) {
-				zipEntries(t, dest, []zipEntry{
-					{name: "[Content_Types].xml", data: []byte(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`)},
-					{name: "word/document.xml", data: []byte(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Guide</w:t></w:r></w:p></w:body></w:document>`)},
-					{name: "word/_rels/document.xml.rels", data: []byte(relsHead +
-						`  <Relationship Id="rId1" Type="` + relType + `hyperlink" Target="#chapter2"/>` + "\n" +
-						`  <Relationship Id="rId2" Type="` + relType + `hyperlink" Target="https://docs.sinkhole.test/guide" TargetMode="External"/>` + "\n" +
-						`</Relationships>` + "\n")},
-				})
-			},
+			name:     "benign-docx: internal and external hyperlinks are not suspicious",
+			file:     "guide.docx",
+			build:    benignDocx,
 			wantCode: 0,
 			wantIOCs: []string{"https://docs.sinkhole.test/guide"},
 		},
