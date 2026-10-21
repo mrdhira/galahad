@@ -2,6 +2,7 @@ package script
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -46,8 +47,15 @@ var (
 	jsRequireRE  = regexp.MustCompile(`require\s*\(\s*['"](?:node:)?([\w@/.-]+)['"]\s*\)`)
 	jsImportRE   = regexp.MustCompile(`import\s+([^;'"]*?)\s*from\s*['"](?:node:)?([\w@/.-]+)['"]`)
 	jsAtobRE     = regexp.MustCompile(`atob[ \t\r]*(?:[;,\n]|$)`)
+	pyImportRE   = regexp.MustCompile(`import\s+([\w.]+)`)
 	pyImportAsRE = regexp.MustCompile(`import\s+([\w.]+)\s+as\s+(\w+)`)
 	pyFromRE     = regexp.MustCompile(`from\s+([\w.]+)\s+import\s+\(?([^\n#;)]*)`)
+
+	// pyDynREs start with a literal word each, so that the search stays fast.
+	pyDynREs = []*regexp.Regexp{
+		regexp.MustCompile(`__import__\s*\(\s*['"]([\w.]+)['"]`),
+		regexp.MustCompile(`importlib\s*\.\s*import_module\s*\(\s*['"]([\w.]+)['"]`),
+	}
 
 	// tailAssignRE and tailDestructRE end at the end of the text before a
 	// require call: "name =" and "{ a, b } =".
@@ -55,11 +63,29 @@ var (
 	tailDestructRE = regexp.MustCompile(`\{([^{}]*)\}\s*=\s*(?:await\s+)?$`)
 )
 
-const maxAliases = 32
+const (
+	maxAliases    = 32
+	maxWindowHits = 64   // network calls listed in a window
+	maxCopies     = 1024 // copies of a known name followed per round and window
+	maxPyImports  = 4096 // Python import statements examined per file
+)
+
+// nsCall follows the name of a network module: .request(, .default.request(
+// of a module imported as a namespace, urllib.request.urlopen(.
+const nsCall = `\s*\.\s*(?:(?:default|request)\s*\.\s*)?(?:` + netMethods + `)\s*\(`
+
+func quoteNames(names []string) string {
+	q := make([]string, len(names))
+	for i, n := range names {
+		q[i] = regexp.QuoteMeta(n)
+	}
+	return strings.Join(q, "|")
+}
 
 // aliasSet holds the names found in a doc and the patterns built from them.
 type aliasSet struct {
 	ns, fn, dec []string // module names (name.request()), function names (name()), decoder names
+	seeds       []string // Python modules imported under their own name: not aliases, but a copy of one is
 
 	nsCalls, fnCalls []*regexp.Regexp // whole-file patterns, each starts with a name
 	argNet, argDec   *regexp.Regexp   // patterns for a short text; nil if there is no name
@@ -77,15 +103,74 @@ func (s *scan) aliasesOf(d *doc) *aliasSet {
 			a.scanJS(d, base, minEnd, text)
 		}
 		if d.lang&langPy != 0 {
-			a.scanPy(text)
+			a.scanPy(s, text)
 		}
 	})
+	a.copies(s, d)
 	a.build()
 	return a
 }
 
+// copies follows "b = a" for each known name a, so that b becomes a name too.
+// It takes at most three rounds.
+func (a *aliasSet) copies(s *scan, d *doc) {
+	for range 3 {
+		names := slices.Concat(a.ns, a.fn, a.dec, a.seeds)
+		if len(names) == 0 {
+			return
+		}
+		re := regexp.MustCompile(`=\s*(` + quoteNames(names) + `)[ \t]*(?:[;,)\n]|$)`)
+		before := len(a.ns) + len(a.fn) + len(a.dec)
+		s.pieces(d, 0, len(d.data), func(base, _ int, text string) {
+			for _, m := range re.FindAllStringSubmatchIndex(text, maxCopies) {
+				lhs, ok := assignedName(text, m[0])
+				if !ok {
+					continue
+				}
+				from := text[m[2]:m[3]]
+				for _, l := range []*[]string{&a.ns, &a.fn, &a.dec} {
+					if slices.Contains(*l, from) {
+						a.add(l, lhs)
+					}
+				}
+				if slices.Contains(a.seeds, from) {
+					a.add(&a.ns, lhs)
+				}
+			}
+		})
+		if len(a.ns)+len(a.fn)+len(a.dec) == before {
+			return
+		}
+	}
+}
+
+// assignedName returns the variable that the "=" at text[eq] assigns to. It
+// rejects comparisons, compound assignments, properties and destructuring.
+func assignedName(text string, eq int) (string, bool) {
+	if eq > 0 && strings.IndexByte("=!<>+-*/%&|^", text[eq-1]) >= 0 {
+		return "", false
+	}
+	if eq+1 < len(text) && (text[eq+1] == '=' || text[eq+1] == '>') {
+		return "", false
+	}
+	end := eq
+	for end > 0 && (text[end-1] == ' ' || text[end-1] == '\t') {
+		end--
+	}
+	start := end
+	for start > 0 && isWord(text[start-1]) {
+		start--
+	}
+	if start == end || start > 0 && text[start-1] == '.' || '0' <= text[start] && text[start] <= '9' {
+		return "", false
+	}
+	return text[start:end], true
+}
+
+func (a *aliasSet) full() bool { return len(a.ns)+len(a.fn)+len(a.dec) >= maxAliases }
+
 func (a *aliasSet) add(list *[]string, name string) {
-	if name == "" || len(a.ns)+len(a.fn)+len(a.dec) >= maxAliases {
+	if name == "" || a.full() {
 		return
 	}
 	for _, n := range *list {
@@ -105,7 +190,7 @@ func (a *aliasSet) scanJS(d *doc, base, minEnd int, text string) {
 		if !jsNetModules[mod] && !jsCallModules[mod] {
 			continue
 		}
-		before := lineBefore(text, m[0])
+		before := tailBefore(text, m[0])
 		if g := tailAssignRE.FindStringSubmatch(before); g != nil {
 			a.add(&a.ns, g[1])
 			if jsCallModules[mod] {
@@ -150,13 +235,55 @@ func (a *aliasSet) scanJS(d *doc, base, minEnd int, text string) {
 		if base+m[1] <= minEnd {
 			continue
 		}
-		if g := tailAssignRE.FindStringSubmatch(lineBefore(text, m[0])); g != nil {
+		if g := tailAssignRE.FindStringSubmatch(tailBefore(text, m[0])); g != nil {
 			a.add(&a.dec, g[1])
 		}
 	}
 }
 
-func (a *aliasSet) scanPy(text string) {
+// scanPy finds Python aliases in text. The searches for __import__,
+// import_module and plain imports count only the modules that reach the
+// network, at most maxPyImports of them per file; past that the rest of the
+// search is left out and s.limited says so. A match counts only in a statement
+// of its own.
+func (a *aliasSet) scanPy(s *scan, text string) {
+	over := func() bool {
+		if s.pyImports++; s.pyImports > maxPyImports {
+			s.limited = true
+			return true
+		}
+		return false
+	}
+	for _, re := range pyDynREs {
+		eachSubmatch(re, text, func(m []int) bool {
+			if _, ok := pyNetNames[text[m[2]:m[3]]]; !ok {
+				return true
+			}
+			if a.full() || over() {
+				return false
+			}
+			if t := strings.TrimRight(tailBefore(text, m[0]), " \t"); !strings.HasSuffix(t, "=") && !strings.HasSuffix(t, "= await") {
+				return true
+			}
+			if g := tailAssignRE.FindStringSubmatch(tailBefore(text, m[0])); g != nil {
+				a.add(&a.ns, g[1])
+			}
+			return true
+		})
+	}
+	eachSubmatch(pyImportRE, text, func(m []int) bool {
+		mod := text[m[2]:m[3]]
+		if _, ok := pyNetNames[mod]; !ok || !statementStart(text, m[0]) {
+			return true
+		}
+		if len(a.seeds) >= len(pyNetNames) || over() {
+			return false
+		}
+		if name, _, _ := strings.Cut(mod, "."); !slices.Contains(a.seeds, name) {
+			a.seeds = append(a.seeds, name)
+		}
+		return true
+	})
 	for _, m := range pyImportAsRE.FindAllStringSubmatch(text, -1) {
 		if _, ok := pyNetNames[m[1]]; ok {
 			a.add(&a.ns, m[2])
@@ -203,33 +330,57 @@ func splitAs(item, sep string) (orig, local string) {
 	return item, item
 }
 
-// lineBefore returns the text before off on its line, at most 160 bytes.
-func lineBefore(text string, off int) string {
-	lo := max(0, off-160)
-	s := text[lo:off]
-	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
-		s = s[i+1:]
+// eachSubmatch calls fn with the indices of each match of re in text until fn
+// returns false. It finds one match at a time, so it needs no memory for the
+// matches and fn can stop early.
+func eachSubmatch(re *regexp.Regexp, text string, fn func(m []int) bool) {
+	for pos := 0; pos < len(text); {
+		m := re.FindStringSubmatchIndex(text[pos:])
+		if m == nil {
+			return
+		}
+		for i := range m {
+			if m[i] >= 0 {
+				m[i] += pos
+			}
+		}
+		if !fn(m) {
+			return
+		}
+		pos = max(m[1], m[0]+1)
 	}
-	return s
 }
 
-func (a *aliasSet) build() {
-	quote := func(names []string) string {
-		q := make([]string, len(names))
-		for i, n := range names {
-			q[i] = regexp.QuoteMeta(n)
+// statementStart reports whether only white space separates off from the start
+// of a line or a semicolon.
+func statementStart(text string, off int) bool {
+	for i := off - 1; i >= 0; i-- {
+		switch text[i] {
+		case ' ', '\t':
+		case '\n', ';':
+			return true
+		default:
+			return false
 		}
-		return strings.Join(q, "|")
 	}
+	return true
+}
+
+// tailBefore returns the text before off, at most 160 bytes. The name that a
+// call is assigned to may be on the line before it.
+func tailBefore(text string, off int) string { return text[max(0, off-160):off] }
+
+func (a *aliasSet) build() {
+	quote := quoteNames
 	for _, n := range a.ns {
-		a.nsCalls = append(a.nsCalls, regexp.MustCompile(regexp.QuoteMeta(n)+`\s*\.\s*(?:`+netMethods+`)\s*\(`))
+		a.nsCalls = append(a.nsCalls, regexp.MustCompile(regexp.QuoteMeta(n)+nsCall))
 	}
 	for _, n := range a.fn {
 		a.fnCalls = append(a.fnCalls, regexp.MustCompile(regexp.QuoteMeta(n)+`\s*\(`))
 	}
 	var parts []string
 	if len(a.ns) > 0 {
-		parts = append(parts, `(?:`+quote(a.ns)+`)\s*\.\s*(?:`+netMethods+`)\s*\(`)
+		parts = append(parts, `(?:`+quote(a.ns)+`)`+nsCall)
 	}
 	if len(a.fn) > 0 {
 		parts = append(parts, `(?:`+quote(a.fn)+`)\s*\(`)
@@ -260,4 +411,21 @@ func (s *scan) decodes(d *doc, b []byte) bool {
 	}
 	a := s.aliasesOf(d)
 	return a.argDec != nil && a.argDec.Match(b)
+}
+
+// networkAt returns the offset of the last network call in b, a short text,
+// direct or through an alias, or -1.
+func (s *scan) networkAt(d *doc, b []byte) int {
+	at := -1
+	if anyIn(b, networkWords) {
+		for _, m := range networkRE.FindAllIndex(b, maxWindowHits) {
+			at = m[0]
+		}
+	}
+	if a := s.aliasesOf(d); a.argNet != nil {
+		for _, m := range a.argNet.FindAllIndex(b, maxWindowHits) {
+			at = max(at, m[0])
+		}
+	}
+	return at
 }

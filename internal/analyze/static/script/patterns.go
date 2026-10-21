@@ -44,7 +44,12 @@ var networkParts = []string{
 	`httpx\s*\.\s*(?:get|post|put|request|Client|AsyncClient)\b`,
 	`aiohttp\s*\.\s*ClientSession\b`,
 	`smtplib\s*\.\s*SMTP`,
+	`__import__\s*\(\s*['"]` + pyNetModule + `['"]\s*\)` + nsCall,
+	`importlib\s*\.\s*import_module\s*\(\s*['"]` + pyNetModule + `['"]\s*\)` + nsCall,
 }
+
+// pyNetModule names the Python modules that reach the network.
+const pyNetModule = `(?:requests|urllib(?:\.request)?|urllib2|socket|http\.client|httpx|aiohttp|smtplib)`
 
 var (
 	decoderRE = regexp.MustCompile(decoderSrc)
@@ -91,6 +96,7 @@ var (
 	bulkEnvVar = compile(
 		`\.\.\.\s*process\.env\s*[,}]`,
 		`Object\s*\.\s*(?:entries|values)\(\s*process\.env\s*\)`,
+		`Object\s*\.\s*assign\(\s*\{\s*\}\s*,\s*process\.env\s*\)`,
 		`os\.environ\.copy\(\)`,
 		`process\.env[ \t]*(?:[;\n]|$)`,
 	)
@@ -98,6 +104,17 @@ var (
 	// assignRE ends at the end of a line prefix and captures the name in
 	// "name = ...".
 	assignRE = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*=(?:[^=>;\n][^=;\n]*)?$`)
+
+	// thenEval is .then(eval): the response text is handed to eval.
+	thenEval = compile(`then\s*\??\.?\s*\(\s*(?:(?:window|self|globalThis|global)\s*\.\s*)?eval\s*(?:\)|\.\s*(?:bind|call)\b)`)
+
+	// segmentRE is a quoted directory name that holds credentials, a segment of
+	// a path built with join, joinpath, resolve or the / operator. These are
+	// the paths that signals.SecretRefs counts when they are written in one
+	// literal, so segmentNext names the file that must follow the directory
+	// in the others.
+	segmentRE   = regexp.MustCompile("['\"`](\\.ssh|\\.aws|\\.gnupg|\\.docker|\\.kube|\\.env)['\"`]")
+	segmentNext = map[string]string{".aws": "credentials", ".kube": "config", ".docker": "config.json"}
 
 	// Secret classification of a signals.SecretRefs match.
 	namedEnvRE = regexp.MustCompile(`^(?:\$|%|process\.env|os\.environ|os\.getenv|getenv|ENV\[)`)

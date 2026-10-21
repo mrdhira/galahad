@@ -1,0 +1,9 @@
+// Harmless stand-in: prisma starts a provider that is not a package name as a command.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "node ./tools/gen.js"
+}

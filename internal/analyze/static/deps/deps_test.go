@@ -3,6 +3,7 @@ package deps_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -12,9 +13,150 @@ import (
 	"github.com/mrdhira/galahad/internal/analyze/static/deps"
 )
 
+const (
+	pyprojectRequirements = `[project]
+name = "demo"
+dependencies = [
+  "requests>=2",
+  "reqeusts==1",
+  "pkg @ https://dl.sinkhole.test/pkg.zip",
+  "other @ git+https://git.sinkhole.test/o.git",
+]
+[project.optional-dependencies]
+dev = ["pytest", "localpkg @ file:///tmp/t"]
+[build-system]
+requires = ["setuptools>=61", "bad @ https://dl.sinkhole.test/b.zip"]
+[dependency-groups]
+test = ["pytest", {include-group = "lint"}]
+`
+	pyprojectUV = `[tool.uv]
+index-url = "https://pypi.org/simple"
+extra-index-url = ["https://pypi.sinkhole.test/simple",
+  "https://pypi.org/simple"] # second is the default
+find-links = ["./wheels", "https://wheels.sinkhole.test/"]
+index = [{ url = "https://idx.sinkhole.test/simple", name = "x" }]
+[tool.uv.pip]
+extra-index-url = "local-index"
+[[tool.uv.index]]
+name = "internal"
+url = "https://uv.sinkhole.test/simple"
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+`
+	pyprojectSources = `[tool.uv.sources]
+a = { git = "https://git.sinkhole.test/a.git" }
+b = { path = "../b" }
+c = [
+  { url = "https://dl.sinkhole.test/c.whl", marker = "sys_platform == 'win32'" },
+]
+d.git = "https://git.sinkhole.test/d.git"
+e = { workspace = true }
+"g" = { "git" = "https://git.sinkhole.test/g.git" }
+h = { url = "file:///tmp/h.whl" }
+[tool.uv.sources.f]
+git = "https://git.sinkhole.test/f.git"
+`
+	pyprojectPoetry = `[[tool.poetry.source]]
+name = "priv"
+url = "https://poetry.sinkhole.test/simple"
+[tool.poetry.dependencies]
+python = "^3.9"
+g = { git = "https://git.sinkhole.test/g.git", branch = "main" }
+h = "^1.0"
+[tool.poetry.group.dev.dependencies]
+i = { url = "https://dl.sinkhole.test/i.whl" }
+[tool.poetry.group.dev.dependencies.j]
+git = "https://git.sinkhole.test/j.git"
+[tool.other]
+k = { git = "https://git.sinkhole.test/k.git" }
+`
+	pyprojectMultiline = `[project]
+summary = '''one [ line'''
+description = """
+[tool.uv]
+index-url = "https://pypi.sinkhole.test/simple"
+dependencies = [ "
+"""
+dependencies = [
+  "pkg @ https://dl.sinkhole.test/p.zip",
+]
+`
+	pyprojectDotted = `[tool]
+uv.sources.a = { git = "https://git.sinkhole.test/a.git" }
+uv.index-url = "https://pypi.sinkhole.test/simple"
+uv.sources.b.url = "https://dl.sinkhole.test/b.whl"
+poetry.dependencies.c = { url = "https://dl.sinkhole.test/c.whl" }
+[tool.uv]
+sources = { d = { git = "https://git.sinkhole.test/d.git" }, e = { path = "../e" } }
+index = [{ url = "https://idx.sinkhole.test/simple" }]
+[project]
+optional-dependencies = { dev = ["pkg @ https://dl.sinkhole.test/p.zip", "pytest"], docs = ["sphinx"] }
+dependencies = []
+[dependency-groups]
+all = [{include-group = "dev"}]
+`
+	pyprojectMultilineValues = `[tool.uv]
+index-url = """\
+    https://pypi.sinkhole.test/simple"""
+[tool.uv.sources]
+helper = { git = """\
+    https://git.sinkhole.test/h.git""" }
+other = { git = "https://git.sinkhole.test/o.git" }
+`
+	pyprojectNestedTables = `[tool]
+uv = { sources = { helper = { git = "https://git.sinkhole.test/h.git" } }, index-url = "https://pypi.sinkhole.test/simple" }
+uv.pip = { extra-index-url = ["https://pypi.org/simple", "https://p2.sinkhole.test/simple"] }
+`
+	pyprojectBenign = `[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinylib"
+dependencies = ["requests>=2.31", "numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+[tool.uv.sources]
+tinylib = { workspace = true }
+local = { path = "../local" }
+
+[tool.poetry.dependencies]
+python = "^3.9"
+flask = "^3.0"
+`
+	uvTomlSettings = `index-url = "https://pypi.org/simple"
+extra-index-url = ["https://pypi.sinkhole.test/simple"]
+[pip]
+find-links = ["https://wheels.sinkhole.test/"]
+[[index]]
+url = "https://uv.sinkhole.test/simple"
+[sources]
+a = { git = "https://git.sinkhole.test/a.git" }
+`
+)
+
 func TestAnalyze(t *testing.T) {
 	filler := strings.Repeat("x", 3<<19) // 1.5 MiB, above MaxConfigSize
 	deep := strings.Repeat(`{"a":`, 40) + "1" + strings.Repeat("}", 40)
+	var manyGit, manyLock strings.Builder
+	var wantManyGit, wantManyLock []string
+	for i := range 25 {
+		fmt.Fprintf(&manyGit, "\"g%d\": \"git+https://git.sinkhole.test/g%d.git\",\n", i, i)
+		fmt.Fprintf(&manyLock, "\"node_modules/l%d\": {\"resolved\": \"https://npm.sinkhole.test/l%d.tgz\"},\n", i, i)
+		if i < 20 {
+			wantManyGit = append(wantManyGit, fmt.Sprintf("GAL-DEPS-002@%d", i+3))
+			wantManyLock = append(wantManyLock, fmt.Sprintf("GAL-DEPS-003@%d", i+3))
+		}
+	}
+	slices.Sort(wantManyGit)
+	slices.Sort(wantManyLock)
+	tomlAtLimit := "[project]\noptional-dependencies = " + strings.Repeat("{a=", 31) + `["pkg @ https://dl.sinkhole.test/p.zip"]` + strings.Repeat("}", 31) + "\n"
+	tomlTooDeep := "[tool]\nx = " + strings.Repeat("{a=", 33) + `"v"` + strings.Repeat("}", 33) + "\n"
 	tests := []struct {
 		name string
 		// inputs
@@ -55,6 +197,12 @@ func TestAnalyze(t *testing.T) {
 			data:         "{\n\"dependencies\": {\n\"express\": \"1\",\n\"@types/react\": \"1\",\n\"@evil/lodahs\": \"1\",\n\"Ex_Press\": \"1\"\n}\n}",
 			wantFindings: []string{"GAL-DEPS-001@5", "GAL-DEPS-001@6"},
 		},
+		{
+			name:         "package.json reports only the findings per rule the engine keeps",
+			file:         "package.json",
+			data:         "{\n\"dependencies\": {\n" + manyGit.String() + "\"x\": \"1\"\n}\n}\n",
+			wantFindings: wantManyGit,
+		},
 		{name: "malformed json keeps what was read and skips the rest", file: "package.json", data: "{\n\"dependencies\": {\n\"expresss\": \"1\",\n", wantFindings: []string{"GAL-DEPS-001@3"}, wantSkip: "parse_error"},
 		{name: "deeply nested json is skipped", file: "package.json", data: deep, wantSkip: "depth"},
 		{
@@ -64,11 +212,82 @@ func TestAnalyze(t *testing.T) {
 			wantFindings: []string{"GAL-DEPS-003@14", "GAL-DEPS-003@8"},
 		},
 		{
+			name:         "lockfile reports only the findings the engine keeps",
+			file:         "package-lock.json",
+			data:         "{\n\"packages\": {\n" + manyLock.String() + "\"x\": {}\n}\n}\n",
+			wantFindings: wantManyLock,
+		},
+		{
 			name:         "yarn lock resolved lines",
 			file:         "yarn.lock",
 			data:         "# yarn lockfile v1\n\na@^1:\n  version \"1.0.0\"\n  resolved \"https://registry.yarnpkg.com/a/-/a-1.0.0.tgz#abc\"\n\nb@^1:\n  version \"1.0.0\"\n  resolved \"https://npm.sinkhole.test/b/-/b-1.0.0.tgz#def\"\n",
 			wantFindings: []string{"GAL-DEPS-003@9"},
 		},
+		{
+			name:         "pyproject project, build-system and dependency-group requirements",
+			file:         "pyproject.toml",
+			data:         pyprojectRequirements,
+			wantFindings: []string{"GAL-DEPS-001@5", "GAL-DEPS-002@12", "GAL-DEPS-002@6", "GAL-DEPS-002@7"},
+		},
+		{
+			name:         "pyproject uv index settings",
+			file:         "pyproject.toml",
+			data:         pyprojectUV,
+			wantFindings: []string{"GAL-DEPS-004@11", "GAL-DEPS-004@3", "GAL-DEPS-004@5", "GAL-DEPS-004@6", "GAL-DEPS-004@8"},
+		},
+		{
+			name:         "pyproject uv sources from git and URL",
+			file:         "pyproject.toml",
+			data:         pyprojectSources,
+			wantFindings: []string{"GAL-DEPS-002@12", "GAL-DEPS-002@2", "GAL-DEPS-002@5", "GAL-DEPS-002@7", "GAL-DEPS-002@9"},
+		},
+		{
+			name:         "pyproject poetry source and git or URL dependencies",
+			file:         "pyproject.toml",
+			data:         pyprojectPoetry,
+			wantFindings: []string{"GAL-DEPS-002@11", "GAL-DEPS-002@6", "GAL-DEPS-002@9", "GAL-DEPS-004@3"},
+		},
+		{name: "pyproject with only PyPI dependencies", file: "pyproject.toml", data: pyprojectBenign},
+		{
+			name:         "pyproject multi-line strings hide no table or bracket",
+			file:         "pyproject.toml",
+			data:         pyprojectMultiline,
+			wantFindings: []string{"GAL-DEPS-002@9"},
+		},
+		{
+			name:         "pyproject multi-line string values are joined across line continuations",
+			file:         "pyproject.toml",
+			data:         pyprojectMultilineValues,
+			wantFindings: []string{"GAL-DEPS-002@5", "GAL-DEPS-002@7", "GAL-DEPS-004@2"},
+		},
+		{
+			name:         "pyproject nested inline tables are classified by the keys above them",
+			file:         "pyproject.toml",
+			data:         pyprojectNestedTables,
+			wantFindings: []string{"GAL-DEPS-002@2", "GAL-DEPS-004@2", "GAL-DEPS-004@3"},
+		},
+		{
+			name:         "pyproject dotted keys and inline tables are classified by their full path",
+			file:         "pyproject.toml",
+			data:         pyprojectDotted,
+			wantFindings: []string{"GAL-DEPS-002@10", "GAL-DEPS-002@2", "GAL-DEPS-002@4", "GAL-DEPS-002@5", "GAL-DEPS-002@7", "GAL-DEPS-004@3", "GAL-DEPS-004@8"},
+		},
+		{
+			name:         "uv.toml settings are read as tool.uv",
+			file:         "uv.toml",
+			data:         uvTomlSettings,
+			wantFindings: []string{"GAL-DEPS-002@8", "GAL-DEPS-004@2", "GAL-DEPS-004@4", "GAL-DEPS-004@6"},
+		},
+		{
+			name:         "pyproject uv dev, override and constraint dependencies are requirements",
+			file:         "pyproject.toml",
+			data:         "[tool.uv]\ndev-dependencies = [\"pkg @ git+https://git.sinkhole.test/p.git\"]\noverride-dependencies = [\"o @ https://dl.sinkhole.test/o.zip\"]\nconstraint-dependencies = [\"c @ git+https://git.sinkhole.test/c.git\", \"requests>=2\"]\n",
+			wantFindings: []string{"GAL-DEPS-002@2", "GAL-DEPS-002@3", "GAL-DEPS-002@4"},
+		},
+		{name: "pyproject value nested to the depth limit is read", file: "pyproject.toml", data: tomlAtLimit, wantFindings: []string{"GAL-DEPS-002@2"}},
+		{name: "pyproject value nested past the depth limit is skipped", file: "pyproject.toml", data: tomlTooDeep, wantSkip: "depth"},
+		{name: "pyproject table name past the path limit is skipped", file: "pyproject.toml", data: "[" + strings.Repeat("t", 1100) + "]\nx = \"v\"\n", wantSkip: "depth"},
+		{name: "pyproject inline table key path past the limit is skipped", file: "pyproject.toml", data: "[tool]\nx = { " + strings.Repeat("k", 1100) + " = \"v\" }\n", wantSkip: "depth"},
 		{
 			name:         "requirements index options",
 			file:         "requirements-dev.txt",
@@ -87,6 +306,47 @@ func TestAnalyze(t *testing.T) {
 			data:         "-ihttps://a.sinkhole.test/simple\n--index-url\thttps://b.sinkhole.test/simple\n--extra-index=https://c.sinkhole.test/simple\n--extra-index-url\thttps://pypi.org/simple\n-f https://d.sinkhole.test/wheels\n--find-links=https://pypi.org/x\n-f ./wheels\n--no-binary :all:\n",
 			wantFindings: []string{"GAL-DEPS-004@1", "GAL-DEPS-004@2", "GAL-DEPS-004@3", "GAL-DEPS-004@5"},
 		},
+		{
+			name:         "included file with another name that has a version pin",
+			file:         "base.txt",
+			data:         "# base\nrequests==2.31.0\n--extra-index-url https://pypi.sinkhole.test/simple\nreqeusts==1\n",
+			wantFindings: []string{"GAL-DEPS-001@4", "GAL-DEPS-004@3"},
+		},
+		{
+			name:         "included file recognized by its -r and -c options",
+			file:         "deps.txt",
+			data:         "-r base.txt\n--constraint=pins.txt\npkg @ https://dl.sinkhole.test/pkg.zip\n",
+			wantFindings: []string{"GAL-DEPS-002@3"},
+		},
+		{
+			name:         "included file with hash continuation lines",
+			file:         "locked.txt",
+			data:         "reqeusts==1.0 \\\n    --hash=sha256:abc\n",
+			wantFindings: []string{"GAL-DEPS-001@1"},
+		},
+		{
+			name:         "any txt under a requirements directory",
+			file:         "pip/requirements/dev.txt",
+			data:         "reqeusts\npkg @ https://dl.sinkhole.test/x.zip\n",
+			wantFindings: []string{"GAL-DEPS-001@1", "GAL-DEPS-002@2"},
+		},
+		{
+			name:         "only the first 50 lines decide whether a txt file is requirements",
+			file:         "more.txt",
+			data:         "requests==1\nrequests==1\nreqeusts==1\n" + strings.Repeat("requests==1\n", 47) + "some prose here\n",
+			wantFindings: []string{"GAL-DEPS-001@3"},
+		},
+		{name: "README text is not requirements", file: "README.txt", data: "Project notes\nSee https://docs.sinkhole.test/guide for details.\nInstall with requests==2.0 first.\n"},
+		{name: "license text is not requirements", file: "LICENSE.txt", data: "MIT License\n\nCopyright (c) 2024 Someone\n"},
+		{name: "list of words is not requirements", file: "words.txt", data: "reqeusts\nbeta\ngamma\n"},
+		{name: "list of links is not requirements", file: "links.txt", data: "https://a.sinkhole.test/x\nhttps://b.sinkhole.test/y\n"},
+		{name: "list of e-mail addresses is not requirements", file: "contacts.txt", data: "dev@example.test\nops@example.test\n"},
+		{name: "bullet list is not requirements", file: "todo.txt", data: "- item one\n- item two\n"},
+		{name: "requirement lines followed by prose are not requirements", file: "notes.txt", data: "requests==2.0\nThis is not a requirements file.\n"},
+		{name: "comments only is not requirements", file: "comments.txt", data: "# just a comment\n\n"},
+		{name: "very long line is not requirements", file: "wide.txt", data: "requests==2.0\n" + strings.Repeat("a", 1001) + "\n"},
+		{name: "large txt that is not requirements is not a coverage gap", file: "wordlist.txt", data: filler},
+		{name: "large txt that is requirements is skipped", file: "huge.txt", data: strings.Repeat("requests==1\n", 100000), wantSkip: "too_large"},
 		{
 			name:         "lockfile above the config size limit is still checked",
 			file:         "package-lock.json",
@@ -175,6 +435,135 @@ func TestAnalyzeMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAnalyzeLargeFilesWithinDeadline(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		file string
+		data string
+		// expectations
+		wantFindings []string
+		wantSkip     string
+	}{
+		{
+			name:         "multi-line string over 500k lines",
+			file:         "pyproject.toml",
+			data:         "[project]\ndescription = \"\"\"\n" + strings.Repeat("a\n", 500000) + "\"\"\"\ndependencies = [\"pkg @ https://dl.sinkhole.test/p.zip\"]\n",
+			wantFindings: []string{"GAL-DEPS-002@500004"},
+		},
+		{
+			name:         "open array over a million blank lines",
+			file:         "pyproject.toml",
+			data:         "[tool.x]\nv = [\n" + strings.Repeat("\n", 1000000) + "]\n[tool.uv.sources]\nhelper = { git = \"https://git.sinkhole.test/h.git\" }\n",
+			wantFindings: []string{"GAL-DEPS-002@1000005"},
+		},
+		{
+			name:     "long inline table key followed by many strings",
+			file:     "pyproject.toml",
+			data:     "[tool]\nx = {" + strings.Repeat("k", 500000) + "=[\"" + strings.Repeat("\",\"", 150000) + "\"]}\n",
+			wantSkip: "depth",
+		},
+		{
+			name:     "long table name followed by many keys",
+			file:     "pyproject.toml",
+			data:     "[" + strings.Repeat("t", 512<<10) + "]\n" + strings.Repeat("a=\"1\"\n", 87000) + "[tool.uv.sources]\nhelper = { git = \"https://git.sinkhole.test/h.git\" }\n",
+			wantSkip: "depth",
+		},
+		{
+			name:         "requirements index option after 340k lines",
+			file:         "requirements.txt",
+			data:         strings.Repeat("-q\n", 340000) + "--index-url https://pypi.sinkhole.test/simple\n",
+			wantFindings: []string{"GAL-DEPS-004@340001"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// the reader is linear: a quadratic one runs for minutes, past this deadline
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			f := analyze.File{Path: tt.file, Name: tt.file, Data: []byte(tt.data)}
+
+			out, err := deps.New().Analyze(ctx, f)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, fd := range out.Findings {
+				got = append(got, fmt.Sprintf("%s@%d", fd.RuleID, fd.Evidence[0].Line))
+			}
+			if !slices.Equal(got, tt.wantFindings) {
+				t.Errorf("findings = %q, want %q", got, tt.wantFindings)
+			}
+			gotSkip := ""
+			if len(out.Skips) > 0 {
+				gotSkip = out.Skips[0].Reason
+			}
+			if gotSkip != tt.wantSkip {
+				t.Errorf("skip = %q, want %q", gotSkip, tt.wantSkip)
+			}
+		})
+	}
+}
+
+func TestAnalyzeLinesCostAlike(t *testing.T) {
+	const uvGit = "[tool.uv.sources]\nhelper = { git = \"https://git.sinkhole.test/h.git\" }\n"
+	tests := []struct {
+		name string
+		// inputs
+		file     string
+		data     string // lines the reader handles one by one
+		baseline string // as many lines, skipped before any work per line
+		// expectations
+		wantMaxRatio float64 // time for data over time for baseline: 1 to 2 when linear, 15 under heavy load, over 60 when quadratic
+	}{
+		{
+			name:         "pyproject open array over blank lines",
+			file:         "pyproject.toml",
+			data:         "[tool.x]\nv = [\n" + strings.Repeat("\n", 1000000) + "]\n" + uvGit,
+			baseline:     "[tool.x]\n\n" + strings.Repeat("\n", 1000000) + "\n" + uvGit,
+			wantMaxRatio: 25,
+		},
+		{
+			name:         "requirements option lines",
+			file:         "requirements.txt",
+			data:         strings.Repeat("-q\n", 340000) + "--index-url https://pypi.sinkhole.test/simple\n",
+			baseline:     strings.Repeat("#q\n", 340000) + "--index-url https://pypi.sinkhole.test/simple\n",
+			wantMaxRatio: 25,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := analyze.File{Path: tt.file, Name: tt.file, Data: []byte(tt.data)}
+			baseline := analyze.File{Path: tt.file, Name: tt.file, Data: []byte(tt.baseline)}
+			// the fastest of runs that take turns: both are long enough to share
+			// the CPU alike under load, and a garbage collector pause does not
+			// decide the ratio
+			bestData, bestBaseline := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+			for range 3 {
+				bestData = min(bestData, timeAnalyze(t, data))
+				bestBaseline = min(bestBaseline, timeAnalyze(t, baseline))
+			}
+
+			if ratio := float64(bestData) / float64(bestBaseline); ratio > tt.wantMaxRatio {
+				t.Errorf("data took %.1fx the time of the baseline (%v, %v), want at most %.0fx", ratio, bestData, bestBaseline, tt.wantMaxRatio)
+			}
+		})
+	}
+}
+
+// timeAnalyze runs the analyzer on f, which must give one finding, and returns how long it took.
+func timeAnalyze(t *testing.T, f analyze.File) time.Duration {
+	t.Helper()
+	start := time.Now()
+	out, err := deps.New().Analyze(context.Background(), f)
+	took := time.Since(start)
+	if err != nil || len(out.Findings) != 1 {
+		t.Fatalf("err = %v, findings = %d, want 1 finding", err, len(out.Findings))
+	}
+	return took
 }
 
 func TestAnalyzeCancelled(t *testing.T) {
