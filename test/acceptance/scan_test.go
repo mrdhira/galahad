@@ -1,6 +1,7 @@
 package acceptance_test
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -84,6 +85,14 @@ func TestScanCorpus(t *testing.T) {
 }
 
 func TestScan(t *testing.T) {
+	// Without the fake sandbox, Linux selects Firecracker, which fails because the home has no images.
+	// The job is made and fails; elsewhere there is no backend and no job.
+	noBackend := struct {
+		wantStderr, wantState, wantBackend string
+	}{wantStderr: "sandbox not supported"}
+	if runtime.GOOS == "linux" {
+		noBackend.wantStderr, noBackend.wantState, noBackend.wantBackend = "vmlinux is missing; run galahad setup", "failed", "firecracker"
+	}
 	tests := []struct {
 		name string
 		// inputs
@@ -97,6 +106,7 @@ func TestScan(t *testing.T) {
 		wantStderr   string // substring
 		wantState    string // job.json state; empty means no job was made
 		wantKind     string // target kind of the report
+		wantBackend  string // job.json backend; empty means fake
 		wantNoReport bool   // report.json must not exist
 	}{
 		{
@@ -143,7 +153,7 @@ func TestScan(t *testing.T) {
 			name:     "no sandbox backend",
 			target:   func(t *testing.T) string { return t.TempDir() },
 			sandbox:  new(string),
-			wantCode: 1, wantStderr: "sandbox not supported",
+			wantCode: 1, wantStderr: noBackend.wantStderr, wantState: noBackend.wantState, wantBackend: noBackend.wantBackend, wantNoReport: noBackend.wantState != "",
 		},
 		{
 			name:     "missing target",
@@ -219,7 +229,8 @@ func TestScan(t *testing.T) {
 				return
 			}
 			j := readJob(t, dir)
-			if j.State != tt.wantState || j.Backend != "fake" || j.ExitCode != tt.wantCode {
+			wantBackend := cmp.Or(tt.wantBackend, "fake")
+			if j.State != tt.wantState || j.Backend != wantBackend || j.ExitCode != tt.wantCode {
 				t.Errorf("job.json = %+v, want state %q, exit code %d", j, tt.wantState, tt.wantCode)
 			}
 			_, err := os.Stat(filepath.Join(dir, "report.json"))
