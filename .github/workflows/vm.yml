@@ -49,6 +49,12 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          # The trigger is asynchronous: wait for udev, then up to 10 s more for the new mode.
+          sudo udevadm settle --timeout=10
+          for _ in $(seq 1 20); do
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then break; fi
+            sleep 0.5
+          done
           if ! [ -r /dev/kvm ] || ! [ -w /dev/kvm ]; then
             echo "::error::/dev/kvm is not readable and writable on this runner: $(stat -c '%A %U:%G' /dev/kvm 2>&1 | tr -cd '[:print:]')"
             exit 1
