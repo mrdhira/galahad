@@ -68,7 +68,7 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func cleanRows(hosts []string, rs []row) []row {
+func cleanRows(hosts map[string]bool, rs []row) []row {
 	out := make([]row, len(rs))
 	for i, r := range rs {
 		sev := r.Severity

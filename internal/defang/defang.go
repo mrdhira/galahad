@@ -64,38 +64,31 @@ func DefangText(s string) string {
 }
 
 // DefangHosts defangs every occurrence of the given hosts (domains or IP addresses) in free text.
-// A host matches exactly, ignoring case, and only as a whole name: a letter, digit, hyphen or
-// underscore next to it, or a dot followed by a name character, means it is part of something
-// else. File names such as setup.js are never touched unless they are one of the hosts.
-func DefangHosts(s string, hosts []string) string {
-	for _, h := range hosts {
-		if h == "" {
-			continue
-		}
-		s = defangHost(s, h)
+// hosts holds lowercase names. A host matches exactly, ignoring case, and only as a whole name: a
+// letter, digit, hyphen or underscore next to it, or a dot followed by a name character, means it
+// is part of something else. File names such as setup.js are never touched unless they are one
+// of the hosts. The text is scanned once, whatever the number of hosts.
+func DefangHosts(s string, hosts map[string]bool) string {
+	if len(hosts) == 0 {
+		return s
 	}
-	return s
-}
-
-func defangHost(s, host string) string {
-	lower := asciiLower(s)
-	h := asciiLower(host)
 	var b strings.Builder
 	last := 0
-	for from := 0; ; {
-		i := strings.Index(lower[from:], h)
-		if i < 0 {
-			break
-		}
-		start := from + i
-		end := start + len(h)
-		from = end
-		if !wholeName(s, start, end) {
+	for i := 0; i < len(s); {
+		if !nameChar(s[i]) {
+			i++
 			continue
 		}
-		b.WriteString(s[last:start])
-		b.WriteString(Defang(s[start:end]))
-		last = end
+		// A run is name characters and the dots between them.
+		start := i
+		for i < len(s) && (nameChar(s[i]) || s[i] == '.' && i+1 < len(s) && nameChar(s[i+1])) {
+			i++
+		}
+		if hosts[strings.ToLower(s[start:i])] {
+			b.WriteString(s[last:start])
+			b.WriteString(Defang(s[start:i]))
+			last = i
+		}
 	}
 	if last == 0 {
 		return s
@@ -104,28 +97,6 @@ func defangHost(s, host string) string {
 	return b.String()
 }
 
-// wholeName reports whether s[start:end] is not glued to more name characters.
-func wholeName(s string, start, end int) bool {
-	if start > 0 && (nameChar(s[start-1]) || s[start-1] == '.' && start > 1 && nameChar(s[start-2])) {
-		return false
-	}
-	if end < len(s) && (nameChar(s[end]) || s[end] == '.' && end+1 < len(s) && nameChar(s[end+1])) {
-		return false
-	}
-	return true
-}
-
 func nameChar(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c >= 0x80
-}
-
-// asciiLower lowercases ASCII letters only, so byte offsets stay the same as in s.
-func asciiLower(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 'a' - 'A'
-		}
-	}
-	return string(b)
 }

@@ -148,16 +148,16 @@ func stripControl(s string) string {
 
 // text is clean for free text (snippets, titles, reasons): it also defangs the bare domains and
 // IP addresses that are in the IOC list. Paths are never passed through it.
-func text(hosts []string, s string) string {
+func text(hosts map[string]bool, s string) string {
 	return defang.DefangHosts(clean(s), hosts)
 }
 
-// iocHosts returns the domains and IP addresses of the IOC list.
-func iocHosts(res *protocol.Result) []string {
-	var hosts []string
+// iocHosts returns the lowercase domains and IP addresses of the IOC list. Renderers build it once.
+func iocHosts(res *protocol.Result) map[string]bool {
+	hosts := map[string]bool{}
 	for _, i := range res.IOCs {
 		if i.Type == "domain" || i.Type == "ip" {
-			hosts = append(hosts, stripControl(i.Value))
+			hosts[strings.ToLower(stripControl(i.Value))] = true
 		}
 	}
 	return hosts
@@ -168,7 +168,7 @@ func percent(analyzed, seen int) string {
 	if seen <= 0 {
 		return "0%"
 	}
-	p := int(math.Round(float64(analyzed) * 100 / float64(seen)))
+	p := int(math.Round(float64(analyzed) / float64(seen) * 100))
 	if p >= 100 && analyzed < seen {
 		p = 99
 	}

@@ -25,7 +25,7 @@ func mdEscape(s string) string {
 }
 
 // mdText is mdEscape for free text (snippets, titles, reasons): it also defangs the IOC hosts.
-func mdText(hosts []string, s string) string {
+func mdText(hosts map[string]bool, s string) string {
 	return mdEscapeClean(strings.ReplaceAll(text(hosts, s), "www.", "www[.]"))
 }
 
@@ -127,7 +127,7 @@ func renderMarkdown(res *protocol.Result) string {
 	return b.String()
 }
 
-func mdFindings(b *strings.Builder, hosts []string, rs []row, limit int) {
+func mdFindings(b *strings.Builder, hosts map[string]bool, rs []row, limit int) {
 	if len(rs) == 0 {
 		b.WriteString("None.\n")
 		return

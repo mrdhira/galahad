@@ -3,6 +3,8 @@ package report_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -170,6 +172,50 @@ func TestWriteContent(t *testing.T) {
 		wantHTMLAbsent []string
 	}{
 		{
+			name: "full report: target, reasons, IOC hosts, coverage and tables together",
+			mutate: func(r *protocol.Result) {
+				r.Target = protocol.Target{Name: "pack.zip", Kind: protocol.TargetFile, Size: 208896, SHA256: sha, FileCount: 1}
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test", Path: "a.txt", Line: 1})
+				r.Reasons = []string{"beacon to collect.sinkhole.test"}
+				r.Coverage = protocol.Coverage{FilesSeen: 3, FilesAnalyzed: 3, Skipped: []protocol.Skip{{Path: "pack.zip!/enc", Reason: "encrypted"}}}
+			},
+			wantMD:         []string{"- beacon to collect[.]sinkhole[.]test", "- Kind: file\n", "- SHA-256: " + sha, "- Size: 204 KiB", "- Files analyzed: 3 of 3 (all files read, 1 item skipped)", "- **Warning:** 1 item was not analyzed; the verdict does not cover it"},
+			wantHTML:       []string{"beacon to collect[.]sinkhole[.]test", "<td>file</td>", "<td>204 KiB</td>", `<p class="warn">`, `aria-label="Findings"`},
+			wantNeitherHas: []string{"collect.sinkhole.test", "(100%)"},
+		},
+		{
+			name: "domains from the IOC list are defanged in free text only",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test", Path: "a.txt", Line: 1})
+				r.Findings[0].Title = "Beacon to collect.sinkhole.test"
+				r.Findings[0].Evidence[0].Snippet = "hostname: 'collect.sinkhole.test' // setup.js"
+				r.Reasons = []string{"calls COLLECT.sinkhole.test"}
+			},
+			wantBoth:       []string{"Beacon to collect[.]sinkhole[.]test", "setup.js", "calls COLLECT[.]sinkhole[.]test"},
+			wantMD:         []string{"hostname: 'collect[.]sinkhole[.]test'"},
+			wantHTML:       []string{"hostname: &#39;collect[.]sinkhole[.]test&#39;"},
+			wantNeitherHas: []string{"collect.sinkhole.test", "COLLECT.sinkhole.test"},
+		},
+		{
+			name: "paths are not treated as domains",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "setup.test", Path: "a.txt", Line: 1})
+				r.Findings[0].Evidence[0].Path = "setup.test"
+				r.Findings[0].Evidence[0].Snippet = "run setup.test"
+			},
+			wantBoth:       []string{"run setup[.]test", "setup.test:3"},
+			wantNeitherHas: []string{"setup[.]test:3"},
+		},
+		{
+			name: "a defanged domain after a non-alphanumeric stays safe in markdown",
+			mutate: func(r *protocol.Result) {
+				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "evil.test", Path: "a.txt", Line: 1})
+				r.Reasons = []string{"[.]: //evil.test/x", "(evil.test)"}
+			},
+			wantMD:       []string{`\[.\]: //evil[.]test/x`, `\(evil[.]test\)`},
+			wantMDAbsent: []string{"\n- [.]:"},
+		},
+		{
 			name: "directory target shows folder and file count without a hash",
 			mutate: func(r *protocol.Result) {
 				r.Target = protocol.Target{Name: "repo", Kind: protocol.TargetDir, Size: 208896, SHA256: sha, FileCount: 2}
@@ -202,6 +248,14 @@ func TestWriteContent(t *testing.T) {
 			},
 			wantBoth:       []string{"12 bytes"},
 			wantNeitherHas: []string{"SHA-256"},
+		},
+		{
+			name: "ftp and file urls are defanged",
+			mutate: func(r *protocol.Result) {
+				r.Findings[0].Evidence[0].Snippet = "get ftp://f.test/a.bin, ftps://g.test/b and file:///C:/x.exe"
+			},
+			wantBoth:       []string{"fxp://f[.]test/a[.]bin", "fxps://g[.]test/b", "fxle:///C:/x[.]exe"},
+			wantNeitherHas: []string{"ftp://", "ftps://", "file://"},
 		},
 		{
 			name: "skips next to full analysis never read 100%",
@@ -238,6 +292,13 @@ func TestWriteContent(t *testing.T) {
 			wantNeitherHas: []string{"not analyzed", "66%"},
 		},
 		{
+			name: "percentage uses the same rounding as the scoring reasons",
+			mutate: func(r *protocol.Result) {
+				r.Coverage = protocol.Coverage{FilesSeen: 200, FilesAnalyzed: 29, Skipped: []protocol.Skip{}}
+			},
+			wantBoth: []string{"Files analyzed: 29 of 200 (14%)"},
+		},
+		{
 			name: "everything analyzed with nothing skipped is 100%",
 			mutate: func(r *protocol.Result) {
 				r.Coverage = protocol.Coverage{FilesSeen: 4, FilesAnalyzed: 4, Skipped: []protocol.Skip{}}
@@ -251,46 +312,6 @@ func TestWriteContent(t *testing.T) {
 				r.Coverage = protocol.Coverage{Skipped: []protocol.Skip{}}
 			},
 			wantBoth: []string{"Files analyzed: 0 of 0 (0%)"},
-		},
-		{
-			name: "ftp and file urls are defanged",
-			mutate: func(r *protocol.Result) {
-				r.Findings[0].Evidence[0].Snippet = "get ftp://f.test/a.bin, ftps://g.test/b and file:///C:/x.exe"
-			},
-			wantBoth:       []string{"fxp://f[.]test/a[.]bin", "fxps://g[.]test/b", "fxle:///C:/x[.]exe"},
-			wantNeitherHas: []string{"ftp://", "ftps://", "file://"},
-		},
-		{
-			name: "domains from the IOC list are defanged in free text only",
-			mutate: func(r *protocol.Result) {
-				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "collect.sinkhole.test", Path: "a.txt", Line: 1})
-				r.Findings[0].Title = "Beacon to collect.sinkhole.test"
-				r.Findings[0].Evidence[0].Snippet = "hostname: 'collect.sinkhole.test' // setup.js"
-				r.Reasons = []string{"calls COLLECT.sinkhole.test"}
-			},
-			wantBoth:       []string{"Beacon to collect[.]sinkhole[.]test", "setup.js", "calls COLLECT[.]sinkhole[.]test"},
-			wantMD:         []string{"hostname: 'collect[.]sinkhole[.]test'"},
-			wantHTML:       []string{"hostname: &#39;collect[.]sinkhole[.]test&#39;"},
-			wantNeitherHas: []string{"collect.sinkhole.test", "COLLECT.sinkhole.test"},
-		},
-		{
-			name: "paths are not treated as domains",
-			mutate: func(r *protocol.Result) {
-				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "setup.test", Path: "a.txt", Line: 1})
-				r.Findings[0].Evidence[0].Path = "setup.test"
-				r.Findings[0].Evidence[0].Snippet = "run setup.test"
-			},
-			wantBoth:       []string{"run setup[.]test", "setup.test:3"},
-			wantNeitherHas: []string{"setup[.]test:3"},
-		},
-		{
-			name: "a defanged domain after a non-alphanumeric stays safe in markdown",
-			mutate: func(r *protocol.Result) {
-				r.IOCs = append(r.IOCs, protocol.IOC{Type: "domain", Value: "evil.test", Path: "a.txt", Line: 1})
-				r.Reasons = []string{"[.]: //evil.test/x", "(evil.test)"}
-			},
-			wantMD:       []string{`\[.\]: //evil[.]test/x`, `\(evil[.]test\)`},
-			wantMDAbsent: []string{"\n- [.]:"},
 		},
 		{
 			name:   "html tables keep table semantics and scroll in a region",
@@ -369,6 +390,51 @@ func TestWriteLimits(t *testing.T) {
 			if n := strings.Count(read(t, paths.HTML), "192[.]0[.]2[.]1"); n != tt.wantHTMLIOCs {
 				t.Errorf("html IOCs = %d, want %d", n, tt.wantHTMLIOCs)
 			}
+		})
+	}
+}
+
+// TestWriteScalesWithIOCs guards against rendering time that grows with IOCs times text: a hostile
+// repository controls the number of IOC domains. It compares run times instead of using a fixed
+// limit, so a slow machine or the race detector does not make it flaky.
+func TestWriteScalesWithIOCs(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		findings, fewIOCs, manyIOCs int
+		// expectations
+		wantMaxRatio float64
+	}{
+		{name: "1000 domain IOCs over 2000 findings cost about the same as 1", findings: 2000, fewIOCs: 1, manyIOCs: 1000, wantMaxRatio: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := func(iocs int) time.Duration {
+				res := result("s", "a.txt")
+				snippet := "hostname: 'h5.sinkhole.test' " + strings.Repeat("x", 170)
+				res.Findings, res.IOCs = nil, nil
+				for i := 0; i < tt.findings; i++ {
+					res.Findings = append(res.Findings, protocol.Finding{RuleID: "GAL-R-001", Severity: protocol.SeverityLow, Title: "t", Evidence: []protocol.Evidence{{Path: "a", Line: i + 1, Snippet: snippet}}})
+				}
+				for i := 0; i < iocs; i++ {
+					res.IOCs = append(res.IOCs, protocol.IOC{Type: "domain", Value: fmt.Sprintf("h%d.sinkhole.test", i+5), Path: "a", Line: 1})
+				}
+				dir := t.TempDir()
+				best := time.Duration(math.MaxInt64)
+				for range 3 {
+					start := time.Now()
+					if _, err := report.Write(dir, res); err != nil {
+						t.Fatal(err)
+					}
+					best = min(best, time.Since(start))
+				}
+				return best
+			}
+			few, many := run(tt.fewIOCs), run(tt.manyIOCs)
+			if ratio := float64(many) / float64(few); ratio > tt.wantMaxRatio {
+				t.Errorf("Write took %v with %d IOCs and %v with %d, ratio %.1f, want at most %.1f", many, tt.manyIOCs, few, tt.fewIOCs, ratio, tt.wantMaxRatio)
+			}
+			t.Logf("%d IOCs: %v, %d IOCs: %v", tt.manyIOCs, many, tt.fewIOCs, few)
 		})
 	}
 }

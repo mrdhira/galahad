@@ -1,7 +1,11 @@
 package defang_test
 
 import (
+	"fmt"
+	"math"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrdhira/galahad/internal/defang"
 )
@@ -72,28 +76,68 @@ func TestDefangHosts(t *testing.T) {
 		name string
 		// inputs
 		in    string
-		hosts []string
+		hosts map[string]bool
 		// expectations
 		want string
 	}{
-		{name: "bare domain in a snippet", in: "hostname: 'collect.sinkhole.test'", hosts: []string{"collect.sinkhole.test"}, want: "hostname: 'collect[.]sinkhole[.]test'"},
-		{name: "case is ignored and kept", in: "ping Collect.Sinkhole.TEST now", hosts: []string{"collect.sinkhole.test"}, want: "ping Collect[.]Sinkhole[.]TEST now"},
-		{name: "several occurrences and hosts", in: "a.test b.test a.test", hosts: []string{"a.test", "b.test"}, want: "a[.]test b[.]test a[.]test"},
-		{name: "ip address", in: "connect 203.0.113.9:80", hosts: []string{"203.0.113.9"}, want: "connect 203[.]0[.]113[.]9:80"},
-		{name: "sentence end", in: "see evil.test.", hosts: []string{"evil.test"}, want: "see evil[.]test."},
-		{name: "file names are untouched", in: "run setup.js and evil.test", hosts: []string{"evil.test"}, want: "run setup.js and evil[.]test"},
-		{name: "longer name is not a match", in: "xevil.test evil.testing sub.evil.test evil.test.example", hosts: []string{"evil.test"}, want: "xevil.test evil.testing sub.evil.test evil.test.example"},
-		{name: "already defanged text is unchanged", in: "evil[.]test", hosts: []string{"evil.test"}, want: "evil[.]test"},
-		{name: "ip inside a version is not a match", in: "1.2.3.45 and 11.2.3.4", hosts: []string{"1.2.3.4"}, want: "1.2.3.45 and 11.2.3.4"},
+		{name: "bare domain in a snippet", in: "hostname: 'collect.sinkhole.test'", hosts: map[string]bool{"collect.sinkhole.test": true}, want: "hostname: 'collect[.]sinkhole[.]test'"},
+		{name: "case is ignored and kept", in: "ping Collect.Sinkhole.TEST now", hosts: map[string]bool{"collect.sinkhole.test": true}, want: "ping Collect[.]Sinkhole[.]TEST now"},
+		{name: "several occurrences and hosts", in: "a.test b.test a.test", hosts: map[string]bool{"a.test": true, "b.test": true}, want: "a[.]test b[.]test a[.]test"},
+		{name: "ip address", in: "connect 203.0.113.9:80", hosts: map[string]bool{"203.0.113.9": true}, want: "connect 203[.]0[.]113[.]9:80"},
+		{name: "sentence end", in: "see evil.test.", hosts: map[string]bool{"evil.test": true}, want: "see evil[.]test."},
+		{name: "file names are untouched", in: "run setup.js and evil.test", hosts: map[string]bool{"evil.test": true}, want: "run setup.js and evil[.]test"},
+		{name: "longer name is not a match", in: "xevil.test evil.testing sub.evil.test evil.test.example", hosts: map[string]bool{"evil.test": true}, want: "xevil.test evil.testing sub.evil.test evil.test.example"},
+		{name: "already defanged text is unchanged", in: "evil[.]test", hosts: map[string]bool{"evil.test": true}, want: "evil[.]test"},
+		{name: "ip inside a version is not a match", in: "1.2.3.45 and 11.2.3.4", hosts: map[string]bool{"1.2.3.4": true}, want: "1.2.3.45 and 11.2.3.4"},
 		{name: "no hosts", in: "evil.test", hosts: nil, want: "evil.test"},
-		{name: "empty host is ignored", in: "evil.test", hosts: []string{""}, want: "evil.test"},
-		{name: "non-ascii text keeps offsets", in: "İ evil.test", hosts: []string{"evil.test"}, want: "İ evil[.]test"},
-		{name: "empty", in: "", hosts: []string{"evil.test"}, want: ""},
+		{name: "empty host is ignored", in: "evil.test", hosts: map[string]bool{"": true}, want: "evil.test"},
+		{name: "leading dots are not part of the name", in: "..evil.test and ...evil.test.", hosts: map[string]bool{"evil.test": true}, want: "..evil[.]test and ...evil[.]test."},
+		{name: "dot before a non-name character ends the run", in: "evil.test/x evil.test, (evil.test)", hosts: map[string]bool{"evil.test": true}, want: "evil[.]test/x evil[.]test, (evil[.]test)"},
+		{name: "non-ascii text keeps offsets", in: "İ evil.test", hosts: map[string]bool{"evil.test": true}, want: "İ evil[.]test"},
+		{name: "empty", in: "", hosts: map[string]bool{"evil.test": true}, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := defang.DefangHosts(tt.in, tt.hosts); got != tt.want {
-				t.Errorf("DefangHosts(%q, %q) = %q, want %q", tt.in, tt.hosts, got, tt.want)
+				t.Errorf("DefangHosts(%q, %v) = %q, want %q", tt.in, tt.hosts, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDefangHostsScalesLinearly guards against work that grows with hosts times text: a hostile
+// repository controls the number of IOC hosts, so many hosts must cost about the same as few.
+func TestDefangHostsScalesLinearly(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		texts, fewHosts, manyHosts int
+		// expectations
+		wantMaxRatio float64
+	}{
+		{name: "1000 hosts over 2000 snippets cost about the same as 1 host", texts: 2000, fewHosts: 1, manyHosts: 1000, wantMaxRatio: 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			text := strings.Repeat("hostname: 'h5.sinkhole.test' call(setup.js) ", 5)[:200]
+			run := func(hosts int) time.Duration {
+				set := map[string]bool{"h5.sinkhole.test": true}
+				for i := 1; i < hosts; i++ {
+					set[fmt.Sprintf("h%d.sinkhole.test", i+1000)] = true
+				}
+				best := time.Duration(math.MaxInt64)
+				for range 3 {
+					start := time.Now()
+					for range tt.texts {
+						_ = defang.DefangHosts(text, set)
+					}
+					best = min(best, time.Since(start))
+				}
+				return best
+			}
+			few, many := run(tt.fewHosts), run(tt.manyHosts)
+			if ratio := float64(many) / float64(few); ratio > tt.wantMaxRatio {
+				t.Errorf("time ratio %.1f for %d hosts against %d, want at most %.1f", ratio, tt.manyHosts, tt.fewHosts, tt.wantMaxRatio)
 			}
 		})
 	}
