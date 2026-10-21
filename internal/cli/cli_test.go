@@ -6,8 +6,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrdhira/galahad/internal/cli"
+	"github.com/mrdhira/galahad/internal/sandbox"
 )
 
 func TestRun(t *testing.T) {
@@ -47,6 +49,36 @@ func TestRun(t *testing.T) {
 			}
 			if tt.wantCode == cli.ExitUsage && !strings.Contains(errb.String(), "Usage: galahad") {
 				t.Errorf("stderr lacks usage: %q", errb.String())
+			}
+		})
+	}
+}
+
+func TestRunWithEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      cli.Env
+		args     []string
+		wantCode int
+	}{
+		{name: "zero Env uses the defaults", env: cli.Env{}, args: []string{"version"}, wantCode: cli.ExitClean},
+		{
+			name: "explicit Env",
+			env: cli.Env{
+				Home:    "/tmp/gh",
+				Now:     func() time.Time { return time.Time{} },
+				Backend: func() (sandbox.Backend, error) { return nil, sandbox.ErrUnsupported },
+			},
+			args:     []string{"version"},
+			wantCode: cli.ExitClean,
+		},
+		{name: "unknown command", env: cli.Env{}, args: []string{"bogus"}, wantCode: cli.ExitUsage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			if got := cli.RunWithEnv(tt.args, &out, &errb, tt.env); got != tt.wantCode {
+				t.Fatalf("exit = %d, want %d", got, tt.wantCode)
 			}
 		})
 	}
