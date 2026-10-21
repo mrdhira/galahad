@@ -1,7 +1,6 @@
-# Snapshot of widely used PyPI projects: a curated list written 2026-10-20 from public knowledge of the index, extended 2026-10-21 with the top 5000 projects by downloads from the top-pypi-packages dataset (last_update 2026-10-01). PEP 503 normalized names, one per line.
+# Snapshot of widely used PyPI projects: a curated list written 2026-10-20 from public knowledge of the index, extended 2026-10-21 with the top 5000 projects by downloads from the top-pypi-packages dataset (last_update 2026-10-01), minus projects since deleted from PyPI. PEP 503 normalized names, one per line.
 a2a-sdk
 a2wsgi
-aaaaaaaaa
 ably
 abnf
 about-time

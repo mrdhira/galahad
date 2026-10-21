@@ -1,4 +1,4 @@
-# Curated snapshot of widely used npm packages, written 2026-10-20 from public knowledge of the registry. Extended 2026-10-21 with the unscoped names of the packages installed under /opt/node*/lib/node_modules and /opt/node-tools/node_modules, with jsdoc, json-schema, npm-run-all2, cli-table, eclint, dtslint, standardx, ntypescript, babel-preset-es2017, jsonc, errto, eslint-plugin-yaml, fake, http2 and test-each (published packages that those packages declare as dependencies), and with every unscoped name in the npm-high-impact 1.13.0 lists (top, top-download and top-dependent). Lowercase, one name per line.
+# Curated snapshot of widely used npm packages, written 2026-10-20 from public knowledge of the registry. Extended 2026-10-21 with the unscoped names of the packages installed under /opt/node*/lib/node_modules and /opt/node-tools/node_modules, with jsdoc, json-schema, npm-run-all2, cli-table, eclint, dtslint, standardx, ntypescript, babel-preset-es2017, jsonc, errto, eslint-plugin-yaml, fake, http2 and test-each (published packages that those packages declare as dependencies), and with every unscoped name in the npm-high-impact 1.13.0 lists (top, top-download and top-dependent), minus names npm has taken down as malware or reserved as security holding packages. Lowercase, one name per line.
 0x0lobersyko
 2-thenable
 666-tea
@@ -347,10 +347,6 @@ apexcharts
 apg-js
 apg-lite
 aphrodite
-api-chat-fanpage-facebook
-api-chatfb
-api-chatfb-test
-api-facebooknew
 apify-client
 apollo-boost
 apollo-cache
@@ -2922,7 +2918,6 @@ express
 express-async-errors
 express-async-handler
 express-basic-auth
-express-exp
 express-fileupload
 express-graphql
 express-handlebars
@@ -3239,7 +3234,6 @@ from
 from2
 fromentries
 front-matter
-fs
 fs-access
 fs-capacitor
 fs-constants
@@ -3927,7 +3921,6 @@ htmlescape
 htmlfy
 htmlnano
 htmlparser2
-http
 http-assert
 http-auth
 http-auth-connect
