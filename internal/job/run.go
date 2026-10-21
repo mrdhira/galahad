@@ -50,6 +50,9 @@ type Spec struct {
 	// Timeout is the time limit of the whole job, at least MinTimeout.
 	Timeout time.Duration
 	Image   string
+	// CPUs and MemoryMiB size the machine. Zero leaves the choice to the backend.
+	CPUs      int
+	MemoryMiB int
 	// Progress is called with each stage the guest reports. It may be nil.
 	Progress func(stage string)
 }
@@ -139,7 +142,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	if err := r.setState(StateBooting); err != nil {
 		return err
 	}
-	m, err := r.backend.Start(ctx, sandbox.Spec{JobDir: r.jobDir, Image: r.spec.Image, Ports: []uint32{controlPort}})
+	m, err := r.backend.Start(ctx, sandbox.Spec{JobDir: r.jobDir, Image: r.spec.Image, CPUs: r.spec.CPUs, MemoryMiB: r.spec.MemoryMiB, Ports: []uint32{controlPort}})
 	if err != nil {
 		return fmt.Errorf("start the sandbox: %w", err)
 	}
