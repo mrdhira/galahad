@@ -414,11 +414,11 @@ func TestServeDrainIsBounded(t *testing.T) {
 	tests := []struct {
 		name string
 		// inputs
-		extra int // junk bytes the guest keeps sending after the bad frame
+		chunk int // bytes per guest write after the bad frame
 		// expectations
 		wantMaxTime time.Duration
 	}{
-		{name: "guest that keeps sending is cut off", extra: 64 << 20, wantMaxTime: 4 * time.Second},
+		{name: "guest that keeps sending is cut off", chunk: 64 << 10, wantMaxTime: 4 * time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -434,15 +434,18 @@ func TestServeDrainIsBounded(t *testing.T) {
 			if _, err := readReply(c); err != nil {
 				t.Fatalf("reading the reply: %v", err)
 			}
-			// The proxy reads at most 64 KiB, then closes, so the rest of the junk
-			// cannot be written: the write fails instead of finishing.
-			began := time.Now()
-			_ = c.SetWriteDeadline(began.Add(tt.wantMaxTime))
-			if _, err := c.Write(make([]byte, tt.extra)); err == nil {
-				t.Errorf("guest wrote %d junk bytes without a failure", tt.extra)
+			// The proxy reads at most 64 KiB, then closes. One large write may still
+			// complete into socket buffers (Windows does that), so write small chunks
+			// until one fails. After the close, a reset fails the writes on every system.
+			junk := make([]byte, tt.chunk)
+			deadline := time.Now().Add(tt.wantMaxTime)
+			_ = c.SetWriteDeadline(deadline)
+			var werr error
+			for werr == nil {
+				_, werr = c.Write(junk)
 			}
-			if d := time.Since(began); d > tt.wantMaxTime {
-				t.Errorf("connection stayed open for %v, want at most %v", d, tt.wantMaxTime)
+			if errors.Is(werr, os.ErrDeadlineExceeded) || time.Now().After(deadline) {
+				t.Errorf("guest could still write after %v: the proxy did not close (last error %v)", tt.wantMaxTime, werr)
 			}
 		})
 	}
