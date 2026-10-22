@@ -14,7 +14,8 @@ import (
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
-const clamTimeout = 3 * time.Minute
+// clamTimeout leaves room for a large repo: next.js took more than 3 minutes in a CI VM.
+const clamTimeout = 5 * time.Minute
 
 var ruleAV = protocol.Rule{ID: "GAL-AV-001", Severity: protocol.SeverityHigh, Title: "Antivirus signature match"}
 
