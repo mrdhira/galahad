@@ -80,7 +80,8 @@ jobs:
             scripts/vm/sweep.sh suspicious "https://github.com/$repo"
           done
 
-      # The binary built by "make build" in the setup, scanned with capa in the re image.
+      # The binary built by "make build" in the setup, scanned in the re image. capa times out on it (a known gap),
+      # which sweep-check.sh accepts; any other reason for capa to be left out fails the sweep.
       - name: Sweep the built galahad binary with the re image
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: scripts/vm/sweep.sh binary bin/galahad --image re

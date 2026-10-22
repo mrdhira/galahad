@@ -6,8 +6,8 @@
 #   - the built galahad binary (group binary) is CLEAN.
 # A target that has no result, or whose scan ended in an error, does not meet its rule either. ClamAV, YARA and
 # OSV must be among the analyzers of each repo, and ClamAV and YARA among those of the binary, because the
-# sweep means nothing when a tool was left out. capa is not required for the binary: it does not finish on large
-# Go binaries (a known gap in docs/milestones/M2.md section 4).
+# sweep means nothing when a tool was left out. For the binary, capa may be left out only by its time limit: it does
+# not finish on large Go binaries (a known gap in docs/milestones/M2.md section 4). Any other reason fails.
 # Each failure prints one ::error:: line (at most 9, as GitHub shows 10 per step).
 #   scripts/vm/sweep-check.sh RESULTS_JSONL SUMMARY_JSON
 set -euo pipefail
@@ -42,6 +42,10 @@ failures=$(jq -rs --argjson wc "$want_clean" --argjson ws "$want_suspicious" --a
 	  | missing($r.analyzers; $need)
 	  | select(length > 0)
 	  | "\($r.target): not active: \(join(", ")) \($r.tools // "")" ] +
+	[ .[]
+	  | select(.group == "binary" and .verdict != "error" and (.analyzers | index("capa") | not))
+	  | select((.capa // "") | test("^capa: left out: [^;]*timed out") | not)
+	  | "\(.target): capa left out for a reason other than the known timeout: \(if (.capa // "") == "" then "no capa line in tools.log" else .capa end)" ] +
 	[ (if count("clean") != $wc then "the sweep has \(count("clean")) results for the clean repos, want \($wc)" else empty end),
 	  (if count("suspicious") != $ws then "the sweep has \(count("suspicious")) results for the suspicious repos, want \($ws)" else empty end),
 	  (if count("binary") != $wb then "the sweep has \(count("binary")) results for the galahad binary, want \($wb)" else empty end) ]

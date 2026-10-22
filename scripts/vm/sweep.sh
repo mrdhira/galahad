@@ -40,6 +40,7 @@ findings='[]'
 analyzers='[]'
 reasons='[]'
 tools=
+capa=
 hits=
 error=
 if [ -n "$job" ] && [ -s "$job/report.json" ]; then
@@ -60,15 +61,17 @@ fi
 # Why a tool was left out or ran only in part, from the tools log of the job.
 if [ -n "$job" ] && [ -f "$job/artifacts/tools.log" ]; then
 	tools=$(printable "$(grep -E ': (left out|note):' "$job/artifacts/tools.log" | tr '\n' ' ' || true)")
+	# capa's own line, so sweep-check.sh sees it even when other notes fill the 200 characters above.
+	capa=$(printable "$(grep -E '^capa: ' "$job/artifacts/tools.log" | head -n 1 || true)")
 fi
 
 name=${target#https://github.com/}
 jq -cn --arg group "$group" --arg target "$name" --argjson code "$code" --arg verdict "$verdict" --argjson score "$score" \
 	--argjson findings "$findings" --argjson analyzers "$analyzers" --argjson reasons "$reasons" \
-	--argjson duration "$duration" --arg error "$error" --arg tools "$tools" --arg hits "$hits" \
+	--argjson duration "$duration" --arg error "$error" --arg tools "$tools" --arg capa "$capa" --arg hits "$hits" \
 	'{group: $group, target: $target, exit_code: $code, verdict: $verdict, score: $score, findings: $findings,
 	  analyzers: $analyzers, reasons: $reasons, duration_seconds: $duration, error: $error, tools: $tools,
-	  hits: $hits}' >>"$SWEEP_DIR/results.jsonl"
+	  capa: $capa, hits: $hits}' >>"$SWEEP_DIR/results.jsonl"
 
 ids=$(jq -r 'join(",")' <<<"$findings")
 printf '::notice::%s exit=%s verdict=%s score=%s duration=%ss findings=%s%s%s%s\n' \
