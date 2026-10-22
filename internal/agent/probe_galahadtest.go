@@ -131,6 +131,7 @@ var errnoNames = map[syscall.Errno]string{
 	syscall.EACCES: "EACCES", syscall.ECONNREFUSED: "ECONNREFUSED", syscall.ECONNRESET: "ECONNRESET",
 	syscall.EINVAL: "EINVAL", syscall.ENETUNREACH: "ENETUNREACH", syscall.ENODEV: "ENODEV", syscall.ENOSPC: "ENOSPC",
 	syscall.EPERM: "EPERM", syscall.EROFS: "EROFS", syscall.EHOSTUNREACH: "EHOSTUNREACH",
+	syscall.ETIMEDOUT: "timeout", // the kernel gave up on the connect, which is a refusal too
 }
 
 // errName names the errno inside err, or says what else it was.

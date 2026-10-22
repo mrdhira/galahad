@@ -135,6 +135,7 @@ type guestIdentity struct {
 	GIDEffective string `json:"gid_effective"`
 	CapEff       string `json:"cap_eff"`
 	NoNewPrivs   string `json:"no_new_privs"`
+	Error        string `json:"error"` // set when the probe could not read the status file
 }
 
 // checkUnprivileged checks that a guest process is uid and gid 1000 with no capabilities and no_new_privs.

@@ -49,13 +49,14 @@ func forkBomb(env probeEnv) (map[string]any, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start the fork bomb: %w", err)
 	}
+	// Read at once: the shell exits when a fork fails, which can be before the first sample.
+	identity := procIdentity(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
 	exited := make(chan struct{})
 	go func() {
 		_ = cmd.Wait() // how the shell ended does not matter; the count says what happened
 		close(exited)
 	}()
 
-	var identity map[string]any
 	peak := 0
 	tick := time.NewTicker(bombSample)
 	defer tick.Stop()
@@ -65,9 +66,6 @@ sampling:
 	for {
 		select {
 		case <-tick.C:
-			if identity == nil {
-				identity = procIdentity(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
-			}
 			peak = max(peak, countProcesses(os.Getuid()))
 		case <-end.C:
 			break sampling
