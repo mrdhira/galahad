@@ -139,7 +139,9 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	remote := job.Kind == protocol.KindScan && (job.Source == protocol.SourceURL || job.Source == protocol.SourceDrive || job.Source == protocol.SourceGit)
 	clone := remote && job.Source == protocol.SourceGit
 	update := job.Kind == protocol.KindUpdate
-	if !local && !probe && !remote && !update {
+	// A P8 probe job has an empty stream, or one that the probe leaves unread.
+	p8 := job.Kind == protocol.KindProbe && probeEnabled
+	if !local && !probe && !remote && !update && !p8 {
 		return fail(protocol.CodeProtocol, "job kind %q with source %q is not supported", job.Kind, job.Source)
 	}
 	if !remote && !update && (job.Name == "." || !filepath.IsLocal(job.Name) || filepath.Base(job.Name) != job.Name) {
@@ -179,6 +181,10 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		}
 	}
 
+	if p8 && probeBeforeInput(job.Name) {
+		return runProbe(host, job.Name, relay, "", unsafeHost)
+	}
+
 	if err := host.sendJSON(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageIngest}); err != nil {
 		return fmt.Errorf("send progress: %w", err)
 	}
@@ -205,6 +211,9 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 		return fail(protocol.CodeIngest, "ingest: %w", err)
 	}
 
+	if p8 {
+		return runProbe(host, job.Name, relay, dir, unsafeHost)
+	}
 	if update {
 		return runUpdate(host, relay.addr, dir, sigDir, syncSig, start.Add(max(jobTime-analysisMargin, 0)))
 	}

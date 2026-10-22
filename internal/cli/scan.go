@@ -41,6 +41,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	noNetwork := fs.Bool("no-network", false, "give the sandbox no network at all, not even through the proxy")
 	forceGit := fs.Bool("git", false, "treat an https link as a Git repository and clone it")
 	submodules := fs.Bool("submodules", false, "also fetch the submodules of a Git repository")
+	probe := addProbeFlag(fs)
 	var allowHosts []string
 	fs.Func("allow-host", "let the sandbox reach this host as well; may be repeated", func(h string) error {
 		// The proxy policy is the one that decides what a host name is.
@@ -58,14 +59,18 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		fmt.Fprintf(stderr, "galahad scan: %v\n\n%s", err, usage)
 		return ExitUsage
 	}
-	if fs.NArg() != 1 {
+	if n := fs.NArg(); n > 1 || (n == 0 && *probe == "") {
 		fmt.Fprintf(stderr, "galahad scan: want exactly one path or link, got %d arguments\n\n%s", fs.NArg(), usage)
 		return ExitUsage
 	}
-	tgt, err := classifyTarget(fs.Arg(0), *forceGit)
-	if err != nil {
-		fmt.Fprintf(stderr, "galahad scan: %v\n\n%s", err, usage)
-		return ExitUsage
+	// A probe job takes a path as the input of the probe, or none.
+	tgt := target{source: protocol.SourceLocal, value: fs.Arg(0)}
+	if *probe == "" {
+		var err error
+		if tgt, err = classifyTarget(fs.Arg(0), *forceGit); err != nil {
+			fmt.Fprintf(stderr, "galahad scan: %v\n\n%s", err, usage)
+			return ExitUsage
+		}
 	}
 	if *submodules && tgt.source != protocol.SourceGit {
 		fmt.Fprintf(stderr, "galahad scan: --submodules only applies to a Git repository\n\n%s", usage)
@@ -121,6 +126,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		Source:     tgt.source,
 		AllowHosts: allowHosts,
 		Submodules: *submodules,
+		Probe:      *probe,
 		Signatures: signatures,
 		Progress: func(stage string) {
 			fmt.Fprintf(stderr, "galahad: %s\n", stage)
@@ -135,6 +141,10 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 			fmt.Fprintf(stderr, "galahad scan: %s\n", msg)
 		}
 		return ExitError
+	}
+	if *probe != "" { // a probe has no report; its observations are in artifacts/probe.json
+		fmt.Fprintf(stdout, "probe %s done (job %s)\n", protocol.CleanPath(*probe), out.Job.ID)
+		return ExitClean
 	}
 	report.Terminal(stdout, out.Result, out.Paths, useColor(stdout))
 	return out.Result.Verdict.ExitCode()

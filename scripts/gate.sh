@@ -39,13 +39,14 @@ fi
 step vet
 go vet ./...
 go vet -tags galahadtest ./...
-# The vm tag is for tests that need a real VM. No file has it yet, which is not an error.
-go vet -tags vm ./test/acceptance/
+# The vm tag is for tests that need a real VM (test/acceptance/p8_test.go). It compiles here with the test hooks it uses.
+go vet -tags "vm galahadtest" ./test/acceptance/
 
 step lint
 golangci_lint="$(tool golangci-lint)"
 "$golangci_lint" run ./...
 "$golangci_lint" run --build-tags galahadtest ./...
+"$golangci_lint" run --build-tags vm,galahadtest ./test/acceptance/...
 
 step build
 for goos in linux darwin windows; do
@@ -82,8 +83,9 @@ if go list -f '{{join .GoFiles " "}}' ./internal/proxy | grep -F -q testhooks_fa
 fi
 # The net-probe job, the bad-result hooks, the Drive base override and the update hooks (signatures
 # directory, YARA-Forge address) of the fake guest, the signature directory and OSV address hooks of
-# the guest tools and plain http for .test Git hosts exist only in galahadtest builds.
-for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galahadtest.go internal/agent/drivebase_galahadtest.go internal/agent/updatehooks_galahadtest.go internal/job/netprobe_galahadtest.go internal/analyze/tools/sigroot_galahadtest.go internal/analyze/tools/osvbase_galahadtest.go internal/protocol/githttp_galahadtest.go; do
+# the guest tools, plain http for .test Git hosts, and the P8 probes of the guest, the host job and
+# the CLI exist only in galahadtest builds.
+for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galahadtest.go internal/agent/drivebase_galahadtest.go internal/agent/updatehooks_galahadtest.go internal/job/netprobe_galahadtest.go internal/analyze/tools/sigroot_galahadtest.go internal/analyze/tools/osvbase_galahadtest.go internal/protocol/githttp_galahadtest.go internal/agent/probe_galahadtest.go internal/job/probe_galahadtest.go internal/cli/p8probe_galahadtest.go; do
   pkg="./$(dirname "$f")"
   name="$(basename "$f")"
   if ! go list -tags galahadtest -f '{{join .GoFiles " "}}' "$pkg" | grep -F -q "$name"; then
@@ -104,14 +106,22 @@ if go list -f '{{join .GoFiles " "}}' ./internal/images | grep -F -q testhooks_g
   echo "a build without tags must not contain the setup test hooks" >&2
   exit 1
 fi
-# The P8 probe flag exists only in galahadtest builds.
+# The P8 probe flag and the probes of the guest exist only in galahadtest builds: a build without tags rejects
+# the flag, and its agent holds none of the probe names.
 probe_dir="$(mktemp -d)"
 exe=""
 if [ "$(go env GOOS)" = windows ]; then exe=.exe; fi
 go build -o "$probe_dir/galahad$exe" ./cmd/galahad
 probe_code=0
 probe_out="$("$probe_dir/galahad$exe" scan --p8-probe 2>&1)" || probe_code=$?
+go build -o "$probe_dir/galahad-agent$exe" ./cmd/galahad-agent
+agent_has_probe=0
+grep -a -q -e result-unknown-field -e GALAHAD_PROBE_CHILD "$probe_dir/galahad-agent$exe" && agent_has_probe=1
 rm -rf "$probe_dir"
+if [ "$agent_has_probe" = 1 ]; then
+  echo "a build without tags must not contain the P8 probes of the guest" >&2
+  exit 1
+fi
 if [ "$probe_code" != 2 ] || ! printf '%s\n' "$probe_out" | grep -q "flag provided but not defined"; then
   echo "a build without tags must reject 'galahad scan --p8-probe' as an unknown flag (exit $probe_code)" >&2
   exit 1

@@ -3,7 +3,8 @@ name: vm
 # Boots the real Firecracker backend, which the development session cannot do: there is no KVM there.
 # It installs the pinned Firecracker and the pinned kernel and core image, builds galahad and
 # galahad-agent, fills the signatures through the update VM (cached for a week), and scans corpus
-# fixtures and a test-time EICAR file through a microVM. Each failure prints ::error:: lines, which
+# fixtures and a test-time EICAR file through a microVM, then runs the P8 isolation probes (test/acceptance/
+# p8_test.go) in microVMs of their own. Each failure prints ::error:: lines, which
 # show up as annotations without reading the job log.
 
 on:
@@ -14,6 +15,7 @@ on:
       - 'internal/**'
       - 'scripts/vm/**'
       - 'testdata/corpus/**'
+      - 'test/acceptance/p8*'
       - '.github/workflows/vm.yml'
   workflow_dispatch:
 
@@ -173,6 +175,13 @@ jobs:
 
       - name: Scan a project that runs curl when its folder is opened (exit 20)
         run: scripts/vm/scan.sh testdata/corpus/p1-folderopen-curl 20
+
+      # P8: the isolation probes. A hostile guest and a hostile input stay contained and are reported. The test
+      # builds galahad and galahad-agent with the galahadtest tag (the probes exist only there) and runs each
+      # probe in its own VM with a 2 minute limit. It takes about 10 minutes: the sleep probe waits for its limit.
+      - name: Run the P8 isolation probes
+        timeout-minutes: 45
+        run: scripts/vm/p8.sh
 
       # A scan that went wrong may have left a VM behind.
       - name: Stop what is left

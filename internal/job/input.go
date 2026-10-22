@@ -42,6 +42,7 @@ type plan struct {
 	update  bool   // the update job: no target and no input, and the update policy
 	url     string // the link of a url, drive or git target
 	probe   string // the address of a net-probe job, which galahadtest builds can ask for; empty otherwise
+	p8      string // the name of a P8 probe job, which galahadtest builds can ask for; empty otherwise
 	name    string // base name of the target, the single top-level element of the tar stream
 	isDir   bool
 	entries []entry
@@ -86,8 +87,11 @@ func (p *plan) policy(allowHosts []string) (proxy.Policy, error) {
 	return proxy.NewPolicy(in)
 }
 
-// jobTarget is the target of job.json. The kind of a link is its source.
+// jobTarget is the target of job.json. The kind of a link is its source, and a probe job has the probe as its target.
 func (p *plan) jobTarget(target string) Target {
+	if p.p8 != "" {
+		return Target{Input: protocol.CleanPath(p.p8), Kind: "probe"}
+	}
 	if p.remote() {
 		return Target{Input: protocol.CleanPath(target), Kind: p.source}
 	}
@@ -190,7 +194,7 @@ func (p *plan) send(conn net.Conn, job protocol.Job, endSent *atomic.Bool) sent 
 	}
 	cw := &chunkWriter{conn: conn, h: sha256.New()}
 	var fileSHA string
-	if !p.remote() && !p.update { // a link and an update have no stream, and the End frame says so
+	if len(p.entries) > 0 { // a link, an update and a probe without input have no stream, and the End frame says so
 		var err error
 		if fileSHA, err = p.writeTar(cw); err != nil {
 			return sent{err: err}
