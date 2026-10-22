@@ -120,6 +120,7 @@ The problems are defined in [docs/plan.md](docs/plan.md).
 - ClamAV and YARA need the signatures from `setup`. The YARA-Forge rules are downloaded by your `setup` and are not redistributed here; they carry mixed licenses, so read the license of the rules you use.
 - After a time-out on the host, there is no partial result.
 - KVM is tested in CI on one runner type only.
+- capa does not finish on large Go binaries in its time limit, so it is left out for them; the report says so.
 - The bundled fixtures are the tested baseline. Real-world files can be missed or flagged wrongly. A repo whose only automation is a harmless install script can come out suspicious.
 - Archive formats are limited to zip, tar, gzip and bzip2. Files that are too large, encrypted or unsupported are listed as skipped in the report.
 

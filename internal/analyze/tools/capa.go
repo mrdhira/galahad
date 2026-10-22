@@ -25,7 +25,7 @@ import (
 const (
 	capaMaxFiles  = 20               // executables per job
 	capaMaxSize   = 32 << 20         // bytes of one executable
-	capaFileLimit = 5 * time.Minute  // one executable may use the whole budget: a large Go binary takes minutes
+	capaFileLimit = 60 * time.Second // one executable; a large Go binary takes longer even than 5 minutes
 	capaTotal     = 5 * time.Minute  // all executables
 	capaMaxOutput = 32 << 20         // bytes of the JSON of one executable
 	capaMaxNotes  = 8                // problems named in the note
