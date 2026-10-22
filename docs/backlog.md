@@ -127,7 +127,6 @@ From: PR 83 review.
 ### capa cannot read Mach-O and is near its limit on large binaries
 capa has no Mach-O support, so it always fails on those files. On large Go binaries it does not finish: the 9.6 MB `galahad` binary ran past both 60 s and 5 min in the v0.2.0 sweep, so capa is left out (coverage is truncated, the exit code stays 0). This is a known gap in v0.2.0. Skip Mach-O files up front, and find a capa mode or option that finishes on Go binaries, or skip them with a clear note.
 From: PR 83 review, v0.2.0 sweep.
-From: PR 83 review.
 
 ### `walkJSON` copies the key path for every member
 `walkJSON` in `internal/analyze/static/deps/deps.go` copies the whole key path for every string member: a 31 MiB lockfile nested 32 deep allocates about 3.5 GB in total. The OSV tool parses the same file a second time. Share the path or parse once.
@@ -237,7 +236,7 @@ From: PR 66 and PR 74 reviews.
 From: PR 84 review.
 
 ### `galahad doctor` agent check hardening
-In `internal/cli/doctor.go`, print the agent version through `protocol.CleanPath`, and set `cmd.WaitDelay` so `io.ReadAll` cannot outlive the 10 s limit.
+In `internal/cli/doctor.go`, set `cmd.WaitDelay` in `agentVersion` so `io.ReadAll` cannot outlive the 10 s limit.
 From: PR 84 review.
 
 ## Images and setup
