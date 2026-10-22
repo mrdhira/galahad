@@ -56,6 +56,219 @@ PDF URIs over the length limit are dropped from the IOC list. Keep the PDF-005 e
 ### Audit eager per-line `EvidenceAt` calls for quadratic cost
 autoexec, eml, ioc, office, pdf and script call `analyze.EvidenceAt` per line eagerly. Audit them for quadratic cost on large inputs and compute evidence lazily where needed.
 
+## Protocol and framing
+
+### Frame reads allocate the claimed length
+`protocol.ReadFrameOf` refuses a wrong type or an over-limit length on the header, but it then allocates the whole claimed length (up to 64 MiB for a Result) before the payload arrives. Grow the buffer as bytes come in. Callers must set read deadlines.
+From: PR 67 review.
+
+### `DecodeStrict` accepts duplicate and case-insensitive keys
+`protocol.DecodeStrict` takes duplicate keys (the last one wins) and keys that match a field in a different case, and invalid UTF-8 in a string becomes U+FFFD. `Validate` still runs on the result, but a strict decoder should refuse all three.
+From: PR 67 review.
+
+### `Connect.Host` is looser than the proxy policy
+`protocol.Connect.Validate` accepts hosts such as `..`, a leading `-` or `.`, and IP literals. The proxy re-checks with its own `validHost`, so nothing gets through today, but any other consumer of `Connect` has to do the same.
+From: PR 67 review.
+
+## Sandbox and VM
+
+### Guest tools share uid 1000 with the agent
+The agent drops to uid 1000 and the tools it starts keep that uid, so a tool's fork bomb at the full `ulimit -u 512` can starve the Go agent of threads and fail the job (exit 1, no result; a denial, not a false CLEAN). Run the tools under their own uid, for example 1001. Then the P8 fork-bomb probe can drop `bombHeadroom` in `internal/agent/probe_linux_galahadtest.go` and require the job to end done. A JVM tool (Ghidra) has to be watched against the same limit.
+From: PR 85 and PR 86 reviews.
+
+### The agent does not set the guest clock
+`docs/milestones/M2.md` says the agent sets the clock from `Job.Now` while it is root, but no code does. The kvmclock of Firecracker covers it today. When it is added, it goes before the privilege drop in `internal/agent/guest.go`.
+From: PR 84 and PR 86 reviews.
+
+### Update VM leaves the signatures filesystem unclean
+The update VM ends the signatures filesystem with `syncfs` and no `umount`, so the superblock is marked unclean. Scans mount it `ro,noload`, which works. Unmount it before the VM stops.
+From: PR 86 review.
+
+### A signatures mount failure reaches the host without a progress frame or log
+Since the privilege drop, a failure of `signaturesDir` in `internal/agent/guest.go` is returned before the progress frame and without the empty tools-log artifact. Send the progress frame first, or report the failure as an Error frame with the artifact.
+From: PR 86 review.
+
+### `CheckDropped` could stand on its own
+`agent.CheckDropped` checks uid, euid, gid, egid and that `setuid(0)` fails. It could also re-read the saved ids (`getresgid`) and `getgroups`, so the proof does not rely on the order of calls in `dropPrivileges`.
+From: PR 86 review.
+
+### Fake backend leaks a temp directory per scan
+The fake backend starts the agent with `--unsafe-host`, which makes `/tmp/galahad-input-*`. The host kills the agent before its deferred `RemoveAll` runs, so every scan leaves a directory (1724 directories, 1.4 GB, filled a dev disk). Test-only, but it fills CI and dev disks. Give the agent a temp directory that the fake backend removes, or have the agent remove the directory before it sends the Result.
+From: PR 86 review.
+
+### `fake.Kill` can block forever
+In `internal/sandbox/fake/fake.go`, if `Process.Kill` fails with anything but `os.ErrProcessDone`, `Kill` still waits on `<-m.done`. Return the error or bound the wait. `fake.Start` also overwrites a listener when the same port appears twice and leaks the first one. Test-only.
+From: PR 66 review.
+
+### Firecracker backend hardening
+- Add a comment near `Pdeathsig` in `internal/sandbox/firecracker/machine.go`: never start Firecracker from a goroutine that calls `LockOSThread` and returns, since the thread exit kills the VM.
+- `capWriter` returns an error after a failed write, which stops the copy and can block Firecracker on a full pipe. Keep returning `len(p)` and drop the rest.
+- Add unit cases for `makeScratch`, console open and `MkdirTemp` failures.
+From: PR 73 review.
+
+### P8 vsock probe accepts the same errors for every CID
+`checkVsock` in `test/acceptance/p8_test.go` accepts `ECONNRESET`, `ECONNREFUSED`, `ENODEV` and `timeout` for every address. Require reset, refusal or timeout for host CID 2, and allow `ENODEV` or `ETIMEDOUT` only for other CIDs. Today a kernel `ETIMEDOUT` and the Go-side wait both read "timeout", so a kernel timeout on host CID 2 passes too.
+From: PR 85 review.
+
+## Guest tools (ClamAV, YARA, capa, OSV)
+
+### `clamscan` exit 2 with output but no parsed hit is an error
+In `internal/analyze/tools/clamav.go`, exit 2 with stdout that parses to no finding is reported as a tool failure and the output is dropped. Treat it like exit 1: add a finding with the snippet "unparsed clamscan hit". The fallback finding path for a directory target is `filepath.Base(root)`, which reads like a file; use a clearer marker.
+From: PR 79 and PR 84 reviews.
+
+### Coverage does not say why it is truncated
+`Coverage.Truncated` is set both by a limit and by a tool that was left out, and the report uses shared wording for the two. Add a field that names the cause. The timeout message in `execute` (`internal/analyze/tools/tools.go`) also rounds to whole seconds.
+From: PR 79 review.
+
+### capa turns itself off after the first timeout
+`internal/analyze/tools/capa.go` stops at the first timeout, so one slow executable that sorts first leaves capa out for all later files. Scan the smallest files first. There is no unit case for "an earlier capa hit is kept after a later timeout"; the fake capa needs a per-file mode for it.
+From: PR 83 review.
+
+### capa cannot read Mach-O and is near its limit on large binaries
+capa has no Mach-O support, so it always fails on those files. On large Go binaries it does not finish: the 9.6 MB `galahad` binary ran past both 60 s and 5 min in the v0.2.0 sweep, so capa is left out (coverage is truncated, the exit code stays 0). This is a known gap in v0.2.0. Skip Mach-O files up front, and find a capa mode or option that finishes on Go binaries, or skip them with a clear note.
+From: PR 83 review, v0.2.0 sweep.
+
+### `walkJSON` copies the key path for every member
+`walkJSON` in `internal/analyze/static/deps/deps.go` copies the whole key path for every string member: a 31 MiB lockfile nested 32 deep allocates about 3.5 GB in total. The OSV tool parses the same file a second time. Share the path or parse once.
+From: PR 83 review.
+
+### Per-file timing test can flake under load
+The pdf `TestAnalyze` case "thousands of URIs deep in a large file" can hit its deadline under heavy load (seen at load 11). Give it more headroom, or count work instead of time.
+From: PR 69, PR 70 and PR 71 re-reviews.
+
+### YARA-Forge webshell rule fires on a TypeScript file
+`SIGNATURE_BASE_WEBSHELL_PHP_Generic_Eval` matched `fsprovider-sample/src/extension.ts` in microsoft/vscode-extension-samples in the v0.2.0 sweep and raised its score from 20 to 35 (GAL-YARA-001, medium). The rule is meant for PHP files. Scope PHP rules to PHP files, or leave this rule out of the compiled set.
+From: v0.2.0 sweep, PR 88 review.
+
+### ClamAV can take the time of the later tools
+ClamAV may now use 5 minutes (`internal/analyze/tools/clamav.go`). On a 10-minute core job with a slow clone, YARA or OSV can then run out of time; they are left out with a reason and the coverage is truncated. Give each tool a share of the remaining time instead of fixed limits.
+From: PR 88 review.
+
+### capa fallback path has no unit test
+The fallback to `/opt/capa/capa` in `internal/analyze/tools/capa.go` needs a file at that path, so no unit test covers it; the release sweep does. A guest tool hit without evidence also prints as `GAL-YARA-001  in ` in the sweep notice (`scripts/vm/sweep.sh`).
+From: PR 88 review.
+
+## Ingest (URL, Drive, Git)
+
+### Ingest gets no time share
+The host sends only `Timeouts.Job`, so the guest gives ingest the whole job time. A clone plus a submodule update (5 minutes each) can use up the 10 minute default. Send a `Timeouts.Ingest` share. Also, `ingest.Extract` checks the limit once per tar entry, so a host that stalls mid-stream can overrun the share by up to the 60 s idle limit.
+From: PR 81 review and PR 69/70/71 re-reviews.
+
+### Git timeout kills only git
+`internal/ingest/git.go` kills git on timeout and sets `WaitDelay`, but does not kill the helper processes git started. Set `Setpgid` and kill the process group, as `internal/analyze/tools/group_unix.go` does.
+From: PR 81 review.
+
+### Git error codes come from stderr text
+`ErrTooLarge` and `ErrNotAllowed` are chosen by matching git's stderr, so a hostile server can pick them with `remote:` lines. It fails safe (the job still fails), but the server chooses the message.
+From: PR 81 review.
+
+### Bare `filename=` with raw UTF-8 falls back to the URL name
+A Content-Disposition header with an unquoted raw UTF-8 `filename=` (for example one with an RLO character) fails `mime.ParseMediaType`, so `rawName` in `internal/ingest/url.go` uses the URL path. Browsers keep the header name. Add a fallback that reads a bare `filename=` value. Test cases are also missing for a raw name taken from the URL path with no header, and for the Sheets and Slides message.
+From: PR 82 review.
+
+### `CleanName` keeps Windows-forbidden characters
+`ingest.CleanName` keeps `: * ? " < > |`. Only the fake backend runs on Windows, so this does not matter in the VM, but a fake-backend download on Windows can fail to create the file.
+From: PR 81 review.
+
+### Label the link target hash as reported by the sandbox
+For a link, `Target.SHA256` comes from the guest, not from the host. Say "reported by the sandbox" next to it in the reports (`internal/report/markdown.go` and the terminal and HTML output).
+From: PR 80 review.
+
+### Refuse unusable link hosts before booting
+`galahad scan` should exit 2 up front for a link host that the proxy policy refuses (IPv6, `_`, trailing dot) and for a port other than 80 or 443, instead of failing in the VM. For a non-ASCII host, the message should tell the user to use punycode.
+From: PR 80 review.
+
+## Proxy and network
+
+### Count the requests that are not listed
+Add `Network.Unlisted`, the number of blocked decisions that did not fit in the event list plus the over-cap and bad-frame closes, and render it as "N more requests not listed".
+From: PR 75 review.
+
+### Relay stops on a temporary `Accept` error
+In `internal/agent/relay.go`, `Serve` returns on any `Accept` error that is not a shutdown, so one `EMFILE` ends the relay for the whole job. Retry temporary errors with a backoff.
+From: PR 75 review.
+
+### Well-known names are refused as "host not allowed"
+`localhost`, `metadata.google.internal` and `169.254.169.254.` are refused by `vet` in `internal/proxy/proxy.go` as "host not allowed" or "bad host name", never as GAL-NET-001. Block the well-known names before the policy check so they are reported as blocked.
+From: PR 75 review.
+
+### Network section for `--no-network`
+With `--no-network` the Network section says "None." Say "network disabled" instead (`internal/report/markdown.go` and the other renderers).
+From: PR 75 review.
+
+### Update jobs set `blocked` from infrastructure hosts too
+For an update or probe job, `runner.finish` in `internal/job/run.go` sets `job.Blocked` from every blocked proxy event, including the fixed infrastructure host that scan jobs exempt through `countsAsBlocked`. Nothing reads the field for those jobs yet. Use `countsAsBlocked` there too before something does.
+From: PR 85 review.
+
+## Host job, report and CLI
+
+### `newPlan` ignores the context
+`newPlan` in `internal/job/input.go` walks the target without a context, so Ctrl-C does nothing during the host walk. The walk is bounded by 200000 entries but slow on a network file system. The pre-boot size estimate also counts one header block per entry and ignores PAX and GNU long-name blocks, so an input near the cap with long names fails after boot (still exit 1).
+From: PR 72 review.
+
+### Result target name is not bound to the name the host sent
+The host checks `Result.Target.Kind` and the sha256, but not that `Result.Target.Name` is the name it sent. Compare them in `internal/job/run.go`.
+From: PR 72 review.
+
+### `report.Write` can exceed the size `galahad report` reads
+`report.Write` indents the JSON and escapes HTML, so a Result near the 64 MiB frame cap can grow past the 64 MiB read cap in `internal/cli/report.go`. Write it compact, or derive the read cap from the worst-case growth.
+From: PR 74 review.
+
+### `job.Load` trusts the fields of `job.json`
+`job.Load` keeps `Target.Input` and `Error` from `job.json` up to the 1 MiB file cap, so 10 000 tampered jobs make about 10 GiB for `galahad jobs`. Cap the fields in `Load` and check `Verdict` against the allowed values.
+From: PR 74 review.
+
+### `galahad report` accepts an empty verdict
+`protocol.Result.Validate` accepts an empty verdict, so `galahad report` prints "Verdict: " and exits 0. Refuse it, or score the Result again and refuse a mismatch.
+From: PR 74 review.
+
+### `scan` does not take flags after the target
+`runScan` uses plain `fs.Parse`, so `galahad scan <path> --timeout 5m` is a usage error, while `jobs` and `report` accept flags after arguments. Make the three behave the same.
+From: PR 74 review.
+
+### Job store details
+- `job.ReadFile` reports a failing `f.Stat()` as "not a regular file". Wrap the `Stat` error separately.
+- `job.Save` writes a fixed `job.json.tmp`, and a stale file from a crash keeps its wider mode through `Save`. Remove the old file first, or use `os.CreateTemp`.
+From: PR 66 and PR 74 reviews.
+
+### Fixed temp name for the signatures stamp
+`writeStamp` in `internal/job/update.go` writes `<stamp>.tmp` with `os.WriteFile`, which follows a symlink and collides with a concurrent `galahad setup`. Use `os.CreateTemp` in the same directory.
+From: PR 84 review.
+
+### `galahad doctor` agent check hardening
+In `internal/cli/doctor.go`, set `cmd.WaitDelay` in `agentVersion` so `io.ReadAll` cannot outlive the 10 s limit.
+From: PR 84 review.
+
+## Images and setup
+
+### Pin the Firecracker binary hash
+`internal/images/pins.json` pins the sha256 of the Firecracker archive only. `setup` and `doctor` trust `firecracker --version` for the installed binary. Pin the sha256 of the extracted binary and check it in `images.VerifyFirecracker`.
+From: PR 78 review.
+
+### `VerifyAsset` hangs on a FIFO
+`images.VerifyAsset` opens the file before `Stat`, so a FIFO at an image path hangs `setup` and `doctor`. Use `Lstat` first, or open with `O_NONBLOCK`.
+From: PR 78 review.
+
+### Setup state directory permissions and leftovers
+- `setup` creates `home`, `bin` and `images` with `MkdirAll(0o700)`, which does not tighten existing directories, and `doctor` checks only `home`.
+- `.part` files left by a SIGKILL are never cleaned; with `--image re` they can reach about 2.3 GiB.
+- `DownloadTimeout` is 30 minutes for the whole download, which needs at least 3.1 Mbit/s for the 696 MB `re.ext4.gz`. Use a stall timeout, or scale the limit by the size.
+From: PR 78 review.
+
+### Image build details
+- The kernel build step in `.github/workflows/image.yml` does not need `--privileged`.
+- `mmdebstrap` in `images/linux/build.sh` could use `--skip=essential/unlink`, so the deb cache keeps the essential packages (faster, and fewer snapshot rate limits).
+- GPL source selection in `gpl_sources` ignores `Built-Using` and `Static-Built-Using` (for example the Rust crates of ClamAV).
+- `gpl_sources` downloads every core source package again for the re image, with no cache. Watch the 120 minute job limit.
+- `fetch` caches by the URL basename, so after a capa version bump the `image-cache-` restore key can bring back an old `LICENSE.txt` that fails the pin check on every run. Name cache files by version or hash.
+- `re.ext4` is exactly at the 1536 MiB cap, and the 64 MiB rounding in `image_mib` hides the headroom. Prune the non-linux Ghidra `os/` directories or the JDK jmods.
+- The capa PyInstaller bundle ships no notices for its MIT and BSD Python dependencies.
+From: PR 68 and PR 71 reviews.
+
+### Firecracker 2.0 drops legacy boot
+Firecracker 2.0 drops the legacy boot path, which needs `ACPI=y` and `PCI=y`. `images/linux/kernel/build.sh` forbids PCI today and the kernel config sets neither. Plan the kernel change before the pin moves to 2.0. Consider `RANDOM_TRUST_CPU` for early `getrandom` too.
+From: PR 68 review.
+
 ## CI and tests
 
 ### Harden the Windows test run and the exec exemption
@@ -63,3 +276,32 @@ autoexec, eml, ioc, office, pdf and script call `analyze.EvidenceAt` per line ea
 - Require a loadable segment for the exec exemption, and never exempt `activate*` scripts.
 - Wrap the CI test log in `::stop-commands::`.
 From: PR 41 review.
+
+### Tagged tests run on Linux only
+The `galahadtest` unit tests run only in the Linux gate step. The macOS and Windows CI jobs run untagged, and `gosec` runs untagged, so it never scans `internal/sandbox/fake/fake.go` or the other test-build files. Run `gosec` with `-tags galahadtest` as well.
+From: PR 66 review.
+
+### Missing job and store test cases
+- `TestRun` in `internal/job/run_test.go` has no case for a target that is a symlink, the filesystem root, the entry cap, "changed while it was read", a write failure followed by grace expiry, or an artifact I/O error.
+- No test pins the `O_NONBLOCK` open in `job.copyFile`. Add a case that swaps a file for a FIFO without cancelling and expects "changed while it was read" (about 5 s, the write grace).
+- In `internal/job/store_test.go` the oversize case comes before the decode cases, and the `Create` branches (ID retry, `Save` failure, no free ID) are not covered.
+From: PR 66 and PR 72 reviews.
+
+### Proxy and vsock test cleanups
+- `TestServeBadConnect` in `internal/proxy/proxy_test.go` sets `wantMaySeeReset`, which is probably unnecessary (the oversize Result sends only the 5-byte header). Drop it so the case requires the reply.
+- `TestDial/loopback_listener` skips without vsock loopback, so the `os.File` deadline path is untested until a VM test covers it. The host `CloseWrite` drain on the real vsock path is not tested either.
+- `TestRunNetwork` in `internal/job/network_test.go` has the `NoNetwork` case after the `finish()` rejection cases. In code order it comes first.
+From: PR 69, PR 70 and PR 75 reviews.
+
+### Test order nits in setup, update and ingest tests
+- `TestInstallAssetAfterAFailure` is not table-driven, and `TestInstallAsset` has the not-gzip case before the bomb case (`internal/images/download_test.go`).
+- The first case of the acceptance `setup_test.go` is a failure case.
+- `internal/agent/update_test.go` has the no-proxy and no-drive cases before the freshclam cases.
+- `TestRawName` and `TestGuestRemote` are out of code order.
+From: PR 78, PR 82 and PR 84 reviews.
+
+### `vm.yml` and `vmtest.sh` details
+- The comment on `concurrency` in `.github/workflows/vm.yml` says a push to main is not cancelled by the next one. GitHub keeps only one pending run per group, so in a burst of merges a middle commit can have no VM run (the release fails closed; dispatch `vm.yml` for the tag). Say so in the comment.
+- `scripts/vm/vmtest.sh` prints the `--- PASS/FAIL` lines without `tr -cd '[:print:]\n'`. Add it so a `\r` in a test name cannot split a line into a workflow command.
+- The path filters in `vm.yml` miss `test/acceptance/{scan_test,link_test,git_test,main_test}.go` and the `Makefile`.
+From: PR 87 review.
