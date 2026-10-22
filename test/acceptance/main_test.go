@@ -55,6 +55,11 @@ func testMain(m *testing.M) int {
 				" -X github.com/mrdhira/galahad/internal/"+b.module+".commit="+stampedCommit,
 			"-o", b.out, b.pkg)
 		build.Dir = root
+		// The agent drops to uid 1000 in the VM, which needs a static binary (no cgo), as make build and
+		// the release build it.
+		if b.module == "agent" {
+			build.Env = append(os.Environ(), "CGO_ENABLED=0")
+		}
 		if out, err := build.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "build %s failed: %v\n%s", b.pkg, err, out)
 			return 1
