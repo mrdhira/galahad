@@ -21,8 +21,30 @@ jobs:
       - run: make tools
       - run: make gate
 
+  # Nothing is released unless the vm workflow (real Firecracker VMs: the corpus, the demo and the P8 probes) passed
+  # on the tagged commit. The job reads the list of workflow runs through the API, so its token has the single
+  # scope "actions: read" and nothing else; it does not even check out the code. vm.yml runs for pull requests and
+  # for pushes to main on the paths that matter, so a commit that touched none of them (a change to the docs, for
+  # example) has no run: start one for it, wait for it, and run this workflow again.
+  vm:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Require a green vm run on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          green=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow vm.yml --commit "$GITHUB_SHA" --status success --limit 1 --json url --jq '.[0].url // empty')
+          if [ -z "$green" ]; then
+            echo "::error::no green vm run for the tagged commit ${GITHUB_SHA::12}. Run: gh workflow run vm.yml --ref ${GITHUB_REF_NAME}, wait until it is green, then re-run this workflow."
+            exit 1
+          fi
+          echo "vm passed on ${GITHUB_SHA::12}: $green"
+
   release:
-    needs: gate
+    needs: [gate, vm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -75,13 +97,21 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
 
+      # The guest images are a release of their own (image.yml). The notes link the one this version pins, and the
+      # release is not created when that one does not exist, because galahad setup would find nothing to download.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          images_tag=$(jq -r .tag internal/images/pins.json)
+          if ! gh release view "$images_tag" --repo "$GITHUB_REPOSITORY" >/dev/null; then
+            echo "::error::the release $images_tag, which internal/images/pins.json pins, does not exist; push the tag $images_tag first"
+            exit 1
+          fi
+          notes="Guest images for this version: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${images_tag}. galahad setup downloads them and checks them against the pins in this binary."
           flags=""
           case "$GITHUB_REF_NAME" in
             *-*|v0.*) flags="--prerelease" ;;
           esac
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip dist/checksums.txt \
-            --title "$GITHUB_REF_NAME" --generate-notes $flags
+            --title "$GITHUB_REF_NAME" --notes "$notes" --generate-notes $flags

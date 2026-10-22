@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Verifies the pinned vmlinux.gz and core.ext4.gz in a directory against pins.json, unpacks them
-# into $GALAHAD_HOME/images/<version>, and checks the unpacked files too. Nothing is installed
-# when a hash differs. Used by .github/workflows/vm.yml.
-#   GALAHAD_HOME=DIR scripts/vm/images.sh GZ_DIR
+# Verifies the pinned vmlinux.gz and core.ext4.gz (and re.ext4.gz, when IMAGE_ASSETS names it) in a directory
+# against pins.json, unpacks them into $GALAHAD_HOME/images/<version>, and checks the unpacked files too.
+# Nothing is installed when a hash differs. Used by .github/workflows/vm.yml and sweep.yml.
+#   GALAHAD_HOME=DIR [IMAGE_ASSETS="vmlinux.gz core.ext4.gz re.ext4.gz"] scripts/vm/images.sh GZ_DIR
 set -euo pipefail
 
 : "${GALAHAD_HOME:?GALAHAD_HOME is not set}"
@@ -17,7 +17,7 @@ version=$(jq -r '.version' "$pins")
 dest=$GALAHAD_HOME/images/$version
 mkdir -p "$dest"
 
-for name in vmlinux.gz core.ext4.gz; do
+for name in ${IMAGE_ASSETS:-vmlinux.gz core.ext4.gz}; do
 	field() { jq -r --arg n "$name" ".assets[] | select(.name == \$n) | .$1" "$pins"; }
 	file=$(field file)
 	[ -n "$file" ] || fail "pins.json has no asset $name"

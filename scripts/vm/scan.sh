@@ -2,9 +2,10 @@
 # Runs "galahad scan" on a fixture in a real VM and checks the exit code, that no firecracker process
 # is left, and that the job directory holds no transient files. Used by .github/workflows/vm.yml.
 # Failures print ::error:: lines, which GitHub shows as annotations (at most 10 per step).
-#   GALAHAD_HOME=DIR [WANT_ANALYZERS="clamav yara"] [WANT_RULES="GAL-SIG-001 GAL-AV-001"] scripts/vm/scan.sh FIXTURE WANT_EXIT_CODE
+#   GALAHAD_HOME=DIR [WANT_ANALYZERS="clamav yara"] [WANT_RULES="GAL-SIG-001 GAL-AV-001"] [MAX_SECONDS=120] scripts/vm/scan.sh FIXTURE WANT_EXIT_CODE
 # WANT_ANALYZERS names the analyzers that the report must list as covered, which shows that the tools
-# found their signatures. WANT_RULES names the rules that must be among the findings.
+# found their signatures. WANT_RULES names the rules that must be among the findings. MAX_SECONDS is the
+# most the whole scan may take, from the start of galahad to its exit.
 set -euo pipefail
 
 : "${GALAHAD_HOME:?GALAHAD_HOME is not set}"
@@ -46,10 +47,13 @@ fail() {
 
 rm -rf "$jobs"
 code=0
+start=$SECONDS
 "$galahad" scan "$fixture" >"$out/stdout" 2>"$out/stderr" || code=$?
-echo "scan $fixture: exit $code"
+elapsed=$((SECONDS - start))
+echo "scan $fixture: exit $code in ${elapsed}s"
 
 [ "$code" = "$want" ] || fail "scan $fixture exited $code, want $want"
+[ "$elapsed" -le "${MAX_SECONDS:-$elapsed}" ] || fail "scan $fixture took ${elapsed}s, the most is ${MAX_SECONDS}s"
 
 if pgrep -x firecracker >/dev/null; then
 	fail "a firecracker process is left after scan $fixture"

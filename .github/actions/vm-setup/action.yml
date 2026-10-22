@@ -1,0 +1,169 @@
+name: vm-setup
+description: >
+  Makes a KVM runner ready to scan in real Firecracker VMs: KVM access, galahad and galahad-agent in bin/, the
+  pinned Firecracker, the pinned kernel and images, and the ClamAV and YARA signatures. It sets GALAHAD_HOME. The
+  repository must be checked out and Go installed first. Used by vm.yml and sweep.yml.
+
+inputs:
+  re:
+    description: 'Also install the re image, which scan --image re needs: "true" or "false".'
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Check the scripts
+      shell: bash
+      run: shellcheck -x scripts/vm/*.sh
+
+    # Private, as galahad setup makes it: doctor refuses a state directory others can read.
+    - name: Set up the state directory
+      shell: bash
+      run: |
+        install -d -m 0700 "$RUNNER_TEMP/galahad"
+        echo "GALAHAD_HOME=$RUNNER_TEMP/galahad" >> "$GITHUB_ENV"
+
+    # Hosted runners have /dev/kvm, but only root can use it until this udev rule is in place.
+    - name: Set up KVM
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        # The trigger is asynchronous: wait for udev, then up to 10 s more for the new mode.
+        sudo udevadm settle --timeout=10 || echo "::warning::udevadm settle timed out; polling /dev/kvm"
+        for _ in $(seq 1 20); do
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then break; fi
+          sleep 0.5
+        done
+        if ! [ -r /dev/kvm ] || ! [ -w /dev/kvm ]; then
+          echo "::error::/dev/kvm is not readable and writable on this runner: $(stat -c '%A %U:%G' /dev/kvm 2>&1 | tr -cd '[:print:]')"
+          exit 1
+        fi
+
+    - name: Build galahad and galahad-agent
+      shell: bash
+      run: |
+        set -o pipefail
+        make build 2>&1 | tee build.log && exit 0
+        tail -n 8 build.log | sed 's/^/::error::/'
+        exit 1
+
+    # The pin checks the archive before anything of it is unpacked.
+    - name: Install the pinned Firecracker
+      shell: bash
+      run: scripts/vm/firecracker.sh
+
+    # The images are published by the images-* tag (image.yml). Until that release exists, they are
+    # built the way image.yml builds them: the same container, scripts and cache. The re image is only
+    # fetched or built when the caller asks for it. Either way the files are checked against pins.json,
+    # so a build that differs from the pins fails here, as it does in image.yml.
+    - name: Download the pinned images
+      id: release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RE: ${{ inputs.re }}
+      run: |
+        tag=$(jq -r .tag internal/images/pins.json)
+        patterns=(--pattern vmlinux.gz --pattern core.ext4.gz)
+        assets="vmlinux.gz core.ext4.gz"
+        if [ "$RE" = true ]; then
+          patterns+=(--pattern re.ext4.gz)
+          assets="$assets re.ext4.gz"
+        fi
+        echo "assets=$assets" >> "$GITHUB_OUTPUT"
+        mkdir -p dl
+        if gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir dl "${patterns[@]}"; then
+          echo "dir=dl" >> "$GITHUB_OUTPUT"
+        else
+          echo "No release $tag yet; the images are built next."
+          echo "dir=out" >> "$GITHUB_OUTPUT"
+        fi
+
+    - id: cache
+      if: steps.release.outputs.dir == 'out'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .cache
+        key: image-cache-${{ hashFiles('images/linux/common.sh', 'images/linux/build.sh', 'images/linux/packages-core.txt', 'images/linux/packages-re.txt', 'images/linux/kernel/build.sh') }}
+        restore-keys: image-cache-
+
+    - name: Build the core image
+      if: steps.release.outputs.dir == 'out'
+      shell: bash
+      run: |
+        # The build container is the one image.yml pins.
+        build_image=$(sed -n 's/^  BUILD_IMAGE: //p' .github/workflows/image.yml)
+        set -o pipefail
+        docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+          "$build_image" bash images/linux/build.sh core 2>&1 | tee core.log && exit 0
+        { grep -E 'build.sh:|rror|curl: |No such|not found' core.log | tail -n 6 || true; tail -n 4 core.log; } | sed 's/^/::error::/'
+        exit 1
+
+    # The re image adds Java, capa and Ghidra. image.yml builds it in about four minutes with a warm cache.
+    - name: Build the re image
+      if: steps.release.outputs.dir == 'out' && inputs.re == 'true'
+      shell: bash
+      run: |
+        build_image=$(sed -n 's/^  BUILD_IMAGE: //p' .github/workflows/image.yml)
+        set -o pipefail
+        docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+          "$build_image" bash images/linux/build.sh re 2>&1 | tee re.log && exit 0
+        { grep -E 'build.sh:|rror|curl: |No such|not found' re.log | tail -n 6 || true; tail -n 4 re.log; } | sed 's/^/::error::/'
+        exit 1
+
+    - name: Build the kernel
+      if: steps.release.outputs.dir == 'out'
+      shell: bash
+      run: |
+        build_image=$(sed -n 's/^  BUILD_IMAGE: //p' .github/workflows/image.yml)
+        set -o pipefail
+        docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
+          "$build_image" bash images/linux/kernel/build.sh 2>&1 | tee kernel.log && exit 0
+        { grep -E 'build.sh:|rror|curl: |No such|not found' kernel.log | tail -n 6 || true; tail -n 4 kernel.log; } | sed 's/^/::error::/'
+        exit 1
+
+    - name: Install the images
+      shell: bash
+      env:
+        IMAGE_DIR: ${{ steps.release.outputs.dir }}
+        IMAGE_ASSETS: ${{ steps.release.outputs.assets }}
+      run: |
+        sudo chown -R "$(id -u):$(id -g)" "$IMAGE_DIR"
+        scripts/vm/images.sh "$IMAGE_DIR"
+
+    # The update VM downloads the ClamAV databases and the YARA-Forge core rules onto signatures.img.
+    # The files are cached for a week (the ISO week is the key), so most runs skip the download. The
+    # checks below read the files either way.
+    - name: Name the week
+      id: week
+      shell: bash
+      run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+    - id: sigcache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ runner.temp }}/galahad/signatures.img
+          ${{ runner.temp }}/galahad/signatures.stamp
+        key: signatures-${{ steps.week.outputs.week }}
+
+    - name: Fill the signatures through the update VM
+      if: steps.sigcache.outputs.cache-hit != 'true'
+      shell: bash
+      run: scripts/vm/signatures.sh
+
+    # Saved right away, so a failure of a later step does not cost the download.
+    - name: Save the signatures
+      if: steps.sigcache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ runner.temp }}/galahad/signatures.img
+          ${{ runner.temp }}/galahad/signatures.stamp
+        key: signatures-${{ steps.week.outputs.week }}
+
+    - name: Doctor shows the signatures as PASS
+      shell: bash
+      run: scripts/vm/doctor.sh

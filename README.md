@@ -4,62 +4,93 @@ Galahad inspects untrusted files, links and Git repositories inside an isolated 
 
 It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archive which runs code when you open it in VS Code, run `npm install`, or start the app.
 
-> Status: v0.1 is a preview. It is static analysis only, and you must run it inside a VM you already have.
+> Status: v0.2.0. `galahad scan` runs the analysis in its own Firecracker microVM. It needs a Linux amd64 host with KVM. The analysis is static: nothing is run or detonated.
 
 New to the security terms (IOC, defang, sandbox, zip-slip, ...)? See the [glossary](docs/glossary.md).
 
-## Quick start (preview)
+## Requirements
 
-v0.1 ships `galahad-agent`, a static analyzer. It reads a folder, a repo checkout, an archive, a PDF, an Office file, an email or a binary and reports a verdict, risk score and evidence. It never runs or detonates anything, and a `clean` verdict is not a guarantee that the item is safe.
+- A Linux amd64 computer with KVM: `/dev/kvm` must exist and your user must be able to open it. Usually that means being in the `kvm` group (`sudo usermod -aG kvm $USER`, then log out and in). In a virtual machine, turn on nested virtualization.
+- About 5 GiB of free disk space for the images and the scratch disk of a scan.
+- `galahad` and `galahad-agent` side by side in the same directory (the release archives do this). The agent runs inside the VM.
+- Network access for `galahad setup`, and for scans of links, Drive files and Git repositories.
 
-The analyzer parses untrusted bytes, so run it inside a VM, not on your real machine:
+macOS and Windows hosts are not supported yet. There the `galahad scan` command says so.
 
-- macOS: a UTM or Parallels VM.
-- Windows: a Hyper-V VM (on Windows Home, which has no Hyper-V, use VirtualBox or VMware Workstation).
-- Any OS: a cloud VM or a throwaway Linux VM.
+## Quick start
 
-Do not use WSL. All WSL2 distributions and Docker Desktop share one kernel, and WSL can reach your Windows files and start Windows programs, so a bug in the analyzer could reach your Windows account. Turning off automount and interop in `/etc/wsl.conf` does not make it a real boundary. Galahad refuses to run in WSL; use a Hyper-V VM instead. `--unsafe-host` is the only way to run there, at your own risk.
-
-A VM only isolates the item if you keep it that way:
-
-- Turn off shared folders, drive redirection and clipboard sharing. Parallels Tools can share your Mac home folder, a Hyper-V enhanced session redirects your drives, and UTM can share folders (VirtFS) and the clipboard (SPICE).
-- Keep no credentials or SSH keys in the VM.
-- Use a snapshot or a throwaway VM, and revert or delete it after each check.
-
-Steps:
-
-1. In the VM, download the archive for the VM's OS and CPU from [GitHub Releases](https://github.com/mrdhira/galahad/releases) and verify it (see Install below).
-2. Unpack it. On Linux or macOS: `tar -xzf galahad_<version>_<os>_<arch>.tar.gz`. On Windows (PowerShell): `Expand-Archive galahad_<version>_windows_<arch>.zip .`
-3. Get the suspicious item inside the VM: download it there, or `git clone` it there. Do not pass it in through a shared folder.
-4. Run the binary by its path. On Linux or macOS:
+1. Download the archive for Linux amd64 from [GitHub Releases](https://github.com/mrdhira/galahad/releases) and verify it (see Install below). Unpack it.
+2. Check the host. Before the setup this prints FAIL lines that say what is missing and how to fix it:
 
    ```sh
-   ./galahad_<version>_<os>_<arch>/galahad-agent analyze -o out <path>
+   ./galahad doctor
    ```
 
-   On Windows:
+3. Download and verify the pinned Firecracker, the guest kernel and the core image, then fill the ClamAV and YARA signatures through a short update VM. A file that already verifies is not downloaded again, and the signatures are always fetched again:
 
-   ```powershell
-   .\galahad_<version>_windows_<arch>\galahad-agent.exe analyze -o out <path>
+   ```sh
+   ./galahad setup
+   ./galahad doctor     # every line is PASS now
    ```
 
-5. Open `out/report.html` or read `out/summary.md`. `out/report.json` holds the same result for tools. Links in the HTML and Markdown reports are defanged.
+   The images come from the `images-*` release of this repository. `setup --image re` also installs the image for `scan --image re`, which adds capa and Ghidra (Ghidra is installed but not run yet). `setup --skip-signatures` leaves the signatures out; ClamAV and YARA are then left out of scans, and the report says so.
 
-The exit code is the verdict:
+4. Scan something:
 
-| Code | Meaning |
+   ```sh
+   ./galahad scan ./take-home            # a folder
+   ./galahad scan ./invoice.pdf          # a file: PDF, Office file, archive, script, binary, ...
+   ./galahad scan ./message.eml          # an email: attachments are scanned as child items
+   ./galahad scan https://github.com/owner/repo          # a Git repository
+   ./galahad scan https://example.com/invoice.pdf        # a file at a link
+   ./galahad scan 'https://drive.google.com/file/d/<id>/view'   # a public Google Drive file
+   ```
+
+   The scan sends the input into a VM that has no network card, runs the analysis there and prints the verdict, the score and the evidence. The exit code is the verdict:
+
+   | Code | Meaning |
+   |---|---|
+   | 0 | clean |
+   | 10 | suspicious |
+   | 20 | malicious |
+   | 1 | error |
+   | 2 | usage error |
+
+   A `clean` verdict is not a guarantee that the item is safe.
+
+5. Read the reports. Each scan is a job below `~/.galahad/jobs/<id>/`: `report.html` and `summary.md` for people, `report.json` for tools, `proxy.log` with every connection the VM asked for, and `artifacts/`. Links in the HTML and Markdown reports are defanged.
+
+### What a link or a repository means
+
+- `github.com`, `gitlab.com`, `bitbucket.org` and `codeberg.org` repository links are cloned (shallow, hardened, no hooks, no symlinks). Use `--git` to clone any other https link as a repository, and `--submodules` to fetch submodules too. A submodule that points at an address the proxy refuses, such as the cloud metadata address, is reported as `GAL-NET-001`.
+- A Drive file link is downloaded in the VM.
+- Any other http or https link is downloaded in the VM. A redirect to another host is refused unless you allow that host with `--allow-host <host>` (repeatable).
+- The VM reaches the network only through a proxy on the host, which allows the target host, a few fixed hosts, and the hosts you name, resolves names itself and refuses private, loopback and metadata addresses. Every request is logged and shown in the report. `--no-network` serves no proxy at all and is for local files only.
+- Links inside an `.eml` are listed in the report; they are not fetched.
+
+### Scan flags
+
+| Flag | Meaning |
 |---|---|
-| 0 | clean |
-| 10 | suspicious |
-| 20 | malicious |
-| 1 | error |
-| 2 | usage error, including a refusal to run outside a VM |
+| `--image core\|re` | guest image; `re` adds capa for executables (needs `setup --image re`) |
+| `--timeout <duration>` | time limit of the whole scan; the default is 10 minutes with `core` and 20 minutes with `re` |
+| `--cpus <n>`, `--memory <MiB>` | size of the VM; the defaults are 2 CPUs and 3072 MiB |
+| `--allow-host <host>` | let the VM reach one more host |
+| `--git`, `--submodules` | see above |
+| `--no-network` | no proxy at all |
 
-On macOS, Gatekeeper blocks a downloaded binary that is not signed. Remove the quarantine flag once you have verified the download: `xattr -d com.apple.quarantine <path-to>/galahad-agent`.
+### Past scans
 
-`galahad-agent` refuses to run when it does not detect a VM (WSL never counts as a VM). `--unsafe-host` overrides the check. It is risky: the analyzer then parses untrusted bytes on your real machine, so a bug in a parser could be exploited by the file you are checking. Use it only for the harmless fixtures in `testdata/corpus/`.
+```sh
+./galahad jobs               # list the scans: id, state, verdict, score, date, target
+./galahad report <id>        # print the report of a scan again; the exit code is its verdict
+./galahad report <id> --json # print report.json
+./galahad jobs rm <id>...    # remove scans
+```
 
-### What it detects
+The state directory is `~/.galahad`, or the directory in `GALAHAD_HOME`. It must be private to you (mode 0700).
+
+## What it detects
 
 | Problem | What Galahad looks for |
 |---|---|
@@ -68,35 +99,59 @@ On macOS, Gatekeeper blocks a downloaded binary that is not signed. Remove the q
 | P3 | Obfuscated JavaScript and Python (hidden or encoded code), secret theft and exfiltration |
 | P4 | Malicious PDFs: auto-run actions, embedded JavaScript, launch actions, URIs |
 | P5 | Office macros, remote templates and DDE; LNK files and double-extension tricks inside archives; suspicious binaries |
-| P6 | Email lures: attachments and links are scanned as child items, and the sender domain is reported |
+| P6 | Email lures: attachments are scanned as child items, links are listed, and the sender domain is reported |
 | P7 | No false alarms: benign repos and normal PDFs are meant to come out clean |
+| P8 | A hostile guest and a hostile input stay contained: the VM has no network card, a read-only root drive, no shared folders, limited processes, memory and disk, and a Result that breaks the protocol is refused and reported as an error |
+
+On top of its own checks the guest runs ClamAV and the YARA-Forge core rules (when the signatures are installed), capa (with `--image re`), and asks OSV whether a pinned npm or PyPI dependency is a known malicious package (`MAL-*` entries only). The OSV lookup needs the network; when you are offline it is left out, and the analyzers listed in the report show that.
 
 The problems are defined in [docs/plan.md](docs/plan.md).
 
-### Limitations
+## Known gaps in v0.2.0
 
-- Static analysis only. Nothing is executed, so code that hides its behavior until run is not seen.
-- Galahad does not manage a VM yet. M2 adds `galahad scan`, which runs the analysis in its own VM.
+- Linux amd64 hosts only.
+- Static analysis only. Nothing is executed, so code that hides its behavior until run is not seen. Ghidra is installed in the `re` image but not run.
+- No jailer: Firecracker runs as your user, with its own seccomp filters. A Firecracker escape would reach your account.
+- A URL that redirects to another host needs `--allow-host`.
+- Drive: public single files only. Folders and Google Docs pages are refused.
+- Git: https only, no `--ref`, no tree URLs.
+- Links in an `.eml` are listed, not fetched.
+- OSV: `MAL-*` entries only, for npm and PyPI pins.
+- ClamAV and YARA need the signatures from `setup`. The YARA-Forge rules are downloaded by your `setup` and are not redistributed here; they carry mixed licenses, so read the license of the rules you use.
+- After a time-out on the host, there is no partial result.
+- KVM is tested in CI on one runner type only.
 - The bundled fixtures are the tested baseline. Real-world files can be missed or flagged wrongly. A repo whose only automation is a harmless install script can come out suspicious.
 - Archive formats are limited to zip, tar, gzip and bzip2. Files that are too large, encrypted or unsupported are listed as skipped in the report.
 
 ## Install
 
-Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum --ignore-missing -c checksums.txt` (macOS: `shasum -a 256 --ignore-missing -c checksums.txt`) and `gh attestation verify <file> --repo mrdhira/galahad`. Do the checks before you unpack the archive. Each archive holds `galahad` and `galahad-agent`; for the preview, use `galahad-agent`.
+Download the archive for your platform from [GitHub Releases](https://github.com/mrdhira/galahad/releases), then verify it with `sha256sum --ignore-missing -c checksums.txt` (macOS: `shasum -a 256 --ignore-missing -c checksums.txt`) and `gh attestation verify <file> --repo mrdhira/galahad`. Do the checks before you unpack the archive. Each archive holds `galahad` and `galahad-agent`. Only Linux amd64 can scan. The release notes link the `images-*` release that `galahad setup` downloads the VM images from.
+
+The guest images are separate works under their own licenses (GPL-2.0 for the kernel, ClamAV and git, for example). The `images-*` release keeps their license files, package lists and source packages.
+
+## Analyzing without a VM manager
+
+`galahad-agent analyze` is the analyzer that runs inside the VM. It reads a folder, a repo checkout, an archive, a PDF, an Office file, an email or a binary and writes `report.json`, `summary.md` and `report.html`. It parses untrusted bytes, so it refuses to run unless it detects a VM (the Galahad guest or any other VM; containers do not count) and exits with code 2. `--unsafe-host` overrides the check and prints a warning. It is risky: a bug in a parser could be exploited by the file you are checking. Use it only for the harmless fixtures in `testdata/corpus/`.
+
+Do not use WSL. All WSL2 distributions and Docker Desktop share one kernel, and WSL can reach your Windows files and start Windows programs. Galahad refuses to run in WSL.
+
+If you run the analyzer by hand in a VM of your own, keep that VM isolated: turn off shared folders, drive redirection and clipboard sharing, keep no credentials or SSH keys in it, and use a throwaway VM or a snapshot.
+
+```sh
+./galahad-agent analyze -o out <path>
+```
 
 ## Development
 
 ```sh
 make tools   # install golangci-lint, gosec, govulncheck at pinned versions
-make build   # build bin/galahad
+make build   # build bin/galahad and bin/galahad-agent
 make gate    # run the full quality gate
 ```
 
-### Running on the host
-
-`galahad-agent analyze` parses untrusted input, so it refuses to run unless it detects a VM (the Galahad guest or any other VM; containers do not count). Outside a VM it prints a refusal and exits with code 2. Pass `--unsafe-host` to run on the host anyway: it prints a warning and you accept the risk. Use harmless fixtures only.
-
 Set `SKIP_VULN=1` for `make gate` only where vuln.go.dev is unreachable.
+
+The tests that need a real VM carry the `vm` build tag and run in CI on a KVM runner (`.github/workflows/vm.yml`). The release sweep of popular repositories is a separate workflow that you start by hand (`.github/workflows/sweep.yml`).
 
 ## Security
 

@@ -3,8 +3,10 @@ package acceptance_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDemo runs the M1 demo from docs/milestones/M1.md section 5, step by step, with the
@@ -104,4 +106,173 @@ func TestDemo(t *testing.T) {
 			checkHTMLPage(t, readFile(t, filepath.Join(out, "report.html")), rep.Verdict)
 		})
 	}
+}
+
+// demoBackend is a sandbox that TestDemoM2 runs on.
+type demoBackend struct {
+	name string
+	// home points the galahad binary at the sandbox and returns its state directory.
+	home func(t *testing.T) string
+}
+
+// demoBackends lists the sandboxes of the M2 demo: the fake one everywhere, and Firecracker in the vm build
+// (vm_corpus_test.go).
+var demoBackends = []demoBackend{{name: "fake", home: func(t *testing.T) string {
+	home := t.TempDir()
+	t.Setenv("GALAHAD_HOME", home)
+	t.Setenv("GALAHAD_SANDBOX", "fake")
+	return home
+}}}
+
+// demoScanLimit is how long a scan of the demo may run: the default time limit of a core scan, plus slack.
+const demoScanLimit = 11 * time.Minute
+
+// runStep runs one galahad command of the demo. A scan may need a VM, so it gets the time of a whole scan.
+func runStep(t *testing.T, args []string) (stdout, stderr string, code int) {
+	t.Helper()
+	if args[0] != "scan" {
+		return run(t, args...)
+	}
+	got := runP8(t, demoScanLimit, args[1:]...)
+	return got.stdout, got.stderr, got.code
+}
+
+// newJob returns the job directory in home that is not one of the seen job IDs.
+func newJob(t *testing.T, home string, seen []string) string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(home, "jobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !slices.Contains(seen, e.Name()) {
+			return filepath.Join(home, "jobs", e.Name())
+		}
+	}
+	t.Fatalf("no new job in %s after %v", home, seen)
+	return ""
+}
+
+// TestDemoM2 runs the M2 demo from docs/milestones/M2.md section 5 in order, on each sandbox. The repositories
+// and the PDF link are the sinkhole of startSinkhole instead of GitHub, and "{invoice}" is a local copy of the
+// P4 PDF. "{id}" is the ID of the first scan. The setup step is left out: the fake sandbox needs no images,
+// setup_test.go covers setup with its test hooks, and vm.yml installs the real images with the same checks.
+func TestDemoM2(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		args    []string
+		backend string // when set, only this sandbox runs the step
+		// expectations
+		wantCode     int
+		wantStdout   []string // each must be in stdout
+		wantEvidence []string // "RULE path:line" that must be in report.json of the job the step made
+		wantSnippet  string   // must be in the evidence of GAL-NET-001
+	}{
+		{
+			name:    "doctor passes on a host that is set up",
+			args:    []string{"doctor"},
+			backend: "firecracker", wantCode: 0, wantStdout: []string{"PASS  signatures:"},
+		},
+		{
+			name:     "the Git repository fake-interview-repo exits 20 with tasks.json:7 and setup.js:3 as evidence",
+			args:     []string{"scan", "http://git.test/interview.git"},
+			wantCode: 20, wantStdout: []string{"MALICIOUS"},
+			wantEvidence: []string{"GAL-AUTOEXEC-010 .vscode/tasks.json:7", "GAL-EXFIL-001 scripts/setup.js:3"},
+		},
+		{
+			name:     "the PDF invoice.pdf exits 10",
+			args:     []string{"scan", "{invoice}"},
+			wantCode: 10, wantStdout: []string{"SUSPICIOUS"},
+			wantEvidence: []string{"GAL-PDF-002 invoice.pdf:3"},
+		},
+		{
+			name:     "a submodule at the metadata address is denied and reported as GAL-NET-001",
+			args:     []string{"scan", "--submodules", "http://git.test/metadata.git"},
+			wantCode: 10, wantStdout: []string{"GAL-NET-001"},
+			wantSnippet: "CONNECT 169.254.169.254:443 denied",
+		},
+		{
+			name:     "jobs lists the three scans",
+			args:     []string{"jobs"},
+			wantCode: 0, wantStdout: []string{"{id}", "invoice.pdf", "git.test/metadata.git"},
+		},
+		{
+			name:     "report shows the first scan again",
+			args:     []string{"report", "{id}"},
+			wantCode: 20, wantStdout: []string{"MALICIOUS", "GAL-AUTOEXEC-001"},
+		},
+	}
+	for _, backend := range demoBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			// Given the sinkhole, a sandbox, and a PDF at the path the demo gives
+			startSinkhole(t)
+			home := backend.home(t)
+			invoice := filepath.Join(t.TempDir(), "invoice.pdf")
+			writeBytes(t, invoice, []byte(readFile(t, filepath.Join(corpus(t, "p4-pdf-openaction-uri"), "statement.pdf"))))
+			var seen []string // the job directories of the scans so far
+			for _, tt := range tests {
+				if tt.backend != "" && tt.backend != backend.name {
+					continue
+				}
+				t.Run(tt.name, func(t *testing.T) {
+					// When the step runs
+					id := ""
+					if len(seen) > 0 {
+						id = seen[0]
+					}
+					args := make([]string, len(tt.args))
+					for i, a := range tt.args {
+						a = strings.ReplaceAll(a, "{invoice}", invoice)
+						args[i] = strings.ReplaceAll(a, "{id}", id)
+					}
+					stdout, stderr, code := runStep(t, args)
+
+					// Then the exit code and the output match
+					if code != tt.wantCode {
+						t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout, stderr)
+					}
+					for _, w := range tt.wantStdout {
+						if w = strings.ReplaceAll(w, "{id}", id); !strings.Contains(stdout, w) {
+							t.Errorf("stdout lacks %q:\n%s", w, stdout)
+						}
+					}
+					if args[0] != "scan" {
+						return
+					}
+					// And the job of a scan is done, and its report has the evidence
+					dir := newJob(t, home, seen)
+					seen = append(seen, filepath.Base(dir))
+					if j := readJob(t, dir); j.State != "done" || j.ExitCode != tt.wantCode {
+						t.Errorf("job.json = %+v, want state done and exit code %d", j, tt.wantCode)
+					}
+					rep, err := readReport(filepath.Join(dir, "report.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, want := range tt.wantEvidence {
+						rule, at, _ := strings.Cut(want, " ")
+						if !hasFinding(rep, rule, at) {
+							t.Errorf("no %s at %s in %+v", rule, at, rep.Findings)
+						}
+					}
+					if tt.wantSnippet != "" && !hasRuleSnippet(rep, "GAL-NET-001", tt.wantSnippet) {
+						t.Errorf("no GAL-NET-001 evidence with %q in %+v", tt.wantSnippet, rep.Findings)
+					}
+				})
+			}
+		})
+	}
+}
+
+// hasRuleSnippet reports whether the report has a finding of rule with evidence whose snippet contains want.
+func hasRuleSnippet(rep report, rule, want string) bool {
+	for _, f := range rep.Findings {
+		for _, e := range f.Evidence {
+			if f.RuleID == rule && strings.Contains(e.Snippet, want) {
+				return true
+			}
+		}
+	}
+	return false
 }

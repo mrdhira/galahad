@@ -105,7 +105,6 @@ func gitServer(t *testing.T, backend, root string) *httptest.Server {
 // of the same files scanned as a folder. A submodule goes through the proxy too, and only https submodules can.
 func TestScanGit(t *testing.T) {
 	backend := needGit(t)
-	const metadata = "https://169.254.169.254/x.git"
 	tests := []struct {
 		name string
 		// inputs
@@ -161,18 +160,10 @@ func TestScanGit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Given repositories behind a server that the proxy hooks send every tunnel to
 			root, outside := t.TempDir(), t.TempDir()
-			interview := t.TempDir()
-			copyTree(t, corpus(t, "fake-interview-repo"), interview)
-			publish(t, interview, root, "interview.git", nil)
+			publishInterview(t, root)
 			local := t.TempDir()
 			publish(t, local, outside, "local", func() { writeText(t, filepath.Join(local, "MARKER"), "local repository\n") })
-			meta := t.TempDir()
-			publish(t, meta, root, "metadata.git", func() {
-				writeText(t, filepath.Join(meta, "README.md"), "a project with a submodule\n")
-				writeText(t, filepath.Join(meta, ".gitmodules"), "[submodule \"vendor\"]\n\tpath = vendor\n\turl = "+metadata+"\n")
-				runGit(t, meta, "add", "--ignore-removal", ".")
-				runGit(t, meta, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("ab", 20)+",vendor")
-			})
+			publishMetadata(t, root)
 			trans := t.TempDir()
 			publish(t, trans, root, "transports.git", func() {
 				writeText(t, filepath.Join(trans, "README.md"), "a project with odd submodules\n")
@@ -218,19 +209,7 @@ func TestScanGit(t *testing.T) {
 			if strings.ContainsAny(ingestLog, "\x1b\a\r") {
 				t.Errorf("ingest.log has control characters: %q", ingestLog)
 			}
-			var hosts []string
-			for _, line := range strings.Split(strings.TrimSpace(readFile(t, filepath.Join(dir, "proxy.log"))), "\n") {
-				var ev struct {
-					Host string `json:"host"`
-				}
-				if err := json.Unmarshal([]byte(line), &ev); err != nil {
-					t.Fatalf("proxy.log line %q: %v", line, err)
-				}
-				if !slices.Contains(hosts, ev.Host) {
-					hosts = append(hosts, ev.Host)
-				}
-			}
-			slices.Sort(hosts)
+			hosts := proxyHosts(t, dir)
 			if want := slices.Sorted(slices.Values(tt.wantHosts)); !slices.Equal(hosts, want) {
 				t.Errorf("hosts in proxy.log = %q, want %q", hosts, want)
 			}
