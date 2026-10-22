@@ -127,16 +127,37 @@ func transientFiles(t *testing.T, dir string) []string {
 	return left
 }
 
+// guestIdentity is who a process of the guest is, as the probe read it from /proc/<pid>/status.
+type guestIdentity struct {
+	UIDReal      string `json:"uid_real"`
+	UIDEffective string `json:"uid_effective"`
+	GIDReal      string `json:"gid_real"`
+	GIDEffective string `json:"gid_effective"`
+	CapEff       string `json:"cap_eff"`
+	NoNewPrivs   string `json:"no_new_privs"`
+}
+
+// checkUnprivileged checks that a guest process is uid and gid 1000 with no capabilities and no_new_privs.
+func checkUnprivileged(t *testing.T, who string, id guestIdentity) {
+	t.Helper()
+	want := guestIdentity{UIDReal: "1000", UIDEffective: "1000", GIDReal: "1000", GIDEffective: "1000", CapEff: "0000000000000000", NoNewPrivs: "1"}
+	if id != want {
+		t.Errorf("%s runs as %+v, want %+v", who, id, want)
+	}
+}
+
 func checkForkBomb(t *testing.T, dir string) {
 	t.Helper()
 	var obs struct {
-		Peak  int `json:"peak_processes"`
-		Limit int `json:"rlimit_nproc"`
+		Peak  int           `json:"peak_processes"`
+		Limit int           `json:"rlimit_nproc"`
+		Bomb  guestIdentity `json:"bomb"`
 	}
 	readProbe(t, dir, "fork-bomb", &obs)
 	if obs.Limit != 512 || obs.Peak > obs.Limit || obs.Peak < 100 {
 		t.Errorf("fork bomb peak = %d processes, limit = %d, want a peak from 100 up to the limit of 512", obs.Peak, obs.Limit)
 	}
+	checkUnprivileged(t, "the fork bomb", obs.Bomb)
 }
 
 func checkMemory(t *testing.T, dir string) {
@@ -148,8 +169,8 @@ func checkMemory(t *testing.T, dir string) {
 	}
 	readProbe(t, dir, "memory", &obs)
 	t.Logf("the memory hog held %d MiB and ended by %q", obs.PeakMiB, obs.EndedBy)
-	if obs.PeakMiB <= 0 || obs.PeakMiB >= obs.CapMiB {
-		t.Errorf("memory hog held %d MiB of its cap of %d MiB (ended by %q), want the guest to stop it first", obs.PeakMiB, obs.CapMiB, obs.EndedBy)
+	if obs.PeakMiB <= 0 || obs.PeakMiB >= obs.CapMiB || obs.EndedBy != "killed" {
+		t.Errorf("memory hog held %d MiB of its cap of %d MiB and ended by %q, want it killed by the guest's OOM killer first", obs.PeakMiB, obs.CapMiB, obs.EndedBy)
 	}
 }
 
@@ -169,9 +190,11 @@ func checkRootfsWrite(t *testing.T, dir string) {
 	t.Helper()
 	var obs map[string]string
 	readProbe(t, dir, "rootfs-write", &obs)
+	// The agent is not root, so a create or an open may be refused for the permissions before the file system
+	// says that it is read-only. The mount options and the flag of the drive prove the read-only part.
 	for _, key := range []string{"create /galahad-p8", "create /etc/galahad-p8", "create /usr/bin/galahad-p8", "open /etc/passwd for writing"} {
-		if obs[key] != "EROFS" {
-			t.Errorf("%s = %q, want EROFS", key, obs[key])
+		if obs[key] != "EROFS" && obs[key] != "EACCES" {
+			t.Errorf("%s = %q, want EROFS or EACCES", key, obs[key])
 		}
 	}
 	for _, key := range []string{"write /dev/vda", "remount read-write"} {
@@ -179,15 +202,23 @@ func checkRootfsWrite(t *testing.T, dir string) {
 			t.Errorf("%s = %q, want it refused", key, v)
 		}
 	}
+	if !slices.Contains(strings.Split(obs["root mount options"], ","), "ro") {
+		t.Errorf("root mount options = %q, want ro among them", obs["root mount options"])
+	}
+	if obs["/sys/block/vda/ro"] != "1" {
+		t.Errorf("/sys/block/vda/ro = %q, want 1", obs["/sys/block/vda/ro"])
+	}
 }
 
 func checkMounts(t *testing.T, dir string) {
 	t.Helper()
 	var obs struct {
-		FSTypes      []string `json:"fs_types"`
-		BlockDevices []string `json:"block_devices"`
+		FSTypes      []string      `json:"fs_types"`
+		BlockDevices []string      `json:"block_devices"`
+		Agent        guestIdentity `json:"agent"`
 	}
 	readProbe(t, dir, "mounts", &obs)
+	checkUnprivileged(t, "the agent", obs.Agent)
 	for _, fs := range []string{"9p", "virtiofs", "fuse", "nfs", "cifs"} {
 		if slices.Contains(obs.FSTypes, fs) {
 			t.Errorf("file system types = %v, want no %s", obs.FSTypes, fs)
@@ -229,14 +260,17 @@ func checkVsock(t *testing.T, dir string) {
 	}
 	for addr, got := range obs {
 		t.Logf("vsock %s: %s", addr, got)
-		if got == "connected" {
-			t.Errorf("vsock %s connected, want it refused", addr)
+		// A reset or a refusal is the host saying no; ENODEV is the guest kernel, which has no route to a CID
+		// other than the host. Any other error, such as an address family the kernel lacks, would mean that the
+		// dial never reached the vsock device.
+		if !slices.Contains([]string{"ECONNRESET", "ECONNREFUSED", "ENODEV", "timeout"}, got) {
+			t.Errorf("vsock %s = %q, want ECONNRESET, ECONNREFUSED, ENODEV or timeout", addr, got)
 		}
 	}
 }
 
-// TestP8VM is the P8 table of docs/milestones/M2.md. The probes that ask for "contained" may end in a Result
-// or in a timeout within the time limit; every probe leaves nothing behind on the host.
+// TestP8VM is the P8 table of docs/milestones/M2.md. The fork bomb and the memory hog end on their own, inside
+// the time limit, so the job is done and the checks of the guest run. Every probe leaves nothing behind on the host.
 func TestP8VM(t *testing.T) {
 	tests := []struct {
 		name string
@@ -254,14 +288,14 @@ func TestP8VM(t *testing.T) {
 		wantProbe   func(t *testing.T, dir string)
 	}{
 		{
-			name:  "fork bomb: the process limit holds and the host gets a Result or a timeout",
+			name:  "fork bomb: the process limit holds and the host gets the Result",
 			probe: "fork-bomb", timeout: 2 * time.Minute,
-			wantCodes: []int{0, 1}, wantStates: []string{"done", "timeout"}, wantProbe: checkForkBomb,
+			wantCodes: []int{0}, wantStates: []string{"done"}, wantProbe: checkForkBomb,
 		},
 		{
-			name:  "memory exhaustion: the guest stops the hog and the host gets a Result or a timeout",
+			name:  "memory exhaustion: the guest kills the hog and the host gets the Result",
 			probe: "memory", timeout: 2 * time.Minute,
-			wantCodes: []int{0, 1}, wantStates: []string{"done", "timeout"}, wantProbe: checkMemory,
+			wantCodes: []int{0}, wantStates: []string{"done"}, wantProbe: checkMemory,
 		},
 		{
 			name:  "fill the disk: ENOSPC at the scratch drive, and the file is gone after the job",
@@ -351,9 +385,7 @@ func TestP8VM(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, "report.json")); err == nil {
 				t.Error("report.json exists, want none")
 			}
-			if got.rss > maxHostRSS {
-				t.Errorf("host peak RSS = %d bytes, want under %d", got.rss, int64(maxHostRSS))
-			}
+			checkHostRSS(t, got)
 			if firecrackerRunning() {
 				t.Error("a firecracker process is left")
 			}

@@ -28,7 +28,7 @@ const (
 type p8Run struct {
 	stdout, stderr string
 	code           int
-	rss            int64 // peak resident set of the galahad process in bytes; -1 when the system does not say
+	rss            int64 // peak resident set of the galahad process alone in bytes, as sampled; -1 outside Linux
 	elapsed        time.Duration
 }
 
@@ -41,11 +41,16 @@ func runP8(t *testing.T, limit time.Duration, args ...string) p8Run {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	start := time.Now()
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("scan %v: %v", args, err)
+	}
+	stopRSS := watchRSS(cmd.Process.Pid)
+	err := cmd.Wait()
+	rss := stopRSS()
 	if ctx.Err() != nil {
 		t.Fatalf("scan %v: still running after %s\nstderr: %s", args, limit, stderr.String())
 	}
-	run := p8Run{stdout: stdout.String(), stderr: stderr.String(), elapsed: time.Since(start), rss: maxRSS(cmd.ProcessState)}
+	run := p8Run{stdout: stdout.String(), stderr: stderr.String(), elapsed: time.Since(start), rss: rss}
 	if err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
@@ -54,6 +59,15 @@ func runP8(t *testing.T, limit time.Duration, args ...string) p8Run {
 		run.code = ee.ExitCode()
 	}
 	return run
+}
+
+// checkHostRSS checks that the galahad process stayed under maxHostRSS. Where the peak is not measured (-1), it
+// checks nothing; where it is measured, a peak of 0 means that no sample was read, which would pass for nothing.
+func checkHostRSS(t *testing.T, got p8Run) {
+	t.Helper()
+	if got.rss == 0 || got.rss > maxHostRSS {
+		t.Errorf("host peak RSS = %d bytes, want it measured and under %d", got.rss, int64(maxHostRSS))
+	}
 }
 
 // readProbe decodes artifacts/probe.json of the job in dir, checks that it is the file of the probe name, and
@@ -233,9 +247,7 @@ func TestP8Fake(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, "report.json")); err == nil {
 				t.Error("report.json exists, want none")
 			}
-			if got.rss > maxHostRSS {
-				t.Errorf("host peak RSS = %d bytes, want under %d", got.rss, int64(maxHostRSS))
-			}
+			checkHostRSS(t, got)
 			if tt.wantProbe != nil {
 				tt.wantProbe(t, dir)
 			} else if _, err := os.Stat(filepath.Join(dir, "artifacts", "probe.json")); err == nil {

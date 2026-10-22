@@ -19,33 +19,33 @@ import (
 
 // Limits of the probes that start processes.
 const (
-	bombUID        = 1000
 	bombTime       = 10 * time.Second
 	bombSample     = 200 * time.Millisecond
 	bombIterations = 3000 // the shell starts at most this many sleeps, even if the system allowed it
+	bombHeadroom   = 32   // processes of the user that the bomb leaves to the agent, which has threads of its own
 	hogEnv         = "GALAHAD_PROBE_CHILD"
 	hogStep        = 64 << 20 // bytes allocated and touched at a time
 	hogMax         = 4 << 30  // the guest has less memory than this, so the kernel ends the hog first
 	hogTime        = 45 * time.Second
 )
 
-// bombScript starts sleeps in the background as fast as the shell can. Each sleep ends after 30 s on
-// its own, and the probe kills the whole process group after bombTime.
-const bombScript = `i=0; while [ "$i" -lt 3000 ]; do /bin/busybox sleep 30 & i=$((i+1)); done; wait`
+// bombScript starts sleeps in the background as fast as the shell can, at most bombIterations of them.
+// The arguments are the process limit of the shell and the number of iterations. Each sleep ends after
+// 30 s on its own, and the probe kills the whole process group after bombTime.
+const bombScript = `ulimit -u %d; i=0; while [ "$i" -lt %d ]; do /bin/busybox sleep 30 & i=$((i+1)); done; wait`
 
-// forkBomb runs a shell as an unprivileged user that starts processes in a loop, and counts the
-// processes of that user. The process limit that galahad-init sets has to hold the count. The agent
-// is root and the limit does not apply to root, so the shell runs as another user.
+// forkBomb runs a shell, with the credentials of the agent, that starts processes in a loop, and counts
+// the processes of that user. The process limit that galahad-init sets has to hold the count. The agent
+// is a thread-using process of the same user, so the shell lowers its own limit by bombHeadroom: the
+// agent must be able to start a thread while the bomb is at its limit.
 func forkBomb(env probeEnv) (map[string]any, error) {
 	var lim unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NPROC, &lim); err != nil {
 		return nil, fmt.Errorf("read the process limit: %w", err)
 	}
-	cmd := exec.Command("/bin/busybox", "sh", "-c", bombScript) // #nosec G204 -- a fixed script
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid:    true,
-		Credential: &syscall.Credential{Uid: bombUID, Gid: bombUID, NoSetGroups: true},
-	}
+	script := fmt.Sprintf(bombScript, int64(lim.Cur)-bombHeadroom, bombIterations)
+	cmd := exec.Command("/bin/busybox", "sh", "-c", script) // #nosec G204 -- a fixed script
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start the fork bomb: %w", err)
 	}
@@ -55,6 +55,7 @@ func forkBomb(env probeEnv) (map[string]any, error) {
 		close(exited)
 	}()
 
+	var identity map[string]any
 	peak := 0
 	tick := time.NewTicker(bombSample)
 	defer tick.Stop()
@@ -64,14 +65,17 @@ sampling:
 	for {
 		select {
 		case <-tick.C:
-			peak = max(peak, countProcesses(bombUID))
+			if identity == nil {
+				identity = procIdentity(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
+			}
+			peak = max(peak, countProcesses(os.Getuid()))
 		case <-end.C:
 			break sampling
 		}
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // the shell and its sleeps; best effort
 	<-exited
-	return map[string]any{"peak_processes": peak, "rlimit_nproc": lim.Cur, "uid": bombUID}, nil
+	return map[string]any{"peak_processes": peak, "rlimit_nproc": lim.Cur, "bomb": identity}, nil
 }
 
 // countProcesses counts the processes whose real user is uid, by the Uid line of /proc/<pid>/status.
@@ -193,7 +197,30 @@ func rootfsWrite(probeEnv) (map[string]any, error) {
 		obs["remount read-write"] = "ok"
 		_ = syscall.Mount("", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY, "") // put it back
 	}
+	// The agent is not root, so the creates see EACCES as well as EROFS. These two show that the file
+	// system itself is read-only.
+	obs["root mount options"] = rootMountOptions()
+	ro, err := os.ReadFile("/sys/block/vda/ro")
+	if err != nil {
+		return nil, err
+	}
+	obs["/sys/block/vda/ro"] = strings.TrimSpace(string(ro))
 	return obs, nil
+}
+
+// rootMountOptions returns the options of the last mount of "/" in /proc/mounts.
+func rootMountOptions() string {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return errName(err)
+	}
+	options := "no mount of /"
+	for line := range strings.Lines(string(data)) {
+		if f := strings.Fields(line); len(f) >= 4 && f[1] == "/" {
+			options = f[3]
+		}
+	}
+	return options
 }
 
 // openForWriting opens path for writing and writes data to it if it is not nil. It says what failed, or "ok".

@@ -115,9 +115,17 @@ go build -o "$probe_dir/galahad$exe" ./cmd/galahad
 probe_code=0
 probe_out="$("$probe_dir/galahad$exe" scan --p8-probe 2>&1)" || probe_code=$?
 go build -o "$probe_dir/galahad-agent$exe" ./cmd/galahad-agent
+go build -tags galahadtest -o "$probe_dir/galahad-agent-tagged$exe" ./cmd/galahad-agent
 agent_has_probe=0
 grep -a -q -e result-unknown-field -e GALAHAD_PROBE_CHILD "$probe_dir/galahad-agent$exe" && agent_has_probe=1
+# The check is only worth something if the strings are in the agent that has the probes.
+tagged_has_probe=0
+grep -a -q -e result-unknown-field -e GALAHAD_PROBE_CHILD "$probe_dir/galahad-agent-tagged$exe" && tagged_has_probe=1
 rm -rf "$probe_dir"
+if [ "$tagged_has_probe" != 1 ]; then
+  echo "the probe strings are not in a galahadtest agent, so the check that a normal agent lacks them proves nothing" >&2
+  exit 1
+fi
 if [ "$agent_has_probe" = 1 ]; then
   echo "a build without tags must not contain the P8 probes of the guest" >&2
   exit 1

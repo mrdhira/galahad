@@ -1,8 +1,7 @@
-//go:build !unix
+//go:build !linux
 
 package acceptance_test
 
-import "os"
-
-// maxRSS returns the peak resident set of an exited process in bytes, or -1 when the system does not say.
-func maxRSS(*os.ProcessState) int64 { return -1 }
+// watchRSS has nothing honest to measure outside Linux: the rusage of a wait status includes the children, and
+// macOS and Windows have no /proc. The returned function says -1, which the tests read as "not measured".
+func watchRSS(int) (stop func() int64) { return func() int64 { return -1 } }

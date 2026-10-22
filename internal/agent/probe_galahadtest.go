@@ -204,7 +204,36 @@ func mounts(probeEnv) (map[string]any, error) {
 		devices[i] = e.Name()
 	}
 	slices.Sort(devices)
-	return map[string]any{"mounts": lines[:min(len(lines), maxMountLines)], "fs_types": types, "block_devices": devices}, nil
+	return map[string]any{
+		"mounts": lines[:min(len(lines), maxMountLines)], "fs_types": types, "block_devices": devices,
+		"agent": procIdentity("/proc/self/status"),
+	}, nil
+}
+
+// procIdentity reads who a process is from its status file: the real and effective user and group ids,
+// the effective capabilities as hex, and no_new_privs. A field it cannot read is missing.
+func procIdentity(statusPath string) map[string]any {
+	data, err := os.ReadFile(statusPath) // #nosec G304 -- /proc
+	if err != nil {
+		return map[string]any{"error": errName(err)}
+	}
+	id := map[string]any{}
+	for line := range strings.Lines(string(data)) {
+		key, rest, ok := strings.Cut(line, ":")
+		f := strings.Fields(rest)
+		switch {
+		case !ok || len(f) == 0:
+		case key == "Uid" && len(f) >= 2:
+			id["uid_real"], id["uid_effective"] = f[0], f[1]
+		case key == "Gid" && len(f) >= 2:
+			id["gid_real"], id["gid_effective"] = f[0], f[1]
+		case key == "CapEff":
+			id["cap_eff"] = f[0]
+		case key == "NoNewPrivs":
+			id["no_new_privs"] = f[0]
+		}
+	}
+	return id
 }
 
 // directConnect dials public and metadata addresses without the proxy. The guest has no network card,
