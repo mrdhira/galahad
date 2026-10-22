@@ -125,7 +125,8 @@ From: PR 79 review.
 From: PR 83 review.
 
 ### capa cannot read Mach-O and is near its limit on large binaries
-capa has no Mach-O support, so it always fails on those files, and 60 s per file is close to its normal runtime on real Go binaries. Many runs time out and capa is left out (coverage is truncated, the exit code stays 0). Skip Mach-O files up front and revisit the per-file limit with measured runtimes.
+capa has no Mach-O support, so it always fails on those files. On large Go binaries it does not finish: the 9.6 MB `galahad` binary ran past both 60 s and 5 min in the v0.2.0 sweep, so capa is left out (coverage is truncated, the exit code stays 0). This is a known gap in v0.2.0. Skip Mach-O files up front, and find a capa mode or option that finishes on Go binaries, or skip them with a clear note.
+From: PR 83 review, v0.2.0 sweep.
 From: PR 83 review.
 
 ### `walkJSON` copies the key path for every member
@@ -135,6 +136,18 @@ From: PR 83 review.
 ### Per-file timing test can flake under load
 The pdf `TestAnalyze` case "thousands of URIs deep in a large file" can hit its deadline under heavy load (seen at load 11). Give it more headroom, or count work instead of time.
 From: PR 69, PR 70 and PR 71 re-reviews.
+
+### YARA-Forge webshell rule fires on a TypeScript file
+`SIGNATURE_BASE_WEBSHELL_PHP_Generic_Eval` matched `fsprovider-sample/src/extension.ts` in microsoft/vscode-extension-samples in the v0.2.0 sweep and raised its score from 20 to 35 (GAL-YARA-001, medium). The rule is meant for PHP files. Scope PHP rules to PHP files, or leave this rule out of the compiled set.
+From: v0.2.0 sweep, PR 88 review.
+
+### ClamAV can take the time of the later tools
+ClamAV may now use 5 minutes (`internal/analyze/tools/clamav.go`). On a 10-minute core job with a slow clone, YARA or OSV can then run out of time; they are left out with a reason and the coverage is truncated. Give each tool a share of the remaining time instead of fixed limits.
+From: PR 88 review.
+
+### capa fallback path has no unit test
+The fallback to `/opt/capa/capa` in `internal/analyze/tools/capa.go` needs a file at that path, so no unit test covers it; the release sweep does. A guest tool hit without evidence also prints as `GAL-YARA-001  in ` in the sweep notice (`scripts/vm/sweep.sh`).
+From: PR 88 review.
 
 ## Ingest (URL, Drive, Git)
 
