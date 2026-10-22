@@ -42,7 +42,7 @@ const yaraForgeCoreURL = "https://github.com/YARAHQ/yara-forge/releases/latest/d
 // host and port of the relay. DNSDatabaseInfo is off because the guest has no DNS, and the proxy is
 // the relay, which turns the CONNECT of the HTTPS download into a tunnel through the host proxy.
 const freshclamConf = `DatabaseDirectory %s
-DatabaseOwner root
+DatabaseOwner galahad
 DNSDatabaseInfo no
 DatabaseMirror database.clamav.net
 HTTPProxyServer %s
@@ -52,15 +52,16 @@ ReceiveTimeout 120
 MaxAttempts 3
 `
 
-// runUpdate is the guest side of an update job. It formats and mounts the signatures drive, runs
-// freshclam into <drive>/clamav, downloads the YARA-Forge core rules and compiles them to
-// <drive>/yara/core.yarc, unmounts the drive and reports success with an empty Result. The job
-// has no sample. scratch is where the downloads go, and relayAddr is the address of the relay.
-func runUpdate(host *hostConn, relayAddr, scratch string, unsafeHost bool, deadline time.Time) error {
+// runUpdate is the guest side of an update job. It runs freshclam into <sig>/clamav, downloads the
+// YARA-Forge core rules and compiles them to <sig>/yara/core.yarc, syncs the drive and reports
+// success with an empty Result. The job has no sample. sig is the mounted signatures drive, which the
+// process can write, and syncSig makes it consistent. scratch is where the downloads go, and
+// relayAddr is the address of the relay.
+func runUpdate(host *hostConn, relayAddr, scratch, sig string, syncSig func() error, deadline time.Time) error {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	var log bytes.Buffer
-	err := updateSignatures(ctx, host, &log, relayAddr, scratch, unsafeHost)
+	err := updateSignatures(ctx, host, &log, relayAddr, scratch, sig, syncSig)
 	// The log goes to the host on a failure as well: it is how a failed update is understood.
 	sendErr := host.send(protocol.FrameArtifact, protocol.Artifact{ID: protocol.ArtifactToolsLog, Data: log.Bytes()[:min(log.Len(), maxUpdateLog)]}.Marshal())
 	if err != nil {
@@ -89,11 +90,7 @@ func runUpdate(host *hostConn, relayAddr, scratch string, unsafeHost bool, deadl
 	return nil
 }
 
-func updateSignatures(ctx context.Context, host *hostConn, log *bytes.Buffer, relayAddr, scratch string, unsafeHost bool) error {
-	sig, unmount, err := signaturesDir(ctx, unsafeHost)
-	if err != nil {
-		return err
-	}
+func updateSignatures(ctx context.Context, host *hostConn, log *bytes.Buffer, relayAddr, scratch, sig string, syncSig func() error) error {
 	for _, d := range []string{"clamav", "yara"} {
 		if err := os.MkdirAll(filepath.Join(sig, d), 0o755); err != nil { // #nosec G301 -- the scan VMs read the drive as another user
 			return fmt.Errorf("make %s on the signatures drive: %w", d, err)
@@ -115,24 +112,24 @@ func updateSignatures(ctx context.Context, host *hostConn, log *bytes.Buffer, re
 	}
 
 	// Every file is closed, so this makes the drive consistent for the read-only mount of the scan VMs.
-	if err := unmount(); err != nil {
-		return fmt.Errorf("unmount the signatures drive: %w", err)
+	if err := syncSig(); err != nil {
+		return fmt.Errorf("sync the signatures drive: %w", err)
 	}
 	return nil
 }
 
-// signaturesDir returns the directory of the signatures drive and the function that finishes it.
-// In the VM it formats and mounts the new drive. Outside a VM there is no drive: a galahadtest
+// signaturesDir returns the directory of the signatures drive and the function that syncs it.
+// In the VM it formats and mounts the new drive, which is root-only work. Outside a VM there is no drive: a galahadtest
 // build uses the directory its test names, and a release build refuses.
-func signaturesDir(ctx context.Context, unsafeHost bool) (dir string, finish func() error, err error) {
+func signaturesDir(ctx context.Context, unsafeHost bool) (dir string, syncSig func() error, err error) {
 	if unsafeHost {
 		if dir = testSigDir(); dir == "" {
 			return "", nil, errors.New("an update job needs the signatures drive of the VM")
 		}
 		return dir, func() error { return nil }, nil
 	}
-	finish, err = mountSignatures(ctx)
-	return sigMount, finish, err
+	syncSig, err = mountSignatures(ctx)
+	return sigMount, syncSig, err
 }
 
 // freshclam downloads the ClamAV databases into db, and checks that the main and daily databases are there.

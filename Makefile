@@ -15,7 +15,7 @@ gate:
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/galahad ./cmd/galahad
-	go build -trimpath -ldflags "$(AGENT_LDFLAGS)" -o bin/galahad-agent ./cmd/galahad-agent
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(AGENT_LDFLAGS)" -o bin/galahad-agent ./cmd/galahad-agent
 
 test:
 	go test -race -count=1 ./...

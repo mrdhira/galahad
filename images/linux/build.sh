@@ -159,7 +159,8 @@ finish_rootfs() {
 		fi
 	done < <(cd "$here/overlay" && find . -type f -print0 | sort -z)
 
-	# The agent drops to this user after it has mounted the disks and set the clock.
+	# The agent drops to this user after its root-only work (it mounts the signatures drive of an update job)
+	# and before it reads any input.
 	day=$((SOURCE_DATE_EPOCH / 86400))
 	echo 'galahad:x:1000:1000:Galahad guest user:/home/galahad:/usr/sbin/nologin' >>"$rootfs/etc/passwd"
 	echo 'galahad:x:1000:' >>"$rootfs/etc/group"

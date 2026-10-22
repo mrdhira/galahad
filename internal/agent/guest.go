@@ -160,6 +160,25 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	jobTime := time.Duration(job.Timeouts.Job) * time.Second
 	host.deadline = start.Add(jobTime)
 
+	// The root-only work comes first: the signatures drive of an update job is formatted, mounted and
+	// given to uid 1000. Then the process drops to that user, before it reads any of the input.
+	// Outside the VM the agent is not root and has nothing to drop.
+	var sigDir string
+	var syncSig func() error
+	if update {
+		mountCtx, cancelMount := context.WithDeadline(context.Background(), start.Add(jobTime))
+		sigDir, syncSig, err = signaturesDir(mountCtx, unsafeHost)
+		cancelMount()
+		if err != nil {
+			return err
+		}
+	}
+	if !unsafeHost && os.Geteuid() == 0 {
+		if err := dropPrivileges(); err != nil {
+			return fail(protocol.CodeInternal, "drop privileges: %w", err)
+		}
+	}
+
 	if err := host.sendJSON(protocol.FrameProgress, protocol.Progress{Stage: protocol.StageIngest}); err != nil {
 		return fmt.Errorf("send progress: %w", err)
 	}
@@ -187,7 +206,7 @@ func guestJob(host *hostConn, unsafeHost bool, dialProxy Dialer, env Env) error 
 	}
 
 	if update {
-		return runUpdate(host, relay.addr, dir, unsafeHost, start.Add(max(jobTime-analysisMargin, 0)))
+		return runUpdate(host, relay.addr, dir, sigDir, syncSig, start.Add(max(jobTime-analysisMargin, 0)))
 	}
 
 	var downloaded ingest.File
