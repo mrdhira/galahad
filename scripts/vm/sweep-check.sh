@@ -40,7 +40,7 @@ failures=$(jq -rs --argjson wc "$want_clean" --argjson ws "$want_suspicious" --a
 	  | (if .group == "binary" then ["clamav", "yara", "capa"] else ["clamav", "yara", "osv"] end) as $need
 	  | missing($r.analyzers; $need)
 	  | select(length > 0)
-	  | "\($r.target): not active: \(join(", "))" ] +
+	  | "\($r.target): not active: \(join(", ")) \($r.tools // "")" ] +
 	[ (if count("clean") != $wc then "the sweep has \(count("clean")) results for the clean repos, want \($wc)" else empty end),
 	  (if count("suspicious") != $ws then "the sweep has \(count("suspicious")) results for the suspicious repos, want \($ws)" else empty end),
 	  (if count("binary") != $wb then "the sweep has \(count("binary")) results for the galahad binary, want \($wb)" else empty end) ]

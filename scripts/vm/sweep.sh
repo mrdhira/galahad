@@ -39,6 +39,8 @@ score=null
 findings='[]'
 analyzers='[]'
 reasons='[]'
+tools=
+hits=
 error=
 if [ -n "$job" ] && [ -s "$job/report.json" ]; then
 	verdict=$(jq -r '.verdict | gsub("[^ -~]"; "")' "$job/report.json")
@@ -46,6 +48,8 @@ if [ -n "$job" ] && [ -s "$job/report.json" ]; then
 	findings=$(jq -c '[.findings[]?.rule_id | gsub("[^ -~]"; "")] | unique' "$job/report.json")
 	analyzers=$(jq -c '[.coverage.analyzers[]? | gsub("[^ -~]"; "")]' "$job/report.json")
 	reasons=$(jq -c '[.reasons[:3][]? | gsub("[^ -~]"; "")]' "$job/report.json")
+	# The titles of the guest tool hits, so a new tool reason can be checked against M2.md section 4.
+	hits=$(printable "$(jq -r '[.findings[]? | select(.rule_id | test("^GAL-(AV|YARA|CAPA)-")) | .title] | unique | join("; ")' "$job/report.json")")
 else
 	# No report: say why, from the job and from stderr.
 	if [ -n "$job" ] && [ -f "$job/job.json" ]; then
@@ -53,14 +57,20 @@ else
 	fi
 	error=$(printable "$error $(tail -n 1 "$err")")
 fi
+# Why a tool was left out or ran only in part, from the tools log of the job.
+if [ -n "$job" ] && [ -f "$job/artifacts/tools.log" ]; then
+	tools=$(printable "$(grep -E ': (left out|note):' "$job/artifacts/tools.log" | tr '\n' ' ' || true)")
+fi
 
 name=${target#https://github.com/}
 jq -cn --arg group "$group" --arg target "$name" --argjson code "$code" --arg verdict "$verdict" --argjson score "$score" \
 	--argjson findings "$findings" --argjson analyzers "$analyzers" --argjson reasons "$reasons" \
-	--argjson duration "$duration" --arg error "$error" \
+	--argjson duration "$duration" --arg error "$error" --arg tools "$tools" --arg hits "$hits" \
 	'{group: $group, target: $target, exit_code: $code, verdict: $verdict, score: $score, findings: $findings,
-	  analyzers: $analyzers, reasons: $reasons, duration_seconds: $duration, error: $error}' >>"$SWEEP_DIR/results.jsonl"
+	  analyzers: $analyzers, reasons: $reasons, duration_seconds: $duration, error: $error, tools: $tools,
+	  hits: $hits}' >>"$SWEEP_DIR/results.jsonl"
 
 ids=$(jq -r 'join(",")' <<<"$findings")
-printf '::notice::%s exit=%s verdict=%s score=%s duration=%ss findings=%s%s\n' \
-	"$name" "$code" "$verdict" "$score" "$duration" "$(printable "${ids:-none}")" "${error:+ error=$error}"
+printf '::notice::%s exit=%s verdict=%s score=%s duration=%ss findings=%s%s%s%s\n' \
+	"$name" "$code" "$verdict" "$score" "$duration" "$(printable "${ids:-none}")" "${error:+ error=$error}" \
+	"${hits:+ hits=$hits}" "${tools:+ tools=$tools}"
