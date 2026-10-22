@@ -55,6 +55,33 @@ func TestPolicy(t *testing.T) {
 	}
 }
 
+func TestIsInfraHost(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		host string
+		// expectations
+		want bool
+	}{
+		{name: "the OSV API", host: "api.osv.dev", want: true},
+		{name: "a subdomain of it", host: "evil.api.osv.dev"},
+		{name: "a parent domain of it", host: "osv.dev"},
+		{name: "a host that ends with it", host: "notapi.osv.dev"},
+		{name: "a different case", host: "API.osv.dev"},
+		{name: "a trailing dot", host: "api.osv.dev."},
+		{name: "an address", host: "198.18.0.5"},
+		{name: "another allowed host", host: "github.com"},
+		{name: "empty", host: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := proxy.IsInfraHost(tt.host); got != tt.want {
+				t.Errorf("IsInfraHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestZeroPolicyAllowsNothing(t *testing.T) {
 	tests := []struct {
 		name string

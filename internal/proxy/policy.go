@@ -18,6 +18,10 @@ var (
 
 const osvHost = "api.osv.dev"
 
+// IsInfraHost reports whether host is the fixed infrastructure host that the guest contacts by itself on
+// every scan, which is api.osv.dev. The match is exact: no subdomain and no address counts.
+func IsInfraHost(host string) bool { return host == osvHost }
+
 // ReasonHostNotAllowed is the reason of a denial for a host that is not on the allowlist.
 const ReasonHostNotAllowed = "host not allowed"
 

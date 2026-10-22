@@ -216,6 +216,7 @@ func TestGuest(t *testing.T) {
 		entries []tarEntry // the tar stream; the tree above when empty
 		target  string     // Job.Name; "proj" when empty
 		kind    string     // Job.Kind; scan when empty
+		image   string     // Job.Image; core when empty
 		timeout int        // Job.Timeouts.Job in seconds; 300 when zero
 		ingest  int        // Job.Timeouts.Ingest in seconds; 0 means the job timeout
 		mode    string     // how the host misbehaves: "", "stall", "hang up", "data first", "unknown job field", "slow", "bad sha", "bad count"
@@ -224,10 +225,12 @@ func TestGuest(t *testing.T) {
 		wantErrCode    string // the Error frame code; empty means a Result
 		wantMessage    string // substring of the Error message
 		wantTargetKind string
-		wantTimeout    bool   // the Result has a timeout skip
-		wantDepthSkip  string // the path of the depth skip the Result must have, and then a verdict that is not clean
+		wantTools      []string // the tools that ran, by name; clamav, osv and yara when empty
+		wantTimeout    bool     // the Result has a timeout skip
+		wantDepthSkip  string   // the path of the depth skip the Result must have, and then a verdict that is not clean
 	}{
 		{name: "directory target", wantTargetKind: protocol.TargetDir},
+		{name: "the re image runs capa too", image: protocol.ImageRE, wantTargetKind: protocol.TargetDir, wantTools: []string{"clamav", "osv", "yara", "capa"}},
 		{name: "file target", entries: []tarEntry{{name: "one.txt", body: "hello\n"}}, target: "one.txt", wantTargetKind: protocol.TargetFile},
 		{name: "host stalls until the job timeout", mode: "stall", timeout: 1, wantCode: agent.ExitError, wantErrCode: protocol.CodeTimeout, wantMessage: "timed out"},
 		{name: "host hangs up", mode: "hang up", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "closed the connection"},
@@ -283,6 +286,7 @@ func TestGuest(t *testing.T) {
 			job := testJob(cmp.Or(tt.target, "proj"), cmp.Or(tt.timeout, 300))
 			job.Timeouts.Ingest = tt.ingest
 			job.Kind = cmp.Or(tt.kind, protocol.KindScan)
+			job.Image = tt.image
 			if tt.kind != "" {
 				job.Source = ""
 			}
@@ -340,11 +344,23 @@ func TestGuest(t *testing.T) {
 			if got.errMsg != nil || got.result == nil {
 				t.Fatalf("want a Result, got %+v; stderr %q", got.errMsg, ex.stderr)
 			}
-			if want := []string{protocol.StageIngest, protocol.StageAnalyze, protocol.StageClamAV, protocol.StageYARA}; !slices.Equal(got.stages, want) {
+			wantTools := tt.wantTools
+			if wantTools == nil {
+				wantTools = []string{"clamav", "osv", "yara"}
+			}
+			stages := map[string]string{"capa": protocol.StageCapa, "clamav": protocol.StageClamAV, "osv": protocol.StageOSV, "yara": protocol.StageYARA}
+			want := []string{protocol.StageIngest, protocol.StageAnalyze}
+			for _, name := range wantTools {
+				want = append(want, stages[name])
+				if !strings.Contains(got.toolsLog, name+": ") {
+					t.Errorf("tools.log = %q, want a line for %s", got.toolsLog, name)
+				}
+			}
+			if !slices.Equal(got.stages, want) {
 				t.Errorf("stages = %v, want %v", got.stages, want)
 			}
-			if !strings.Contains(got.toolsLog, "clamav: ") || !strings.Contains(got.toolsLog, "yara: ") {
-				t.Errorf("tools.log = %q, want a line for each tool", got.toolsLog)
+			if lines := strings.Count(got.toolsLog, "\n"); lines != len(wantTools) {
+				t.Errorf("tools.log = %q, want %d lines", got.toolsLog, len(wantTools))
 			}
 			res := got.result
 			if res.Target.Name != job.Name || res.Target.Kind != tt.wantTargetKind {

@@ -252,6 +252,7 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 
 	job := protocol.Job{
 		ID: r.job.ID, Kind: protocol.KindScan, Source: r.in.source, Name: r.in.name, URL: cmp.Or(r.in.url, probe), Submodules: r.spec.Submodules,
+		Image:    r.spec.Image,
 		Timeouts: protocol.Timeouts{Job: min(max(int(time.Until(deadline).Seconds()), 1), protocol.MaxTimeoutSec)},
 		Now:      r.start.UTC(),
 	}
@@ -430,9 +431,10 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 		return fmt.Errorf("the proxy: %w", err)
 	}
 	res.Network = networkOf(events)
-	r.job.Blocked = slices.ContainsFunc(events, func(ev proxy.Event) bool { return ev.Blocked })
+	r.job.Blocked = slices.ContainsFunc(events, func(ev proxy.Event) bool { return countsAsBlocked(ev.Host, ev.Blocked) })
 	addNetworkFinding(&res)
 	scoring.Apply(&res)
+	addInfraReason(&res)
 	paths, err := report.Write(r.jobDir, &res)
 	if err != nil {
 		return fmt.Errorf("write the report: %w", err)
@@ -511,7 +513,7 @@ func (r *runner) guestError(e protocol.Error, out *Outcome) error {
 		if err != nil {
 			return fmt.Errorf("the proxy: %w", err)
 		}
-		if slices.ContainsFunc(events, func(ev proxy.Event) bool { return ev.Blocked }) {
+		if slices.ContainsFunc(events, func(ev proxy.Event) bool { return countsAsBlocked(ev.Host, ev.Blocked) }) {
 			return r.blockedResult(events, out)
 		}
 	}

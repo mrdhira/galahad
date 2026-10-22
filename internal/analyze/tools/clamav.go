@@ -22,7 +22,7 @@ var ruleAV = protocol.Rule{ID: "GAL-AV-001", Severity: protocol.SeverityHigh, Ti
 var clamSig = regexp.MustCompile(`^[\x21-\x7e]{1,128}$`)
 
 func init() {
-	registered = append(registered, func() Tool { return NewClamAV(filepath.Join(sigRoot, "clamav")) })
+	registered = append(registered, func(Env) Tool { return NewClamAV(filepath.Join(sigRoot, "clamav")) })
 }
 
 type clamav struct{ db string }
