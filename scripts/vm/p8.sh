@@ -61,6 +61,7 @@ if [ "$failed" = 0 ]; then
 fi
 annotate "the P8 probes failed (go test exited $code)"
 echo "::group::go test output (sanitized, last 400 lines)"
-tr -cd '[:print:]\n' <"$out" | cut -c1-400 | tail -n 400
+# The '| ' prefix keeps a guest line that starts with :: from being read as a workflow command.
+tr -cd '[:print:]\n' <"$out" | cut -c1-400 | tail -n 400 | sed 's/^/| /'
 echo "::endgroup::"
 exit 1
