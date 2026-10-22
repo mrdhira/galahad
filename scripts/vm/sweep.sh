@@ -48,8 +48,8 @@ if [ -n "$job" ] && [ -s "$job/report.json" ]; then
 	findings=$(jq -c '[.findings[]?.rule_id | gsub("[^ -~]"; "")] | unique' "$job/report.json")
 	analyzers=$(jq -c '[.coverage.analyzers[]? | gsub("[^ -~]"; "")]' "$job/report.json")
 	reasons=$(jq -c '[.reasons[:3][]? | gsub("[^ -~]"; "")]' "$job/report.json")
-	# The titles of the guest tool hits, so a new tool reason can be checked against M2.md section 4.
-	hits=$(printable "$(jq -r '[.findings[]? | select(.rule_id | test("^GAL-(AV|YARA|CAPA)-")) | .title] | unique | join("; ")' "$job/report.json")")
+	# The guest tool hits (rule, signature and file), so a new tool reason can be checked against M2.md section 4.
+	hits=$(printable "$(jq -r '[.findings[]? | select(.rule_id | test("^GAL-(AV|YARA|CAPA)-")) | .rule_id + " " + (.evidence[0].snippet // "") + " in " + (.evidence[0].path // "")] | unique | join("; ")' "$job/report.json")")
 else
 	# No report: say why, from the job and from stderr.
 	if [ -n "$job" ] && [ -f "$job/job.json" ]; then

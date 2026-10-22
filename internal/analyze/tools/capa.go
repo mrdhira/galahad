@@ -29,6 +29,7 @@ const (
 	capaTotal     = 5 * time.Minute  // all executables
 	capaMaxOutput = 32 << 20         // bytes of the JSON of one executable
 	capaMaxNotes  = 8                // problems named in the note
+	capaImagePath = "/opt/capa/capa" // where images/linux/build.sh installs it
 	capaSniff     = 4096             // bytes read to tell an executable from another file
 )
 
@@ -97,6 +98,10 @@ func (c capa) Run(ctx context.Context, target string) (Result, error) {
 		return Result{Partial: true, Note: strings.Join(notes, "; ")}, nil
 	}
 	bin, err := exec.LookPath("capa")
+	if err != nil {
+		// The re image installs capa here, outside the PATH that galahad-init sets.
+		bin, err = exec.LookPath(capaImagePath)
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("capa is not installed: %w", err)
 	}
