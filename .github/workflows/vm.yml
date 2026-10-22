@@ -1,11 +1,20 @@
 name: vm
 
 # Boots the real Firecracker backend, which the development session cannot do: there is no KVM there.
-# It installs the pinned Firecracker and the pinned kernel and core image, builds galahad and
-# galahad-agent, fills the signatures through the update VM (cached for a week), and scans corpus
-# fixtures and a test-time EICAR file through a microVM, then runs the P8 isolation probes (test/acceptance/
-# p8_test.go) in microVMs of their own. Each failure prints ::error:: lines, which
-# show up as annotations without reading the job log.
+# The setup action (.github/actions/vm-setup) installs the pinned Firecracker, the pinned kernel and core image,
+# builds galahad and galahad-agent, and fills the signatures through the update VM (cached for a week). Then this
+# job scans corpus fixtures and a test-time EICAR file through a microVM, runs the whole corpus (P1-P7) and the
+# M2 demo through real VMs (test/acceptance/vm_corpus_test.go, demo_test.go), and runs the P8 isolation probes
+# (test/acceptance/p8_test.go) in microVMs of their own. Each failure prints ::error:: lines, which show up as
+# annotations without reading the job log.
+# A green run of this workflow on the tagged commit is what release.yml requires. It runs for pull requests and
+# for pushes to main on the paths below, and on demand; a commit that touches none of them needs a dispatch.
+#
+# Time estimates on a hosted runner (none is measured yet; the first run fills them in): setup about 10 minutes while
+# the images are built here (less once the images-* release exists; the signatures are cached), the benign scans
+# 3 minutes, the corpus 25 to 40 minutes (about 70 scans of about 20 seconds), the demo 2 minutes and the P8 probes
+# 10 minutes, so the whole job is about an hour. The job limit of 150 minutes is far below the 6 hours that GitHub
+# allows.
 
 on:
   pull_request:
@@ -16,6 +25,26 @@ on:
       - 'scripts/vm/**'
       - 'testdata/corpus/**'
       - 'test/acceptance/p8*'
+      - 'test/acceptance/vm_*'
+      - 'test/acceptance/corpus_test.go'
+      - 'test/acceptance/demo_test.go'
+      - 'test/acceptance/sinkhole_test.go'
+      - '.github/actions/vm-setup/**'
+      - '.github/workflows/vm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/**'
+      - 'images/**'
+      - 'internal/**'
+      - 'scripts/vm/**'
+      - 'testdata/corpus/**'
+      - 'test/acceptance/p8*'
+      - 'test/acceptance/vm_*'
+      - 'test/acceptance/corpus_test.go'
+      - 'test/acceptance/demo_test.go'
+      - 'test/acceptance/sinkhole_test.go'
+      - '.github/actions/vm-setup/**'
       - '.github/workflows/vm.yml'
   workflow_dispatch:
 
@@ -24,13 +53,13 @@ permissions:
 
 concurrency:
   group: vm-${{ github.ref }}
-  cancel-in-progress: true
+  # A push to main is not cancelled by the next one: release.yml needs the run of the tagged commit.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    # The images are built here when their release does not exist yet, which takes a while.
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,134 +69,13 @@ jobs:
         with:
           go-version: '1.27.3'
 
-      - name: Check the scripts
-        run: shellcheck -x scripts/vm/*.sh
+      - uses: ./.github/actions/vm-setup
 
-      # Private, as galahad setup makes it: doctor refuses a state directory others can read.
-      - name: Set up the state directory
-        run: |
-          install -d -m 0700 "$RUNNER_TEMP/galahad"
-          echo "GALAHAD_HOME=$RUNNER_TEMP/galahad" >> "$GITHUB_ENV"
-
-      # Hosted runners have /dev/kvm, but only root can use it until this udev rule is in place.
-      - name: Set up KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          # The trigger is asynchronous: wait for udev, then up to 10 s more for the new mode.
-          sudo udevadm settle --timeout=10 || echo "::warning::udevadm settle timed out; polling /dev/kvm"
-          for _ in $(seq 1 20); do
-            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then break; fi
-            sleep 0.5
-          done
-          if ! [ -r /dev/kvm ] || ! [ -w /dev/kvm ]; then
-            echo "::error::/dev/kvm is not readable and writable on this runner: $(stat -c '%A %U:%G' /dev/kvm 2>&1 | tr -cd '[:print:]')"
-            exit 1
-          fi
-
-      - name: Build galahad and galahad-agent
-        run: |
-          set -o pipefail
-          make build 2>&1 | tee build.log && exit 0
-          tail -n 8 build.log | sed 's/^/::error::/'
-          exit 1
-
-      # The pin checks the archive before anything of it is unpacked.
-      - name: Install the pinned Firecracker
-        run: scripts/vm/firecracker.sh
-
-      # The images are published by the images-* tag (image.yml). Until that release exists, they are
-      # built the way image.yml builds them: the same container, scripts and cache. Only the kernel and
-      # the core image are needed here, not re. Either way the files are checked against pins.json,
-      # so a build that differs from the pins fails here, as it does in image.yml.
-      - name: Download the pinned images
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(jq -r .tag internal/images/pins.json)
-          mkdir -p dl
-          if gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir dl --pattern vmlinux.gz --pattern core.ext4.gz; then
-            echo "dir=dl" >> "$GITHUB_OUTPUT"
-          else
-            echo "No release $tag yet; the images are built next."
-            echo "dir=out" >> "$GITHUB_OUTPUT"
-          fi
-
-      - id: cache
-        if: steps.release.outputs.dir == 'out'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .cache
-          key: image-cache-${{ hashFiles('images/linux/common.sh', 'images/linux/build.sh', 'images/linux/packages-core.txt', 'images/linux/packages-re.txt', 'images/linux/kernel/build.sh') }}
-          restore-keys: image-cache-
-
-      - name: Build the core image
-        if: steps.release.outputs.dir == 'out'
-        run: |
-          # The build container is the one image.yml pins.
-          build_image=$(sed -n 's/^  BUILD_IMAGE: //p' .github/workflows/image.yml)
-          set -o pipefail
-          docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
-            "$build_image" bash images/linux/build.sh core 2>&1 | tee core.log && exit 0
-          { grep -E 'build.sh:|rror|curl: |No such|not found' core.log | tail -n 6 || true; tail -n 4 core.log; } | sed 's/^/::error::/'
-          exit 1
-
-      - name: Build the kernel
-        if: steps.release.outputs.dir == 'out'
-        run: |
-          build_image=$(sed -n 's/^  BUILD_IMAGE: //p' .github/workflows/image.yml)
-          set -o pipefail
-          docker run --rm --privileged -v "$PWD":/src -w /src -e OUT=/src/out -e CACHE=/src/.cache \
-            "$build_image" bash images/linux/kernel/build.sh 2>&1 | tee kernel.log && exit 0
-          { grep -E 'build.sh:|rror|curl: |No such|not found' kernel.log | tail -n 6 || true; tail -n 4 kernel.log; } | sed 's/^/::error::/'
-          exit 1
-
-      - name: Install the images
-        env:
-          IMAGE_DIR: ${{ steps.release.outputs.dir }}
-        run: |
-          sudo chown -R "$(id -u):$(id -g)" "$IMAGE_DIR"
-          scripts/vm/images.sh "$IMAGE_DIR"
-
-      # The update VM downloads the ClamAV databases and the YARA-Forge core rules onto signatures.img.
-      # The files are cached for a week (the ISO week is the key), so most runs skip the download. The
-      # checks below read the files either way.
-      - name: Name the week
-        id: week
-        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
-
-      - id: sigcache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ env.GALAHAD_HOME }}/signatures.img
-            ${{ env.GALAHAD_HOME }}/signatures.stamp
-          key: signatures-${{ steps.week.outputs.week }}
-
-      - name: Fill the signatures through the update VM
-        if: steps.sigcache.outputs.cache-hit != 'true'
-        run: scripts/vm/signatures.sh
-
-      # Saved right away, so a failure of a later step does not cost the download.
-      - name: Save the signatures
-        if: steps.sigcache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ env.GALAHAD_HOME }}/signatures.img
-            ${{ env.GALAHAD_HOME }}/signatures.stamp
-          key: signatures-${{ steps.week.outputs.week }}
-
-      - name: Doctor shows the signatures as PASS
-        run: scripts/vm/doctor.sh
-
-      # The agent is found next to the galahad binary: bin/galahad-agent.
-      - name: Scan the benign fixtures (exit 0, ClamAV and YARA covered)
+      # The agent is found next to the galahad binary: bin/galahad-agent. A benign scan must finish in 2 minutes.
+      - name: Scan the benign fixtures (exit 0 within 2 minutes, ClamAV and YARA covered)
         run: |
           for fixture in testdata/corpus/benign-*; do
-            WANT_ANALYZERS="clamav yara" scripts/vm/scan.sh "$fixture" 0
+            MAX_SECONDS=120 WANT_ANALYZERS="clamav yara" scripts/vm/scan.sh "$fixture" 0
           done
 
       - name: Scan an EICAR file built here (exit 20, GAL-SIG-001 and GAL-AV-001)
@@ -175,6 +83,20 @@ jobs:
 
       - name: Scan a project that runs curl when its folder is opened (exit 20)
         run: scripts/vm/scan.sh testdata/corpus/p1-folderopen-curl 20
+
+      # P1-P7: the whole corpus of corpus_test.go through "galahad scan <path>", with the exit codes and the evidence
+      # of the agent alone, plus fake-interview-repo through Git ingest and the P4 PDF through URL ingest. The two
+      # ingest cases reach a sinkhole server of the test through the host proxy. Every failing case is annotated.
+      - name: Scan the corpus through real VMs (P1-P7)
+        timeout-minutes: 80
+        run: scripts/vm/vmtest.sh corpus 'TestVMCorpus|TestVMIngest' 75m
+
+      # The demo of docs/milestones/M2.md section 5: doctor, a Git repository, a PDF, a submodule at the
+      # metadata address, jobs and report, with the sinkhole in place of GitHub. The same steps run on the fake sandbox
+      # in the normal test run, so only the Firecracker run is selected here.
+      - name: Run the M2 demo through real VMs
+        timeout-minutes: 15
+        run: scripts/vm/vmtest.sh demo 'TestDemoM2/firecracker' 10m
 
       # P8: the isolation probes. A hostile guest and a hostile input stay contained and are reported. The test
       # builds galahad and galahad-agent with the galahadtest tag (the probes exist only there) and runs each

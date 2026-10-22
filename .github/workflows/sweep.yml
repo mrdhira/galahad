@@ -1,0 +1,103 @@
+name: sweep
+
+# The release sweep of docs/milestones/M2.md section 4, on the KVM runner. It runs only on demand: it clones popular
+# repositories from GitHub through the real host proxy, which takes long and uses the network, so it never runs for
+# pull requests or pushes. Start it with:  gh workflow run sweep.yml --ref main
+#
+# It scans, with ClamAV, YARA and OSV active (the signatures come from the update VM, OSV through the proxy):
+#   - the 12 repos that must stay CLEAN;
+#   - the 10 repos that were SUSPICIOUS in v0.1.0 (docs/milestones/M1.md), none of which may become MALICIOUS;
+#   - the built galahad binary with --image re, which must be CLEAN. The re image comes from the images-* release, or
+#     is built here with the same container, scripts and cache as image.yml (about four minutes with a warm cache,
+#     more with a cold one), so it is not skipped.
+# Each target gives one ::notice:: annotation (repo, exit code, verdict, score, finding IDs, duration). GitHub shows
+# at most 10 notices per step, so the targets are split over steps of at most six. The job fails when a rule of the
+# sweep is broken (scripts/vm/sweep-check.sh), and sweep.json, with every result, is uploaded as an artifact.
+#
+# Time: setup about 10 to 15 minutes, then about 3 to 8 minutes for each of the 23 scans (a clone, ClamAV over the
+# whole tree, OSV), so one to three hours. A scan has the default limit of its image, 10 minutes for core and 20
+# for re. The job limit is 330 minutes, under the 6 hours that GitHub allows.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    # The trigger above is the only one; this repeats it, so that no other event can start the sweep by a later edit.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+
+      - id: setup
+        uses: ./.github/actions/vm-setup
+        with:
+          re: 'true'
+
+      - name: Set up the sweep directory
+        run: echo "SWEEP_DIR=$RUNNER_TEMP/sweep" >> "$GITHUB_ENV"
+
+      - name: Sweep the repos that must stay clean (1 of 2)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          for repo in spf13/cobra conventional-changelog/commitlint eslint/eslint expressjs/express fastapi/fastapi gin-gonic/gin; do
+            scripts/vm/sweep.sh clean "https://github.com/$repo"
+          done
+
+      - name: Sweep the repos that must stay clean (2 of 2)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          for repo in typicode/husky lodash/lodash psf/requests BurntSushi/ripgrep golang/tools microsoft/vscode-remote-try-node; do
+            scripts/vm/sweep.sh clean "https://github.com/$repo"
+          done
+
+      # These were SUSPICIOUS in v0.1.0. They may stay so; any new reason must be a documented tool hit.
+      - name: Sweep the repos that were suspicious in v0.1.0 (1 of 2)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          for repo in axios/axios django/django pallets/flask vercel/next.js pypa/pip; do
+            scripts/vm/sweep.sh suspicious "https://github.com/$repo"
+          done
+
+      - name: Sweep the repos that were suspicious in v0.1.0 (2 of 2)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          for repo in prettier/prettier facebook/react typescript-eslint/typescript-eslint vitejs/vite microsoft/vscode-extension-samples; do
+            scripts/vm/sweep.sh suspicious "https://github.com/$repo"
+          done
+
+      # The binary built by "make build" in the setup, scanned with capa in the re image.
+      - name: Sweep the built galahad binary with the re image
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: scripts/vm/sweep.sh binary bin/galahad --image re
+
+      - name: Check the sweep
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: scripts/vm/sweep-check.sh "$SWEEP_DIR/results.jsonl" "$SWEEP_DIR/sweep.json"
+
+      - name: Upload the summary
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sweep
+          path: ${{ runner.temp }}/sweep/sweep.json
+          if-no-files-found: warn
+
+      # A scan that went wrong may have left a VM behind.
+      - name: Stop what is left
+        if: always()
+        run: pkill -KILL -x firecracker || true
