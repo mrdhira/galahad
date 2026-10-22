@@ -65,6 +65,9 @@ type Spec struct {
 	AllowHosts []string
 	// Submodules asks the guest to update the submodules of a Git target.
 	Submodules bool
+	// Probe is the name of a P8 isolation probe. It makes the job a probe job, which only galahadtest
+	// builds run: the target is then an optional input for the probe, and the job has no report.
+	Probe string
 	// Signatures is the signatures image: a scan attaches it read-only, and the update job fills it. Empty
 	// means the machine gets no signatures drive.
 	Signatures string
@@ -89,7 +92,13 @@ func Run(ctx context.Context, backend sandbox.Backend, spec Spec, target string)
 	if err := checkTimeout(spec.Timeout); err != nil {
 		return Outcome{}, err
 	}
-	in, err := newPlan(spec.Source, target)
+	var in *plan
+	var err error
+	if spec.Probe != "" {
+		in, err = newProbePlan(spec.Probe, target)
+	} else {
+		in, err = newPlan(spec.Source, target)
+	}
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -262,6 +271,9 @@ func (r *runner) run(ctx context.Context, out *Outcome) error {
 	if r.in.update {
 		job.Kind, job.Source = protocol.KindUpdate, ""
 	}
+	if r.in.p8 != "" {
+		job.Kind, job.Source, job.Name = protocol.KindProbe, "", r.in.p8
+	}
 	var endSent atomic.Bool
 	sentCh := make(chan sent, 1)
 	go func() { // the guest may stop reading early, so its frames are read while the input is written
@@ -397,11 +409,13 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 	if r.spec.Version != "dev" && res.Tool.Version != r.spec.Version {
 		return fmt.Errorf("the result is from version %q, this program is %q", protocol.CleanPath(res.Tool.Version), protocol.CleanPath(r.spec.Version))
 	}
-	if r.in.update {
-		// There is nothing to report: the Result of an update only says that it went through.
-		if _, err := r.px.stop(); err != nil {
+	if r.in.update || r.in.p8 != "" {
+		// There is nothing to report: the Result of an update or a probe only says that it went through.
+		events, err := r.px.stop()
+		if err != nil {
 			return fmt.Errorf("the proxy: %w", err)
 		}
+		r.job.Blocked = slices.ContainsFunc(events, func(ev proxy.Event) bool { return ev.Blocked })
 		return nil
 	}
 	wantKind := protocol.TargetDir

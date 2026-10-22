@@ -236,7 +236,6 @@ func TestGuest(t *testing.T) {
 		{name: "host hangs up", mode: "hang up", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "closed the connection"},
 		{name: "bad frame order", mode: "data first", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "data frame"},
 		{name: "unknown job field", mode: "unknown job field", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "unknown field"},
-		{name: "unsupported kind", kind: protocol.KindProbe, wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "not supported"},
 		{name: "target name with a slash", target: "proj/sub", wantCode: agent.ExitError, wantErrCode: protocol.CodeProtocol, wantMessage: "single path element"},
 		{
 			name:     "path traversal",

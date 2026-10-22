@@ -70,16 +70,7 @@ func runUpdate(host *hostConn, relayAddr, scratch, sig string, syncSig func() er
 	if sendErr != nil {
 		return fmt.Errorf("send tools log: %w", sendErr)
 	}
-	now := time.Now().UTC()
-	res := protocol.Result{
-		SchemaVersion: protocol.SchemaVersion,
-		Tool:          protocol.Tool{Name: "galahad-agent", Version: version},
-		Target:        protocol.Target{Name: "signatures", Kind: protocol.TargetDir},
-		StartedAt:     now, FinishedAt: now,
-		Files: []protocol.FileInfo{}, Findings: []protocol.Finding{}, IOCs: []protocol.IOC{},
-		Coverage: protocol.Coverage{Skipped: []protocol.Skip{}, Analyzers: []string{}},
-		Reasons:  []string{},
-	}
+	res := emptyResult("signatures")
 	data, err := protocol.EncodeResult(&res)
 	if err != nil {
 		return fmt.Errorf("encode result: %w", err)
@@ -88,6 +79,21 @@ func runUpdate(host *hostConn, relayAddr, scratch, sig string, syncSig func() er
 		return fmt.Errorf("send result: %w", err)
 	}
 	return nil
+}
+
+// emptyResult is the Result of a job that has nothing to report: no files and no findings. An update
+// and a probe job answer with it, only to say that they went through.
+func emptyResult(name string) protocol.Result {
+	now := time.Now().UTC()
+	return protocol.Result{
+		SchemaVersion: protocol.SchemaVersion,
+		Tool:          protocol.Tool{Name: "galahad-agent", Version: version},
+		Target:        protocol.Target{Name: name, Kind: protocol.TargetDir},
+		StartedAt:     now, FinishedAt: now,
+		Files: []protocol.FileInfo{}, Findings: []protocol.Finding{}, IOCs: []protocol.IOC{},
+		Coverage: protocol.Coverage{Skipped: []protocol.Skip{}, Analyzers: []string{}},
+		Reasons:  []string{},
+	}
 }
 
 func updateSignatures(ctx context.Context, host *hostConn, log *bytes.Buffer, relayAddr, scratch, sig string, syncSig func() error) error {
