@@ -96,6 +96,7 @@ const (
 	MaxDecisionAttempts  = 3
 	maxDecisionCount     = 1<<31 - 1 // file counts and token counts
 	probabilitySumMargin = 0.02
+	probabilityEpsilon   = 1e-9 // float error, so that a sum of 0.98 or 1.02 is on the margin and not over it
 	maxDecisionScore     = 3
 	redactionGrowth      = 4 // a redacted string may be this many times longer than the guest text it came from
 )
@@ -358,7 +359,7 @@ func (a DecisionAnswer) check(q DecisionQuestion) error {
 		}
 		sum += p
 	}
-	if math.Abs(sum-1) > probabilitySumMargin {
+	if math.Abs(sum-1) > probabilitySumMargin+probabilityEpsilon {
 		return fmt.Errorf("probabilities sum to %.3f, want 1 within %.2f", sum, probabilitySumMargin)
 	}
 	if err := checkUnit("label_mass", a.LabelMass); err != nil {

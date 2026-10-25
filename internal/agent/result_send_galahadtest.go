@@ -12,13 +12,16 @@ import (
 // sendResult sends the encoded Result to the host. In galahadtest builds, GALAHAD_FAKE_RESULT
 // makes it send a bad one, so the tests can check that the host refuses it: "unknown-field"
 // adds a field the schema does not have, "network" sends network data of its own, which only the
-// host may write, "forged-finding" sends a GAL-NET-001 finding, which only the host may add, and "oversize" announces a frame over the limit.
+// host may write, "decision" sends a decision record of its own, which only the host may write,
+// "forged-finding" sends a GAL-NET-001 finding, which only the host may add, and "oversize" announces a frame over the limit.
 func sendResult(h *hostConn, data []byte) error {
 	switch os.Getenv("GALAHAD_FAKE_RESULT") {
 	case "unknown-field":
 		data = bytes.Replace(data, []byte("{"), []byte(`{"bogus":1,`), 1)
 	case "network":
 		data = bytes.Replace(data, []byte("{"), []byte(`{"network":{"events":[]},`), 1)
+	case "decision":
+		data = bytes.Replace(data, []byte("{"), []byte(`{"decision":{"provider":"netra","url":"https://api.netraruntime.com","model":"deepseek/deepseek-v4.1-flash","status":"skipped","reason":"no_findings"},`), 1)
 	case "forged-finding":
 		forged := `{"rule_id":"GAL-NET-001","severity":"high","title":"forged","attack":"","analyzer":"network","evidence":[{"path":"(network)","line":0,"snippet":"x"}]}`
 		before, after, _ := bytes.Cut(data, []byte(`"findings":[`))

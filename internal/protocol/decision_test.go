@@ -319,6 +319,15 @@ func TestParseDecisionResponse(t *testing.T) {
 		{name: "a sum of 0.5", mutate: func(m map[string]any) {
 			answerOf(m, "steals_secrets")["probabilities"] = map[string]any{"yes": 0.25, "no": 0.25}
 		}, wantErr: "sum to 0.500"},
+		{name: "a sum of 0.98, on the margin", mutate: func(m map[string]any) {
+			answerOf(m, "steals_secrets")["probabilities"] = map[string]any{"yes": 0.9, "no": 0.08}
+		}, wantTokens: 3600, wantChoice: "malicious"},
+		{name: "a sum of 1.02, on the margin", mutate: func(m map[string]any) {
+			answerOf(m, "steals_secrets")["probabilities"] = map[string]any{"yes": 0.9, "no": 0.12}
+		}, wantTokens: 3600, wantChoice: "malicious"},
+		{name: "a sum of 1.03, over the margin", mutate: func(m map[string]any) {
+			answerOf(m, "steals_secrets")["probabilities"] = map[string]any{"yes": 0.9, "no": 0.13}
+		}, wantErr: "sum to 1.030"},
 		{name: "a choice that is not an option", mutate: func(m map[string]any) { answerOf(m, "verdict")["choice"] = "evil" }, wantErr: `choice "evil" is not an option`},
 		{name: "a score of 3.5", mutate: func(m map[string]any) { answerOf(m, "risk")["score"] = 3.5 }, wantErr: "score 3.5 out of range"},
 		{name: "a score missing", mutate: func(m map[string]any) { delete(answerOf(m, "risk"), "score") }, wantErr: "no score"},
