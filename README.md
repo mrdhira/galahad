@@ -10,7 +10,7 @@ New to the security terms (IOC, defang, sandbox, zip-slip, ...)? See the [glossa
 
 ## Requirements
 
-- A Linux amd64 computer with KVM: `/dev/kvm` must exist and your user must be able to open it. Usually that means being in the `kvm` group (`sudo usermod -aG kvm $USER`, then log out and in). In a virtual machine, turn on nested virtualization.
+- A Linux amd64 computer with KVM: `/dev/kvm` must exist and your user must be able to open it. Usually that means being in the `kvm` group (`sudo usermod -aG kvm $USER`, then log out and in). An ACL set with `setfacl` on `/dev/kvm` does not last: systemd-logind rewrites it. In a virtual machine, turn on nested virtualization.
 - About 5 GiB of free disk space for the images and the scratch disk of a scan.
 - `galahad` and `galahad-agent` side by side in the same directory (the release archives do this). The agent runs inside the VM.
 - Network access for `galahad setup`, and for scans of links, Drive files and Git repositories.
