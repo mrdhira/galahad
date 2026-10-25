@@ -31,9 +31,9 @@ var (
 
 // Limits. The input size and line limits are analyze.MaxFileSize and analyze.MaxLineScan.
 const (
-	textWindow = 8192    // leading bytes checked for NUL, like the file identification
-	maxGap     = 300     // bytes between the two parts when they are not on one line
-	maxHits    = 1 << 16 // matches kept per pattern and file
+	textWindow = 8192 // leading bytes checked for NUL, like the file identification
+	maxGap     = 300  // bytes between the two parts when they are not on one line
+	checkEvery = 256  // matches between checks of the context
 )
 
 var testDirs = map[string]bool{"test": true, "tests": true, "testdata": true, "__tests__": true, "fixtures": true, "examples": true}
@@ -41,8 +41,9 @@ var testDirs = map[string]bool{"test": true, "tests": true, "testdata": true, "_
 // Pieces of the patterns, which run on lowercase text.
 const (
 	// end closes a phrase. It is not a slash, so "safe/benign/clean" in a list of words is not one.
-	end     = `(?:[\s,.:;!?)"'*_>\]-]|$)`
-	verdict = `(?:safe|benign|clean|harmless|not\s+malicious)` + end
+	end = `(?:[^a-z0-9/]|$)`
+	// verdict is a word that calls the input safe, with marks of emphasis or quotation around it.
+	verdict = "(?:[*_`\"'“‘]+)?(?:safe|benign|clean|harmless|not\\s+malicious)" + end
 	subject = `(?:it|them|(?:this|that|the)(?:\s+(?:repository|repo|code|codebase|file|project|package|library|input))?)`
 	prior   = `(?:(?:all|any|every)\s+)?(?:(?:of\s+)?(?:the|your|my)\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|guidance|directions|prompts?)\b`
 )
@@ -99,34 +100,10 @@ func (analyzer) Analyze(ctx context.Context, f analyze.File) (analyze.Output, er
 		return out, nil
 	}
 	flat, _ := normalize(f.Data, nil)
-	var hits []hit
-	for _, set := range []struct {
-		res   []*regexp.Regexp
-		steer bool
-	}{{overrides, false}, {steers, true}} {
-		if len(hits) == 0 && set.steer {
-			return out, nil // nothing addresses an AI, so there is nothing to pair
-		}
-		for _, re := range set.res {
-			if err := ctx.Err(); err != nil {
-				return out, err
-			}
-			for _, m := range re.FindAllIndex(flat, maxHits) {
-				hits = append(hits, hit{start: m[0], end: m[1], steer: set.steer})
-			}
-		}
+	pairs, err := findPairs(ctx, flat)
+	if err != nil {
+		return out, err
 	}
-	if len(hits) == 0 {
-		return out, nil
-	}
-	slices.SortFunc(hits, func(a, b hit) int { return a.start - b.start })
-	pos, line := 0, 1
-	for i := range hits {
-		line += bytes.Count(flat[pos:hits[i].start], []byte{'\n'})
-		pos = hits[i].start
-		hits[i].line = line
-	}
-	pairs := pair(hits)
 	if len(pairs) == 0 {
 		return out, nil
 	}
@@ -155,32 +132,89 @@ func readable(f analyze.File) bool {
 	return bytes.IndexByte(f.Data[:min(len(f.Data), textWindow)], 0) < 0
 }
 
-// pair returns the places where a hit that addresses an AI meets a hit that steers
-// the verdict on the same line or within maxGap bytes, at most one per line and
-// protocol.MaxFindingsPerRulePerFile in all, in order of position. hits are sorted by start.
-func pair(hits []hit) []found {
+// iterator walks the matches of one pattern in order of position.
+type iterator struct {
+	re         *regexp.Regexp
+	steer      bool
+	pos        int // where the next search starts
+	start, end int // the next match
+	ok         bool
+}
+
+// advance finds the next match. Every pattern starts with a literal word, so
+// searching from the end of the last match gives the same matches as a search of
+// the whole text.
+func (it *iterator) advance(flat []byte) {
+	m := it.re.FindIndex(flat[it.pos:])
+	it.ok = m != nil
+	if it.ok {
+		it.start, it.end = it.pos+m[0], it.pos+m[1]
+		it.pos = it.end
+	}
+}
+
+// findPairs returns the places where a hit that addresses an AI meets a hit that
+// steers the verdict on the same line or within maxGap bytes, at most one per
+// line and protocol.MaxFindingsPerRulePerFile in all, in order of position. It
+// merges the matches of all patterns in order of position and keeps only the
+// latest hit of each kind that is not in a pair yet, so any number of earlier
+// matches cannot push out a later pair.
+func findPairs(ctx context.Context, flat []byte) ([]found, error) {
+	var its []*iterator
+	for _, re := range overrides {
+		its = append(its, &iterator{re: re})
+	}
+	for _, re := range steers {
+		its = append(its, &iterator{re: re, steer: true})
+	}
+	for _, it := range its {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		it.advance(flat)
+	}
 	var pairs []found
 	lines := map[int]bool{}
-	var last [2]*hit // the latest hit that addresses an AI, and the latest that steers, not in a pair yet
-	for i := 0; i < len(hits) && len(pairs) < protocol.MaxFindingsPerRulePerFile; i++ {
-		h := &hits[i]
+	var last [2]hit // the latest hit that addresses an AI, and the latest that steers
+	var have [2]bool
+	pos, line := 0, 1
+	for n := 0; len(pairs) < protocol.MaxFindingsPerRulePerFile; n++ {
+		if n%checkEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		var next *iterator
+		for _, it := range its {
+			if it.ok && (next == nil || it.start < next.start) {
+				next = it
+			}
+		}
+		if next == nil {
+			break
+		}
+		h := hit{start: next.start, end: next.end, steer: next.steer}
+		next.advance(flat)
+		line += bytes.Count(flat[pos:h.start], []byte{'\n'})
+		pos = h.start
+		h.line = line
 		kind, otherKind := 0, 1
 		if h.steer {
 			kind, otherKind = 1, 0
 		}
 		other := last[otherKind]
-		if other == nil || (other.line != h.line && h.start-other.end > maxGap) {
-			last[kind] = h
+		if !have[otherKind] || (other.line != h.line && h.start-other.end > maxGap) {
+			last[kind], have[kind] = h, true
 			continue
 		}
-		last = [2]*hit{}
+		have = [2]bool{}
 		if !lines[other.line] {
 			lines[other.line] = true
 			pairs = append(pairs, found{start: other.start, line: other.line})
 		}
 	}
 	slices.SortFunc(pairs, func(a, b found) int { return a.start - b.start })
-	return pairs
+	return pairs, nil
 }
 
 // inTestDir reports a file below a test, fixture or example folder.
