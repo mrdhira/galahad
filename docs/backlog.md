@@ -326,6 +326,46 @@ From: PR 78, PR 82 and PR 84 reviews.
 - The path filters in `vm.yml` miss `test/acceptance/{scan_test,link_test,git_test,main_test}.go` and the `Makefile`.
 From: PR 87 review.
 
+## Decision provider (M3)
+
+### Sweep targets promptfoo and garak are MALICIOUS before any M3 change
+Decide this in T3.5, before v0.3.0. The M3 definition of done says `promptfoo/promptfoo` and `NVIDIA/garak` must not be MALICIOUS, but `galahad-agent analyze` on main already gives:
+- promptfoo: MALICIOUS from GAL-EXFIL-001, GAL-EXEC-001 and others;
+- garak: MALICIOUS from GAL-SIG-001 (critical) and GAL-DEPS-001 (high).
+
+garak also gets one `GAL-INJECT-001` medium at `garak/data/inthewild_jailbreak_llms.json:34`, a real jailbreak prompt in its dataset. Both repos ship attack samples on purpose. Run the full sweep first (CLAUDE.md, Scope), then either fix real false alarms or narrow the definition of done for repos that carry samples, with the owner's approval.
+From: PR 98 review.
+
+### Provider config hardening
+- `Load` does not compare the opened file with the `Lstat` result, so a symlink swapped in between them is followed. Refuse unless `os.SameFile`, or open with `O_NOFOLLOW` (`internal/config/file.go`).
+- `encoding/json` matches field names without regard to case, and a duplicate key takes the last value. Neither lets a key in.
+- `validateURL` keeps `HTTPS://` as typed and accepts port 99999 or an empty port. Lowercase the scheme and require a port of 1 to 65535.
+- Two concurrent `provider add` or `remove` runs can lose an update (no lock), and the parent directory is not fsynced after the rename in `Save`.
+From: PR 95 review.
+
+### Provider command tests
+- `TestSave` and `TestProvider` cases are not in code order, and `TestLoad` has no case for an `Lstat` or `OpenFile` error other than not-exist.
+- `test/acceptance/provider_test.go` has no hostile-config cases through the binary (an `api_key` field, 17 providers, version 2, a 70 KiB file, a symlink, a FIFO), no `KEY_SET no` case, one exit-2 case only, no `--key-env` case, and no single run that adds a provider, lists it, then removes it in the same home.
+From: PR 95 review and QA.
+
+### Decision contract details
+- A nil `Findings` encodes as `null`, and `DecisionRequest.Validate` accepts a sent request with no findings. Require 1 to 24.
+- An empty `analyzer` or `title` is accepted inside `sent`.
+- `encoding/json` matches response keys without regard to case (`"OBJECT"`); every value is still checked.
+- In `decision_test.go`, `TestDecisionQuestions` and `TestDecisionRequestKeys` check things outside the table, and `TestParseDecisionResponse` cases are not in code order.
+From: PR 96 review.
+
+### Prompt-injection detector gaps
+- UTF-16 text files are not read (they hold NULs), and one NUL in the first 8 KiB hides the whole file.
+- Invisible characters outside the listed set get through: U+00AD, U+200E and U+200F and other bidi marks, U+2061 to U+2064, and tag characters U+E0000 to U+E007F. NBSP inside a phrase and homoglyphs also get through.
+- Markup or comment prefixes inside a phrase are missed: `Do **not** flag`, `// ignore all` then `// previous instructions`.
+- The patterns have no leading word boundary, so `undo not report` matches.
+- Go's `\s` does not include `\v`.
+- The test-folder downgrade applies to archive members too. Decide in T3.5 whether to also downgrade test file names (`_test.go`, `.spec.ts`, `test_*.py`); the galahad repo's own `inject_test.go` gets medium hits today.
+- Without a match cap, a dense 32 MiB text file with no pair takes about 2.9 s, against the 10 s per-file timeout. Many such files add up against the 5-minute job timeout; keep it in mind when sizing the guest CPU.
+- The test helper `cmpOr` duplicates `cmp.Or`.
+From: PR 98 review.
+
 ## Windows (M6, after v1.0.0)
 
 ### Windows host and Windows guest
