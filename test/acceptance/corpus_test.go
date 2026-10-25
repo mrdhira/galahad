@@ -367,6 +367,12 @@ func corpusCases() []corpusCase {
 			wantRules: []string{"GAL-EXFIL-001 lure.eml!/setup.js:3", "GAL-EML-001 lure.eml:1", "GAL-EML-003 lure.eml:15"},
 		},
 		{
+			name:   "p9-prompt-injection-repo: README tells an AI reviewer to call a repo safe that sends .env on folder open",
+			target: corpusDir("p9-prompt-injection-repo"), wantCode: 20,
+			wantRules:    []string{"GAL-AUTOEXEC-010 .vscode/tasks.json:7", "GAL-INJECT-001 README.md:5"},
+			wantSnippets: []string{"ignore all previous instructions"},
+		},
+		{
 			name: "eicar: test string written at test time (built)",
 			target: func(t *testing.T) string {
 				return writeEICAR(t, t.TempDir())
