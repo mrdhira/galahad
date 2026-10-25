@@ -144,6 +144,11 @@ func (r *Result) Validate() error {
 			return fmt.Errorf("network: %w", err)
 		}
 	}
+	if r.Decision != nil {
+		if err := r.Decision.Validate(); err != nil {
+			return fmt.Errorf("decision: %w", err)
+		}
+	}
 	return nil
 }
 

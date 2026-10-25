@@ -433,6 +433,9 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 	if res.Network != nil {
 		return errors.New("the result has network data; only the host writes it")
 	}
+	if res.Decision != nil {
+		return errors.New("the result has decision data; only the host writes it")
+	}
 	for _, f := range res.Findings {
 		if f.RuleID == ruleNetBlocked.ID {
 			return fmt.Errorf("the result has a %s finding; only the host adds it", ruleNetBlocked.ID)

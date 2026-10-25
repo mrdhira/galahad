@@ -169,6 +169,18 @@ func TestRunNetwork(t *testing.T) {
 			wantPorts: []uint32{1024, 1025},
 		},
 		{
+			name: "the result has a decision of the guest",
+			edit: func(res *protocol.Result) {
+				res.Decision = &protocol.Decision{
+					Provider: "test", URL: "https://api.example.test", Model: "test/model",
+					Status: protocol.DecisionSkipped, Reason: protocol.DecisionSkipNoFindings,
+				}
+			},
+			wantErr:   "the result has decision data",
+			wantLog:   true,
+			wantPorts: []uint32{1024, 1025},
+		},
+		{
 			name:            "the sandbox has no proxy listener",
 			noProxyListener: true, script: func(*guest) {},
 			wantErr:   "the sandbox has no proxy listener",
@@ -224,6 +236,9 @@ func TestRunNetwork(t *testing.T) {
 				t.Errorf("proxy.log has %d lines, want at most %d", len(lines), tt.wantMaxLines)
 			}
 			if tt.wantErr != "" {
+				if _, err := os.Stat(filepath.Join(jobs, out.Job.ID, "report.json")); err == nil {
+					t.Error("report.json exists after a refused Result, want none")
+				}
 				return
 			}
 			res := out.Result

@@ -92,11 +92,11 @@ func markTruncated(r *Result) {
 	r.Coverage.Skipped = append(sk[:len(sk):len(sk)], Skip{Path: truncationPath, Reason: SkipBudget})
 }
 
-func encodeJSON(r *Result) ([]byte, error) {
+func encodeJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(r); err != nil {
+	if err := enc.Encode(v); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil

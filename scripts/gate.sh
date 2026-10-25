@@ -83,9 +83,9 @@ if go list -f '{{join .GoFiles " "}}' ./internal/proxy | grep -F -q testhooks_fa
 fi
 # The net-probe job, the bad-result hooks, the Drive base override and the update hooks (signatures
 # directory, YARA-Forge address) of the fake guest, the signature directory and OSV address hooks of
-# the guest tools, plain http for .test Git hosts, and the P8 probes of the guest, the host job and
-# the CLI exist only in galahadtest builds.
-for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galahadtest.go internal/agent/drivebase_galahadtest.go internal/agent/updatehooks_galahadtest.go internal/job/netprobe_galahadtest.go internal/analyze/tools/sigroot_galahadtest.go internal/analyze/tools/osvbase_galahadtest.go internal/protocol/githttp_galahadtest.go internal/agent/probe_galahadtest.go internal/job/probe_galahadtest.go internal/cli/p8probe_galahadtest.go; do
+# the guest tools, plain http for .test Git hosts and for loopback decision providers, and the P8
+# probes of the guest, the host job and the CLI exist only in galahadtest builds.
+for f in internal/agent/netprobe_galahadtest.go internal/agent/result_send_galahadtest.go internal/agent/drivebase_galahadtest.go internal/agent/updatehooks_galahadtest.go internal/job/netprobe_galahadtest.go internal/analyze/tools/sigroot_galahadtest.go internal/analyze/tools/osvbase_galahadtest.go internal/protocol/githttp_galahadtest.go internal/protocol/decision_loopback_galahadtest.go internal/agent/probe_galahadtest.go internal/job/probe_galahadtest.go internal/cli/p8probe_galahadtest.go; do
   pkg="./$(dirname "$f")"
   name="$(basename "$f")"
   if ! go list -tags galahadtest -f '{{join .GoFiles " "}}' "$pkg" | grep -F -q "$name"; then
