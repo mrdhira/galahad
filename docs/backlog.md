@@ -92,6 +92,10 @@ From: PR 86 review.
 `agent.CheckDropped` checks uid, euid, gid, egid and that `setuid(0)` fails. It could also re-read the saved ids (`getresgid`) and `getgroups`, so the proof does not rely on the order of calls in `dropPrivileges`.
 From: PR 86 review.
 
+### Fake backend's agent inherits the host environment
+`internal/sandbox/fake/fake.go` starts the agent with `exec.CommandContext` and no `Env`, so the agent gets every host variable, including a decision provider key such as `NETRA_API_KEY` once M3 lands. Test builds only: a Firecracker guest gets nothing from the host environment. Give the agent a minimal environment (`PATH`, `HOME`, `TMPDIR`, and the test helper variable).
+From: M3 planning.
+
 ### Fake backend leaks a temp directory per scan
 The fake backend starts the agent with `--unsafe-host`, which makes `/tmp/galahad-input-*`. The host kills the agent before its deferred `RemoveAll` runs, so every scan leaves a directory (1724 directories, 1.4 GB, filled a dev disk). Test-only, but it fills CI and dev disks. Give the agent a temp directory that the fake backend removes, or have the agent remove the directory before it sends the Result.
 From: PR 86 review.

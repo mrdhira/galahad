@@ -3,7 +3,7 @@
 ## Context
 Fake recruiters and phishers send developers PDFs, archives and "take-home" repos. These run code on folder-open (`.vscode/tasks.json`), on `npm install` (lifecycle scripts, husky), or when the app runs, and steal env vars and keys or install malware.
 
-**Galahad** is a single Go **CLI**, released on GitHub. It inspects a link, file or repo inside a VM it manages itself, optionally asks a Jev-style decision API, and writes a summary report (verdict, risk, confidence) and a detailed report. A GUI comes later and will reuse `internal/*`.
+**Galahad** is a single Go **CLI**, released on GitHub. It inspects a link, file or repo inside a VM it manages itself, optionally asks a decision API such as Netra, and writes a summary report (verdict, risk, confidence) and a detailed report. A GUI comes later and will reuse `internal/*`.
 
 ## Ground rules (locked)
 | Rule | Detail |
@@ -13,7 +13,7 @@ Fake recruiters and phishers send developers PDFs, archives and "take-home" repo
 | Tools inside the guest VM | Allowed, because they are not linked into the binary: git, ClamAV, YARA, capa, Ghidra, code-server, strace, Sysmon, etc. |
 | Host-side tools | Firecracker binary (Linux host), and dev tools (golangci-lint, gosec, govulncheck). Dev tools are installed in CI and **never** added to go.mod. |
 | Host safety rule | The host CLI never parses untrusted bytes. All analyzers run in `galahad-agent` inside the VM. |
-| Decision API | Jev public shape (`state` + `questions`: choice/score/yes-no → probabilities). Netra = same contract, different base URL. |
+| Decision API | Netra Decisions API (`model` + `input` + `questions`: choice/score/yes-no → probabilities over fixed labels). Contract in `docs/milestones/M3.md`. |
 | Name / repo | **Galahad**, `github.com/mrdhira/galahad`, Apache-2.0. |
 | Tests | **Unit tests and black-box acceptance tests only.** No fuzzing and no heavy mocks. |
 
@@ -170,12 +170,12 @@ This is a dev-only command, used on fixtures only. `--unsafe-host` is needed unt
 | ID | Task |
 |---|---|
 | T3.1 | JSON config + `provider add/list/test/remove`; keys read from env vars only |
-| T3.2 | Jev-shape client (`net/http`): timeouts, retry, response validation |
+| T3.2 | Decisions API client (`net/http`): timeouts, retry, response validation |
 | T3.3 | Snippet selection, secret redaction, prompt-injection detector |
 | T3.4 | Capped scoring integration + "AI opinions" report section (what was sent and what came back) |
 | T3.5 | QA: P9 with an `httptest` mock provider |
 
-**🎬 Demo:** `galahad provider add jev …`, then `galahad scan <repo> --decision jev`. The report shows the AI opinion, and the verdict can't be lowered by a prompt-injection repo.
+**🎬 Demo:** `galahad provider add netra`, then `galahad scan <repo> --decision netra`. The report shows the AI opinion, and the verdict can't be lowered by a prompt-injection repo.
 
 ### M4 · Linux dynamic analysis and safe-work (5 wks, 7 tasks)
 | ID | Task |
