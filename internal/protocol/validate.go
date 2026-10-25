@@ -70,6 +70,9 @@ func (r *Result) Validate() error {
 	if len(r.Coverage.Analyzers) > MaxAnalyzers {
 		return fmt.Errorf("%d analyzers, max %d", len(r.Coverage.Analyzers), MaxAnalyzers)
 	}
+	if len(r.Coverage.LeftOut) > MaxAnalyzers {
+		return fmt.Errorf("%d left out, max %d", len(r.Coverage.LeftOut), MaxAnalyzers)
+	}
 	if len(r.Reasons) > MaxReasonCount {
 		return fmt.Errorf("%d reasons, max %d", len(r.Reasons), MaxReasonCount)
 	}
@@ -111,6 +114,16 @@ func (r *Result) Validate() error {
 		case SkipTooLarge, SkipBudget, SkipDepth, SkipUnsupported, SkipEncrypted, SkipParseError, SkipUnreadable, SkipTimeout, SkipPanic:
 		default:
 			return fmt.Errorf("coverage.skipped[%d]: reason %q not allowed", i, s.Reason)
+		}
+	}
+	for i, l := range r.Coverage.LeftOut {
+		if err := checkName("tool", l.Tool); err != nil {
+			return fmt.Errorf("coverage.left_out[%d]: %w", i, err)
+		}
+		switch l.Cause {
+		case LeftOutNoNetwork, LeftOutTimeout, LeftOutFailed:
+		default:
+			return fmt.Errorf("coverage.left_out[%d]: cause %q not allowed", i, l.Cause)
 		}
 	}
 	for i, a := range r.Coverage.Analyzers {

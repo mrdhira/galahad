@@ -11,10 +11,14 @@ import (
 // The hooks read the environment on each call, so a test can change it.
 func init() {
 	hookResolve = func(host string) ([]netip.Addr, bool) {
-		// GALAHAD_TEST_RESOLVE=name=ip,name=ip. A name may repeat to give several addresses.
+		// GALAHAD_TEST_RESOLVE=name=ip,name=ip. A name may repeat to give several addresses. name=fail
+		// makes the lookup of name fail, as it does on a computer without a network.
 		var out []netip.Addr
 		for _, kv := range strings.Split(os.Getenv("GALAHAD_TEST_RESOLVE"), ",") {
 			name, ip, ok := strings.Cut(kv, "=")
+			if ok && name == host && ip == "fail" {
+				return nil, true
+			}
 			if a, err := netip.ParseAddr(ip); ok && name == host && err == nil {
 				out = append(out, a)
 			}

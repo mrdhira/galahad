@@ -70,7 +70,7 @@ func (o osv) Run(ctx context.Context, target string) (Result, error) {
 	case o.base == "":
 		return Result{}, errors.New("no OSV server is configured in this build")
 	case o.relay == "":
-		return Result{}, errors.New("the job has no network, so OSV was not asked")
+		return Result{}, fmt.Errorf("the job has no network, so OSV was not asked: %w", errNoNetwork)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, osvTotal)
@@ -108,10 +108,14 @@ func (o osv) Run(ctx context.Context, target string) (Result, error) {
 	return res, nil
 }
 
-// osvError says why a lookup did not work. A refusal of the host proxy is the case that a local DNS
-// setting can cause, so it is named.
+// osvError says why a lookup did not work. The host proxy tells the guest why it refused a tunnel.
+// A failed DNS lookup or dial means the computer that runs Galahad has no network. Any other refusal
+// is the case that a local DNS setting can cause, so it is named.
 func osvError(err error) error {
 	if errors.Is(err, ingest.ErrNotAllowed) {
+		if msg := err.Error(); strings.Contains(msg, "dns lookup failed") || strings.Contains(msg, "dial failed") {
+			return fmt.Errorf("%w: the computer that runs Galahad could not reach api.osv.dev: %w", errNoNetwork, err)
+		}
 		return fmt.Errorf("the host proxy refused the OSV lookup; if it names a private address, the DNS of the computer that runs Galahad resolves api.osv.dev to one: %w", err)
 	}
 	return fmt.Errorf("the OSV lookup failed, possibly because the computer is offline: %w", err)

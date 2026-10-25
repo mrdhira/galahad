@@ -30,6 +30,7 @@ func TestTestHooks(t *testing.T) {
 		{name: "loopback is blocked without a sinkhole", resolve: "ok.test=127.0.0.1", host: "ok.test", port: 443, wantReason: "loopback"},
 		{name: "the sinkhole is the only loopback address", resolve: "ok.test=127.0.0.2", sinkhole: true, host: "ok.test", port: 443, wantReason: "loopback"},
 		{name: "the sinkhole does not hide a second address", resolve: "ok.test=127.0.0.1,ok.test=10.0.0.1", sinkhole: true, host: "ok.test", port: 443, wantReason: "private"},
+		{name: "a name set to fail does not resolve", resolve: "off.test=fail", host: "off.test", port: 443, wantReason: "dns lookup failed"},
 		{name: "port 80 needs a .test host", resolve: "ok.example.com=127.0.0.1", sinkhole: true, host: "ok.example.com", port: 80, wantReason: "port not allowed"},
 	}
 	for _, tt := range tests {

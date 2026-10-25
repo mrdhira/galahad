@@ -580,6 +580,20 @@ func TestWriteContent(t *testing.T) {
 			wantNeitherHas: []string{"169.254.169.254", "evil.test", "api.osv.dev"},
 		},
 		{
+			name: "a refused lookup of Galahad to api.osv.dev is its own lookup and not a denied request of the input",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{Events: []protocol.NetEvent{
+					{Host: "api.osv.dev", Port: 443, Decision: protocol.DecisionDenied, Reason: "dns lookup failed", Count: 1},
+					{Host: "evil.test", Port: 443, Decision: protocol.DecisionDenied, Reason: "host not allowed", Count: 1},
+				}}
+			},
+			wantMD: []string{
+				"| denied | evil[.]test | 443 | 1 | host not allowed |\n| Galahad's own OSV lookup | api[.]osv[.]dev | 443 | 1 | dns lookup failed |\n",
+			},
+			wantHTML:       []string{"<td>Galahad&#39;s own OSV lookup</td><td><code>api[.]osv[.]dev</code></td><td>443</td><td>1</td><td>dns lookup failed</td>"},
+			wantNeitherHas: []string{"denied api", "<td>denied</td><td><code>api"},
+		},
+		{
 			name: "network section with no requests",
 			mutate: func(r *protocol.Result) {
 				r.Network = &protocol.Network{Events: []protocol.NetEvent{}}
@@ -852,6 +866,17 @@ func TestTerminal(t *testing.T) {
 				"\nNetwork (2 destinations):\n  \x1b[31mBLOCKED 169[.]254[.]169[.]254:443 (2 requests): metadata\x1b[0m\n  allowed api[.]osv[.]dev:443 (1 request)\n\nReports:",
 			},
 			wantAbsent: []string{"169.254.169.254", "api.osv.dev"},
+		},
+		{
+			name: "a blocked lookup of Galahad to api.osv.dev is not shown as blocked",
+			mutate: func(r *protocol.Result) {
+				r.Network = &protocol.Network{Events: []protocol.NetEvent{
+					{Host: "api.osv.dev", Port: 443, Decision: protocol.DecisionDenied, Reason: "benchmarking", Blocked: true, Count: 1},
+				}}
+			},
+			color:       true,
+			wantContain: []string{"\nNetwork (1 destination):\n  Galahad's own OSV lookup api[.]osv[.]dev:443 (1 request): benchmarking\n\nReports:"},
+			wantAbsent:  []string{"BLOCKED"},
 		},
 		{
 			name: "no network requests",
