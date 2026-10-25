@@ -331,7 +331,7 @@ From: PR 87 review.
 ### Sweep targets promptfoo and garak are MALICIOUS before any M3 change
 Decide this in T3.5, before v0.3.0. The M3 definition of done says `promptfoo/promptfoo` and `NVIDIA/garak` must not be MALICIOUS, but `galahad-agent analyze` on main already gives:
 - promptfoo: MALICIOUS from GAL-EXFIL-001, GAL-EXEC-001 and others;
-- garak: MALICIOUS from SIG-001 (critical) and DEPS-001 (high).
+- garak: MALICIOUS from GAL-SIG-001 (critical) and GAL-DEPS-001 (high).
 
 garak also gets one `GAL-INJECT-001` medium at `garak/data/inthewild_jailbreak_llms.json:34`, a real jailbreak prompt in its dataset. Both repos ship attack samples on purpose. Run the full sweep first (CLAUDE.md, Scope), then either fix real false alarms or narrow the definition of done for repos that carry samples, with the owner's approval.
 From: PR 98 review.
@@ -345,7 +345,7 @@ From: PR 95 review.
 
 ### Provider command tests
 - `TestSave` and `TestProvider` cases are not in code order, and `TestLoad` has no case for an `Lstat` or `OpenFile` error other than not-exist.
-- `test/acceptance/provider_test.go` has no hostile-config cases through the binary (an `api_key` field, 17 providers, version 2, a 70 KiB file, a symlink, a FIFO), no `KEY_SET no` case, one exit-2 case only, no `--key-env` case, and no single run that does add, list and remove in the same home.
+- `test/acceptance/provider_test.go` has no hostile-config cases through the binary (an `api_key` field, 17 providers, version 2, a 70 KiB file, a symlink, a FIFO), no `KEY_SET no` case, one exit-2 case only, no `--key-env` case, and no single run that adds a provider, lists it, then removes it in the same home.
 From: PR 95 review and QA.
 
 ### Decision contract details
