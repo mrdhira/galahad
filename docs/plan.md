@@ -200,7 +200,7 @@ This is a dev-only command, used on fixtures only. `--unsafe-host` is needed unt
 | T5.1 | macOS backend: our own cgo/Obj-C bridge to Virtualization.framework (Linux boot, virtio-blk, vsock), entitlement signing |
 | T5.2 | arm64 guest images (Apple Silicon) alongside amd64 |
 | T5.3 | macOS `doctor` checks (macOS 13+, Apple Silicon or Intel, the virtualization entitlement) |
-| T5.4 | CI and release: the darwin build needs cgo, so darwin archives build on a macOS runner; unit tests on macOS; a manual acceptance checklist, since GitHub runners can't run nested VMs there |
+| T5.4 | CI and release: the darwin build needs cgo, so darwin archives build on a macOS runner, and the `make gate` cross-build keeps a non-cgo darwin stub; unit tests on macOS; a manual acceptance checklist, since GitHub runners can't run nested VMs there |
 | T5.5 | QA: full acceptance suite on a real MacBook |
 
 **🎬 Demo:** the same `galahad scan` on your MacBook.
