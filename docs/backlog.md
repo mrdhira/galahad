@@ -124,6 +124,14 @@ From: PR 79 review.
 `internal/analyze/tools/capa.go` stops at the first timeout, so one slow executable that sorts first leaves capa out for all later files. Scan the smallest files first. There is no unit case for "an earlier capa hit is kept after a later timeout"; the fake capa needs a per-file mode for it.
 From: PR 83 review.
 
+### capa out of total time reads as "failed"
+When capa runs out of its total time before it has examined any file, `internal/analyze/tools/capa.go` reports the cause as `failed`, not `timeout`, so the reason says "capa was left out: it failed". Return the timeout error in that case too.
+From: PR 91 review.
+
+### The OSV block reason is said twice
+When the proxy refuses the OSV lookup (a fake-IP or Pi-hole DNS), the reasons list both "the OSV lookup was blocked: ..." and "osv was left out: it failed, see artifacts/tools.log". Keep one line that names the block.
+From: PR 91 review.
+
 ### capa cannot read Mach-O and is near its limit on large binaries
 capa has no Mach-O support, so it always fails on those files. On large Go binaries it does not finish: the 9.6 MB `galahad` binary ran past both 60 s and 5 min in the v0.2.0 sweep, so capa is left out (coverage is truncated, the exit code stays 0). This is a known gap in v0.2.0. Skip Mach-O files up front, and find a capa mode or option that finishes on Go binaries, or skip them with a clear note.
 From: PR 83 review, v0.2.0 sweep.
@@ -201,6 +209,14 @@ For an update or probe job, `runner.finish` in `internal/job/run.go` sets `job.B
 From: PR 85 review.
 
 ## Host job, report and CLI
+
+### A limit cut is not named next to a left-out tool
+`internal/scoring/scoring.go` adds "a limit cut the analysis short" only when no guest tool was left out. A scan cut by a file or finding limit, or by a tool that ran only in part, and that also left a tool out, shows only the tool line. The confidence is right; the reason is incomplete. Record a limit cut separately from `Coverage.Truncated` so both can be named.
+From: PR 91 review.
+
+### M1.md shows the old Coverage and reason text
+`docs/milestones/M1.md` lists `Coverage` without `left_out` and quotes the old generic reason "a limit or a guest tool that did not run cut the analysis short". Update both, or mark them as the v0.1.0 state.
+From: PR 91 review.
 
 ### `newPlan` ignores the context
 `newPlan` in `internal/job/input.go` walks the target without a context, so Ctrl-C does nothing during the host walk. The walk is bounded by 200000 entries but slow on a network file system. The pre-boot size estimate also counts one header block per entry and ignores PAX and GNU long-name blocks, so an input near the cap with long names fails after boot (still exit 1).
