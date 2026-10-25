@@ -123,7 +123,7 @@ func TestOSV(t *testing.T) {
 		name string
 		// inputs
 		files   map[string][]byte
-		relay   string // "refuse" refuses the tunnel, "down" has no relay listening, "none" gives no address
+		relay   string // "refuse" refuses the tunnel, "dns" and "dial" refuse it as the host proxy does when it has no network, "down" has no relay listening, "none" gives no address
 		base    string // the API address; the test server through api.osv.dev:443 when empty; "none" for no address
 		respond func(call, n int) (status int, body string)
 		// expectations
@@ -228,6 +228,20 @@ func TestOSV(t *testing.T) {
 			files:   both,
 			relay:   "none",
 			wantErr: "no network",
+		},
+		{
+			name:      "a failed DNS lookup of the host proxy is no network",
+			files:     both,
+			relay:     "dns",
+			wantHosts: []string{"api.osv.dev:443"},
+			wantErr:   "no network: the computer that runs Galahad could not reach api.osv.dev",
+		},
+		{
+			name:      "a failed dial of the host proxy is no network",
+			files:     both,
+			relay:     "dial",
+			wantHosts: []string{"api.osv.dev:443"},
+			wantErr:   "no network: the computer that runs Galahad could not reach api.osv.dev",
 		},
 		{
 			name:    "no API address leaves the tool out",
@@ -350,10 +364,11 @@ func TestOSV(t *testing.T) {
 				_, _ = io.WriteString(w, text)
 			}))
 			defer backend.Close()
-			refuse := ""
-			if tt.relay == "refuse" {
-				refuse = "denied: benchmarking\n"
-			}
+			refuse := map[string]string{
+				"refuse": "denied: benchmarking\n",
+				"dns":    "denied: dns lookup failed\n",
+				"dial":   "denied: dial failed\n",
+			}[tt.relay]
 			relay, hosts := osvRelay(t, backend, refuse)
 			switch tt.relay {
 			case "down":

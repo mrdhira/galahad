@@ -117,7 +117,7 @@ In `internal/analyze/tools/clamav.go`, exit 2 with stdout that parses to no find
 From: PR 79 and PR 84 reviews.
 
 ### Coverage does not say why it is truncated
-`Coverage.Truncated` is set both by a limit and by a tool that was left out, and the report uses shared wording for the two. Add a field that names the cause. The timeout message in `execute` (`internal/analyze/tools/tools.go`) also rounds to whole seconds.
+`Coverage.Truncated` is set both by a limit and by a tool that was left out, and the report uses shared wording for the two. The scoring reasons now name each tool in `Coverage.LeftOut` and its cause; the Truncated line of the report still uses the shared wording. The timeout message in `execute` (`internal/analyze/tools/tools.go`) also rounds to whole seconds.
 From: PR 79 review.
 
 ### capa turns itself off after the first timeout

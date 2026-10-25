@@ -28,6 +28,13 @@ const (
 	SkipPanic       = "panic"
 )
 
+// Causes a guest tool is left out, as in LeftOut.Cause.
+const (
+	LeftOutNoNetwork = "no_network" // the tool needs the network and the host could not reach it
+	LeftOutTimeout   = "timeout"    // the tool ran out of time
+	LeftOutFailed    = "failed"     // any other reason; tools.log has the detail
+)
+
 // MaxReason is the longest allowed entry of Result.Reasons, in runes.
 const MaxReason = MaxSnippet * 2
 
@@ -171,13 +178,20 @@ func (s Skip) HidesContent() bool {
 	return false
 }
 
-// Coverage says how much of the target was analyzed.
+// LeftOut records a guest tool that did not scan the input and why.
+type LeftOut struct {
+	Tool  string `json:"tool"`
+	Cause string `json:"cause"`
+}
+
+// Coverage says how much of the target was analyzed. LeftOut names the guest tools that did not run.
 type Coverage struct {
-	FilesSeen     int      `json:"files_seen"`
-	FilesAnalyzed int      `json:"files_analyzed"`
-	Skipped       []Skip   `json:"skipped"`
-	Analyzers     []string `json:"analyzers"`
-	Truncated     bool     `json:"truncated"`
+	FilesSeen     int       `json:"files_seen"`
+	FilesAnalyzed int       `json:"files_analyzed"`
+	Skipped       []Skip    `json:"skipped"`
+	Analyzers     []string  `json:"analyzers"`
+	Truncated     bool      `json:"truncated"`
+	LeftOut       []LeftOut `json:"left_out,omitempty"`
 }
 
 // Target describes what was scanned. SHA256 is set for file targets only. Size is the file size,

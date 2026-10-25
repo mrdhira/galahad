@@ -255,7 +255,14 @@ func TestCapa(t *testing.T) {
 			files:   map[string][]byte{"a.exe": peFile, "b.exe": peFile},
 			fake:    fakeRun{mode: "hang"},
 			budget:  300 * time.Millisecond,
-			wantErr: "stopped after the first timeout",
+			wantErr: "stopped after a.exe timed out; 1 more executable was not examined",
+		},
+		{
+			name:    "the stop note counts the executables that were not examined",
+			files:   map[string][]byte{"a.exe": peFile, "b.exe": peFile, "c.exe": peFile, "d.exe": peFile},
+			fake:    fakeRun{mode: "hang"},
+			budget:  300 * time.Millisecond,
+			wantErr: "stopped after a.exe timed out; 3 more executables were not examined",
 		},
 	}
 	for _, tt := range tests {

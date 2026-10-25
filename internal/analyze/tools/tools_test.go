@@ -312,6 +312,74 @@ func TestApply(t *testing.T) {
 	}
 }
 
+// TestApplyLeftOut checks that a tool that is left out is named in the coverage with its cause, and that
+// the reason of a clean verdict says so.
+func TestApplyLeftOut(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		tool   func() tools.Tool
+		files  map[string][]byte
+		fake   fakeRun
+		budget time.Duration
+		// expectations
+		wantLeftOut []protocol.LeftOut
+		wantReasons []string
+	}{
+		{
+			name:        "a tool that ran is not named",
+			tool:        func() tools.Tool { return stubTool{name: "yara"} },
+			wantLeftOut: nil,
+			wantReasons: []string{"no findings"},
+		},
+		{
+			name:        "OSV without a network is left out for no network",
+			tool:        func() tools.Tool { return tools.NewOSV("", "http://api.osv.dev:443") },
+			files:       map[string][]byte{"requirements.txt": []byte("flask==2.0.0\n")},
+			wantLeftOut: []protocol.LeftOut{{Tool: "osv", Cause: protocol.LeftOutNoNetwork}},
+			wantReasons: []string{"no findings", "osv was left out: no network"},
+		},
+		{
+			name:        "capa that runs out of time is left out for a timeout",
+			tool:        func() tools.Tool { return tools.NewCapa("") },
+			files:       map[string][]byte{"a.exe": peFile},
+			fake:        fakeRun{mode: "hang"},
+			budget:      300 * time.Millisecond,
+			wantLeftOut: []protocol.LeftOut{{Tool: "capa", Cause: protocol.LeftOutTimeout}},
+			wantReasons: []string{"no findings", "capa was left out: timed out"},
+		},
+		{
+			name:        "any other failure is left out as failed",
+			tool:        func() tools.Tool { return stubTool{name: "clamav", err: errors.New("exited with code 2")} },
+			wantLeftOut: []protocol.LeftOut{{Tool: "clamav", Cause: protocol.LeftOutFailed}},
+			wantReasons: []string{"no findings", "clamav was left out: it failed, see artifacts/tools.log"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useFake(t, tt.fake)
+			dir := t.TempDir()
+			writeTree(t, dir, tt.files)
+			ctx, cancel := context.WithTimeout(context.Background(), cmp.Or(tt.budget, time.Minute))
+			defer cancel()
+			res := protocol.Result{Coverage: protocol.Coverage{FilesSeen: 1, FilesAnalyzed: 1}}
+
+			_, err := tools.Apply(ctx, []tools.Tool{tt.tool()}, dir, &res, func(string) error { return nil })
+			scoring.Apply(&res)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(res.Coverage.LeftOut, tt.wantLeftOut) {
+				t.Errorf("left out = %v, want %v", res.Coverage.LeftOut, tt.wantLeftOut)
+			}
+			if !slices.Equal(res.Reasons, tt.wantReasons) {
+				t.Errorf("reasons = %q, want %q", res.Reasons, tt.wantReasons)
+			}
+		})
+	}
+}
+
 func TestAll(t *testing.T) {
 	tests := []struct {
 		name string

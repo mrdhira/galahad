@@ -97,7 +97,7 @@ func All(env Env) []Tool {
 // Apply runs the tools one after the other within ctx, which holds what is left of the job
 // time, and adds what they find to res. A tool that ran is added to res.Coverage.Analyzers.
 // A tool that is left out marks the coverage truncated, which lowers the confidence of a clean
-// verdict without making it suspicious. progress gets the stage of each tool before it runs. The returned bytes are tools.log, with
+// verdict without making it suspicious, and is named in Coverage.LeftOut with its cause. progress gets the stage of each tool before it runs. The returned bytes are tools.log, with
 // one line per tool.
 func Apply(ctx context.Context, ts []Tool, target string, res *protocol.Result, progress func(stage string) error) ([]byte, error) {
 	var log bytes.Buffer
@@ -109,6 +109,7 @@ func Apply(ctx context.Context, ts []Tool, target string, res *protocol.Result, 
 		if err != nil {
 			fmt.Fprintf(&log, "%s: left out: %s\n", t.Name(), protocol.CleanPath(err.Error()))
 			res.Coverage.Truncated = true
+			res.Coverage.LeftOut = append(res.Coverage.LeftOut, protocol.LeftOut{Tool: t.Name(), Cause: leftOutCause(err)})
 			continue
 		}
 		analyze.AddFindings(res, t.Name(), r.Findings)
@@ -125,6 +126,25 @@ func Apply(ctx context.Context, ts []Tool, target string, res *protocol.Result, 
 
 // errTimedOut is the error of a tool that was killed at its time limit.
 var errTimedOut = errors.New("timed out")
+
+// timeoutError is an error that keeps its text and still matches errTimedOut.
+type timeoutError struct{ error }
+
+func (timeoutError) Is(target error) bool { return target == errTimedOut }
+
+// errNoNetwork is the error of a tool that needs the network when the host could not reach it.
+var errNoNetwork = errors.New("no network")
+
+// leftOutCause is the protocol.LeftOut cause of the error of a tool that did not scan.
+func leftOutCause(err error) string {
+	switch {
+	case errors.Is(err, errNoNetwork):
+		return protocol.LeftOutNoNetwork
+	case errors.Is(err, errTimedOut):
+		return protocol.LeftOutTimeout
+	}
+	return protocol.LeftOutFailed
+}
 
 // output is what a finished tool left.
 type output struct {

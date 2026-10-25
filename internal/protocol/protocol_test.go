@@ -120,6 +120,7 @@ func TestValidate(t *testing.T) {
 		{name: "too many files", mutate: func(r *protocol.Result) { r.Files = make([]protocol.FileInfo, protocol.MaxFiles+1) }, wantErr: "files, max"},
 		{name: "too many skipped", mutate: func(r *protocol.Result) { r.Coverage.Skipped = make([]protocol.Skip, protocol.MaxSkipped+1) }, wantErr: "skipped, max"},
 		{name: "too many analyzers", mutate: func(r *protocol.Result) { r.Coverage.Analyzers = make([]string, protocol.MaxAnalyzers+1) }, wantErr: "analyzers, max"},
+		{name: "too many left out", mutate: func(r *protocol.Result) { r.Coverage.LeftOut = make([]protocol.LeftOut, protocol.MaxAnalyzers+1) }, wantErr: "left out, max"},
 		{name: "too many reasons", mutate: func(r *protocol.Result) { r.Reasons = make([]string, protocol.MaxReasonCount+1) }, wantErr: "reasons, max"},
 		{name: "files at the limit", mutate: func(r *protocol.Result) {
 			r.Files = slices.Repeat(r.Files, protocol.MaxFiles)
@@ -193,6 +194,15 @@ func TestValidate(t *testing.T) {
 		{name: "ioc path is absolute", mutate: func(r *protocol.Result) { r.IOCs[0].Path = "/x" }, wantErr: "iocs[0]: path"},
 		{name: "skip path is absolute", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Path = "/x" }, wantErr: "coverage.skipped[0]: path"},
 		{name: "skip reason unknown", mutate: func(r *protocol.Result) { r.Coverage.Skipped[0].Reason = "lazy" }, wantErr: "reason"},
+		{name: "left out tool with a known cause", mutate: func(r *protocol.Result) {
+			r.Coverage.LeftOut = []protocol.LeftOut{{Tool: "osv", Cause: protocol.LeftOutNoNetwork}}
+		}},
+		{name: "left out tool has control character", mutate: func(r *protocol.Result) {
+			r.Coverage.LeftOut = []protocol.LeftOut{{Tool: "a\x1b", Cause: protocol.LeftOutFailed}}
+		}, wantErr: "coverage.left_out[0]: tool has control"},
+		{name: "left out cause unknown", mutate: func(r *protocol.Result) {
+			r.Coverage.LeftOut = []protocol.LeftOut{{Tool: "osv", Cause: "lazy"}}
+		}, wantErr: `coverage.left_out[0]: cause "lazy" not allowed`},
 		{name: "coverage analyzer has control character", mutate: func(r *protocol.Result) { r.Coverage.Analyzers[0] = "a\x1b" }, wantErr: "coverage.analyzers[0]"},
 		{name: "coverage analyzer too long", mutate: func(r *protocol.Result) { r.Coverage.Analyzers[0] = strings.Repeat("a", protocol.MaxName+1) }, wantErr: "coverage.analyzers[0]: name is 65 bytes"},
 		{name: "reason too long", mutate: func(r *protocol.Result) { r.Reasons[0] = strings.Repeat("a", protocol.MaxReason+1) }, wantErr: "reasons[0]: 401 runes"},

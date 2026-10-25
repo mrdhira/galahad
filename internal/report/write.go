@@ -17,6 +17,7 @@ import (
 
 	"github.com/mrdhira/galahad/internal/defang"
 	"github.com/mrdhira/galahad/internal/protocol"
+	"github.com/mrdhira/galahad/internal/proxy"
 )
 
 // Report file names inside the output directory.
@@ -317,8 +318,12 @@ func iocHosts(res *protocol.Result) map[string]bool {
 	return hosts
 }
 
+// ownLookup is the label of a refused request of Galahad to api.osv.dev.
+const ownLookup = "Galahad's own OSV lookup"
+
 // netRow is one line of the Network section. Host and Reason are defanged and cleaned; Label
-// says what happened: BLOCKED for a refused non-public address, else denied or allowed.
+// says what happened: BLOCKED for a refused non-public address, else denied or allowed. A refused
+// request to an infrastructure host is the lookup of Galahad itself, not a request of the input.
 type netRow struct {
 	Label, Host, Reason string
 	Port, Count         int
@@ -333,7 +338,10 @@ func netRows(res *protocol.Result) []netRow {
 	var out []netRow
 	for _, e := range res.Network.Events {
 		r := netRow{Label: clean(e.Decision), Host: cleanValue(e.Host), Reason: clean(e.Reason), Port: e.Port, Count: e.Count}
-		if e.Blocked {
+		switch {
+		case proxy.IsInfraHost(e.Host) && e.Decision == protocol.DecisionDenied:
+			r.Label = ownLookup
+		case e.Blocked:
 			r.Label = "BLOCKED"
 		}
 		out = append(out, r)

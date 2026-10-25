@@ -115,7 +115,12 @@ func Apply(res *protocol.Result) {
 	}
 
 	if verdict == protocol.VerdictClean && res.Coverage.Truncated {
-		reasons = append(reasons, "a limit or a guest tool that did not run cut the analysis short")
+		if len(res.Coverage.LeftOut) == 0 {
+			reasons = append(reasons, "a limit cut the analysis short")
+		}
+		for _, l := range res.Coverage.LeftOut {
+			reasons = append(reasons, l.Tool+" was left out: "+leftOutWhy[l.Cause])
+		}
 	}
 
 	agree := len(analyzers) >= 2
@@ -159,6 +164,13 @@ func Apply(res *protocol.Result) {
 		reasons[i] = limit(r)
 	}
 	res.Reasons = reasons
+}
+
+// leftOutWhy is how the reason of a clean verdict names the cause of a tool that was left out.
+var leftOutWhy = map[string]string{
+	protocol.LeftOutNoNetwork: "no network",
+	protocol.LeftOutTimeout:   "timed out",
+	protocol.LeftOutFailed:    "it failed, see artifacts/tools.log",
 }
 
 func hardTrigger(f protocol.Finding) string {

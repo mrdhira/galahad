@@ -111,7 +111,8 @@ func (c capa) Run(ctx context.Context, target string) (Result, error) {
 	var res Result
 	res.Partial = partial
 	scanned := 0
-	for _, path := range files {
+	timedOut := false
+	for i, path := range files {
 		rel, _ := relPath(root, path)
 		if ctx.Err() != nil {
 			res.Partial = true
@@ -121,12 +122,21 @@ func (c capa) Run(ctx context.Context, target string) (Result, error) {
 		caps, err := c.file(ctx, bin, path)
 		if err != nil {
 			res.Partial = true
+			if errors.Is(err, errTimedOut) {
+				timedOut = true
+				note := "stopped after " + rel + " timed out"
+				switch more := len(files) - i - 1; more {
+				case 0:
+				case 1:
+					note += "; 1 more executable was not examined"
+				default:
+					note += fmt.Sprintf("; %d more executables were not examined", more)
+				}
+				notes = append(notes, note)
+				break
+			}
 			if len(notes) < capaMaxNotes {
 				notes = append(notes, rel+": "+err.Error())
-			}
-			if errors.Is(err, errTimedOut) {
-				notes = append(notes, "stopped after the first timeout, since the other executables would be slow too")
-				break
 			}
 			continue
 		}
@@ -140,7 +150,11 @@ func (c capa) Run(ctx context.Context, target string) (Result, error) {
 		}
 	}
 	if scanned == 0 {
-		return Result{}, errors.New(strings.Join(notes, "; "))
+		err := errors.New(strings.Join(notes, "; "))
+		if timedOut {
+			return Result{}, timeoutError{err}
+		}
+		return Result{}, err
 	}
 	res.Note = strings.Join(notes, "; ")
 	return res, nil

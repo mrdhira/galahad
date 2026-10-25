@@ -23,6 +23,10 @@ type toolReport struct {
 	Coverage struct {
 		Analyzers []string `json:"analyzers"`
 		Truncated bool     `json:"truncated"`
+		LeftOut   []struct {
+			Tool  string `json:"tool"`
+			Cause string `json:"cause"`
+		} `json:"left_out"`
 	} `json:"coverage"`
 	Reasons []string `json:"reasons"`
 	Network *struct {
@@ -235,6 +239,9 @@ func TestScanOSV(t *testing.T) {
 		wantBlocked  bool   // api.osv.dev is a blocked event
 		wantReason   string // substring of a reason of the report
 		wantLog      string
+		wantCause    string // why osv is left out, in coverage.left_out; none when empty
+		wantSummary  string // substring of summary.md
+		wantNoText   string // substring that summary.md must not have
 	}{
 		{
 			name: "a MAL entry for a pinned package is malicious", mal: true,
@@ -248,12 +255,19 @@ func TestScanOSV(t *testing.T) {
 		{
 			name: "OSV that resolves to a fake-IP address is left out and the scan stays clean", mal: true, resolve: "api.osv.dev=198.18.0.5",
 			wantCode: 0, wantVerdict: "clean", wantBlocked: true, wantReason: "the OSV lookup was blocked: api.osv.dev resolved to an address that is not public (benchmarking)",
-			wantLog: "osv: left out: the host proxy refused the OSV lookup",
+			wantLog: "osv: left out: the host proxy refused the OSV lookup", wantCause: "failed",
+			wantSummary: "Galahad's own OSV lookup", wantNoText: "| BLOCKED | api[.]osv[.]dev",
+		},
+		{
+			name: "OSV without a network is left out for no network and the scan stays clean", mal: true, resolve: "api.osv.dev=fail",
+			wantCode: 0, wantVerdict: "clean", wantReason: "osv was left out: no network",
+			wantLog: "osv: left out: no network: the computer that runs Galahad could not reach api.osv.dev", wantCause: "no_network",
+			wantSummary: "| Galahad's own OSV lookup | api[.]osv[.]dev | 443 | 1 | dns lookup failed |", wantNoText: "| denied | api[.]osv[.]dev",
 		},
 		{
 			name: "OSV that a Pi-hole answers with 0.0.0.0 is left out and the scan stays clean", mal: true, resolve: "api.osv.dev=0.0.0.0",
 			wantCode: 0, wantVerdict: "clean", wantBlocked: true, wantReason: "(this network)",
-			wantLog: "api.osv.dev:443 denied: this network",
+			wantLog: "api.osv.dev:443 denied: this network", wantCause: "failed",
 		},
 	}
 	for _, tt := range tests {
@@ -298,6 +312,22 @@ func TestScanOSV(t *testing.T) {
 			}
 			if !tt.wantAnalyzer && !rep.Coverage.Truncated {
 				t.Error("coverage.truncated = false, want true for a tool that was left out")
+			}
+			cause := ""
+			for _, l := range rep.Coverage.LeftOut {
+				if l.Tool == "osv" {
+					cause = l.Cause
+				}
+			}
+			if cause != tt.wantCause {
+				t.Errorf("cause of osv in coverage.left_out = %q, want %q", cause, tt.wantCause)
+			}
+			md := readFile(t, filepath.Join(dir, "summary.md"))
+			if !strings.Contains(md, tt.wantSummary) {
+				t.Errorf("summary.md lacks %q:\n%s", tt.wantSummary, md)
+			}
+			if tt.wantNoText != "" && strings.Contains(md, tt.wantNoText) {
+				t.Errorf("summary.md has %q, want none:\n%s", tt.wantNoText, md)
 			}
 			if got := requests.Load(); got != tt.wantRequests {
 				t.Errorf("requests to the OSV server = %d, want %d", got, tt.wantRequests)
