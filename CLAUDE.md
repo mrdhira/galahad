@@ -6,7 +6,7 @@ Galahad is a Go CLI that inspects untrusted files, links and Git repositories in
 - Go version: 1.27.3 (`go.mod` pins it).
 - Imports: Go standard library and `golang.org/x/*` only. No other module may appear in `go list -m all`. `make gate` enforces this.
 - Dev tools (golangci-lint, gosec, govulncheck) are installed separately. Never add them to `go.mod` (no `tool` directive).
-- The host binary (`cmd/galahad`) never parses untrusted bytes. Parsing and analysis code runs in `cmd/galahad-agent` inside the guest VM. The host only moves bytes, computes hashes, controls jobs and renders validated JSON results.
+- The host binary (`cmd/galahad`) never parses untrusted bytes. Parsing and analysis code runs in `cmd/galahad-agent` inside the guest VM. The host only moves bytes, computes hashes, controls jobs and renders validated JSON results. For a decision provider (M3), the host may also redact secrets in strings it has already validated (fixed RE2 patterns, no decoding) before sending them, and decode the provider's capped JSON answer into a fixed, range-checked schema.
 - Every input reader has size, depth, time and path limits (zip-slip, decompression bombs).
 - Never commit real malware. Fixtures in `testdata/corpus/` are harmless imitations.
 - Skills: use `caveman` (full) for chat and `ponytail` (full) for code. Code, comments, commits and docs are written in plain, normal prose.
