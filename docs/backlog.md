@@ -325,3 +325,14 @@ From: PR 78, PR 82 and PR 84 reviews.
 - `scripts/vm/vmtest.sh` prints the `--- PASS/FAIL` lines without `tr -cd '[:print:]\n'`. Add it so a `\r` in a test name cannot split a line into a workflow command.
 - The path filters in `vm.yml` miss `test/acceptance/{scan_test,link_test,git_test,main_test}.go` and the `Makefile`.
 From: PR 87 review.
+
+## Windows (M6, after v1.0.0)
+
+### Windows host and Windows guest
+The owner moved all Windows work after v1.0.0 (2026-10-25). v1.0.0 ships Linux and macOS hosts. On Windows, `galahad.exe` builds and runs, but `scan` refuses with a clear message until M6. The M6 cards are in `docs/plan.md`: the HCS backend and AF_HYPERV channel, Windows `doctor` checks, the Windows evaluation guest with Sysmon, the Windows agent service, Windows detonation scenarios and honeytokens, snapshot reset, and QA on a real Windows Pro machine. Update `README.md` to state the supported hosts when the plan change reaches the docs (`README.md:18` still says macOS and Windows hosts are not supported yet).
+- The refusal message still says "Linux only until M5" on every non-Linux host (`internal/sandbox/firecracker/firecracker_other.go`, `internal/cli/cli.go`, `internal/cli/diskfree_other.go`, and their tests in `doctor_test.go` and `setup_test.go`). Give a message per OS, so Windows says M6, and update `docs/milestones/M2.md` to match.
+From: owner decision on the milestone order, and the PR 97 review.
+
+### Scan from WSL2 on Windows
+Windows 11 exposes `/dev/kvm` to WSL2 when nested virtualization is on, so the Linux binary and Firecracker may run inside WSL2. Test it on a real Windows 11 machine, and if it works, document it as the way to use Galahad on Windows before M6. `README.md` and `docs/glossary.md` say Galahad refuses to run in WSL, but only `galahad-agent analyze` checks for it (`internal/vmguard`); narrow that wording to the agent if the test works.
+From: owner decision on the milestone order, and the PR 97 review.
