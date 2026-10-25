@@ -235,12 +235,17 @@ func (r DecisionRequest) Validate() error {
 	if !reflect.DeepEqual(r.Questions, DecisionQuestions()) {
 		return errors.New("questions are not the fixed questions")
 	}
-	data, err := r.Encode()
+	// The report writer escapes <, > and & as six bytes each, so the request must fit both ways.
+	wire, err := r.Encode()
 	if err != nil {
 		return err
 	}
-	if len(data) > MaxDecisionRequest {
-		return fmt.Errorf("request is %d bytes, max %d", len(data), MaxDecisionRequest)
+	escaped, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	if n := max(len(wire), len(escaped)); n > MaxDecisionRequest {
+		return fmt.Errorf("request is %d bytes, max %d", n, MaxDecisionRequest)
 	}
 	return nil
 }

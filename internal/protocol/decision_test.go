@@ -223,6 +223,12 @@ func TestDecisionRequestValidate(t *testing.T) {
 				r.Input.Findings[i].Snippet = strings.Repeat("\u2028", protocol.MaxSnippet*4) // six bytes each when encoded
 			}
 		}, wantErr: "request is"},
+		{name: "request over the size limit once escaped for HTML", mutate: func(r *protocol.DecisionRequest) {
+			manyFindings(r, protocol.MaxDecisionFindings)
+			for i := range r.Input.Findings {
+				r.Input.Findings[i].Path = strings.Repeat("<", 2550) // short on the wire, six bytes each in a report
+			}
+		}, wantErr: "request is"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -483,18 +489,20 @@ func TestDecisionValidate(t *testing.T) {
 }
 
 func TestDecisionWorstCaseSize(t *testing.T) {
-	// The longest request that is allowed: 24 findings of fields at their limits, where every rune is
-	// one that JSON writes with six bytes.
-	worstRequest := func() *protocol.DecisionRequest {
+	// The longest request that is allowed: 24 findings whose runes are ones that JSON writes with six
+	// bytes, either always (U+2028) or in a report (<, & and >, which the wire form leaves alone).
+	worstRequest := func(title, path, snippet string) *protocol.DecisionRequest {
 		r := goodRequest()
 		r.Input.Findings = slices.Repeat(r.Input.Findings[:1], protocol.MaxDecisionFindings)
 		for i := range r.Input.Findings {
-			r.Input.Findings[i].Title = strings.Repeat("\u2028", 60)
-			r.Input.Findings[i].Path = strings.Repeat("\u2028", 60)
-			r.Input.Findings[i].Snippet = strings.Repeat("\u2028", 300)
+			r.Input.Findings[i].Title = strings.Repeat(title, 60)
+			r.Input.Findings[i].Path = strings.Repeat(path, 60)
+			r.Input.Findings[i].Snippet = strings.Repeat(snippet, 300)
 		}
 		return &r
 	}
+	worstLineSep := func() *protocol.DecisionRequest { return worstRequest("\u2028", "\u2028", "\u2028") }
+	worstHTML := func() *protocol.DecisionRequest { return worstRequest("&", "<", ">") }
 	tests := []struct {
 		name string
 		// inputs
@@ -504,7 +512,7 @@ func TestDecisionWorstCaseSize(t *testing.T) {
 	}{
 		{name: "a call that worked", decision: func() *protocol.Decision {
 			d := okDecision()
-			d.Sent = worstRequest()
+			d.Sent = worstLineSep()
 			d.RequestID = strings.Repeat("a", protocol.MaxDecisionRequestID)
 			d.Redactions = map[string]int{}
 			for _, k := range []string{"aws-access-key", "aws-secret", "github-token", "slack-token", "stripe-key", "api-key", "jwt", "private-key", "url-credentials", "assignment", "high-entropy", "key"} {
@@ -515,8 +523,18 @@ func TestDecisionWorstCaseSize(t *testing.T) {
 		}, wantMinRequest: 60 << 10},
 		{name: "a call that failed", decision: func() *protocol.Decision {
 			d := failedDecision()
-			d.Sent = worstRequest()
+			d.Sent = worstLineSep()
 			d.Error.Message = strings.Repeat("\u2028", protocol.MaxDecisionError)
+			return d
+		}, wantMinRequest: 60 << 10},
+		{name: "a call that worked, with characters that a report escapes", decision: func() *protocol.Decision {
+			d := okDecision()
+			d.Sent = worstHTML()
+			return d
+		}, wantMinRequest: 60 << 10},
+		{name: "a call that failed, with characters that a report escapes", decision: func() *protocol.Decision {
+			d := failedDecision()
+			d.Sent = worstHTML()
 			return d
 		}, wantMinRequest: 60 << 10},
 	}
@@ -526,7 +544,7 @@ func TestDecisionWorstCaseSize(t *testing.T) {
 			if err := d.Validate(); err != nil {
 				t.Fatalf("Validate: %v", err)
 			}
-			sent, err := d.Sent.Encode()
+			sent, err := json.Marshal(d.Sent) // with HTML escaping, as a report writes it
 			if err != nil {
 				t.Fatal(err)
 			}
