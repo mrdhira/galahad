@@ -101,7 +101,9 @@ The fixtures in `testdata/corpus/` are **harmless imitations**: fake keys, a loc
 ---
 
 ## Milestones, tasks, demos
-**61 tasks · 8 milestones · ~27 weeks of effort** (calendar time is likely shorter with agents, but M5/M6 need manual QA on real Mac/Windows machines).
+**62 tasks · 8 milestones · ~27 weeks of effort** (calendar time is likely shorter with agents, but M5 and M6 need manual QA on a real Mac and a real Windows machine).
+
+**Order (owner decision, 2026-10-25):** M0 → M1 → M2 → M3 → M4 → M5 (macOS) → M7 (hardening, v1.0.0) → M6 (Windows, v1.x). v1.0.0 supports Linux and macOS hosts. All Windows host and guest work is in M6, which starts after v1.0.0; until then it is tracked in `docs/backlog.md`. Windows users get the static analysis of Windows files (LNK, PE, Office, scripts) on a Linux or macOS host.
 
 ### M0 · Foundation (1 wk, 8 tasks)
 | ID | Task |
@@ -192,42 +194,43 @@ This is a dev-only command, used on fixtures only. `--unsafe-host` is needed unt
 - `galahad scan <repo> --dynamic` → "would have sent AWS_SECRET_ACCESS_KEY to hxxp://…", with the process tree.
 - `galahad work <job>` opens VS Code in the browser; editing and exporting produces a patch.
 
-### M5 · macOS and Windows hosts (5 wks, 6 tasks)
+### M5 · macOS host (3 wks, 5 tasks)
 | ID | Task |
 |---|---|
 | T5.1 | macOS backend: our own cgo/Obj-C bridge to Virtualization.framework (Linux boot, virtio-blk, vsock), entitlement signing |
-| T5.2 | Windows backend: HCS through `x/sys/windows` + AF_HYPERV channel |
-| T5.3 | arm64 guest images (Apple Silicon) alongside amd64 |
-| T5.4 | Per-OS `doctor` checks (Hyper-V enabled, macOS 13+) |
-| T5.5 | CI: build + unit tests on mac/windows; a manual acceptance checklist, since GitHub runners can't run nested VMs there |
-| T5.6 | QA: full acceptance suite on a real MacBook and a real Windows Pro machine |
+| T5.2 | arm64 guest images (Apple Silicon) alongside amd64 |
+| T5.3 | macOS `doctor` checks (macOS 13+, Apple Silicon or Intel, the virtualization entitlement) |
+| T5.4 | CI and release: the darwin build needs cgo, so darwin archives build on a macOS runner; unit tests on macOS; a manual acceptance checklist, since GitHub runners can't run nested VMs there |
+| T5.5 | QA: full acceptance suite on a real MacBook |
 
-**🎬 Demo:** the same `galahad scan` on your MacBook and on a Windows Pro laptop.
+**🎬 Demo:** the same `galahad scan` on your MacBook.
 
-### M6 · Windows guest and Windows dynamic analysis (5 wks, 7 tasks)
-| ID | Task |
-|---|---|
-| T6.1 | `setup --windows`: download Microsoft's evaluation image, prompt for EULA acceptance, unattended provisioning (Sysmon, Acrobat Reader, LibreOffice, Node, Python) |
-| T6.2 | Windows build of `galahad-agent`, running as a service with the hvsocket/vsock channel |
-| T6.3 | Sysmon telemetry export + `encoding/xml` parsing |
-| T6.4 | Scenarios: exe/msi/lnk/js/vbs/ps1, documents, repo scenarios |
-| T6.5 | Windows honeytokens (credential files, browser dirs, registry) |
-| T6.6 | Snapshot reset + automatic rebuild before the evaluation expires |
-| T6.7 | QA: harmless Windows fixtures (a ps1 that reads fake credentials and POSTs to the sinkhole, a `.lnk` → PowerShell, a benign macro) |
-
-**🎬 Demo:** `galahad scan invoice.pdf.lnk --dynamic --os windows` → MALICIOUS, with the Sysmon process tree.
-
-**Note:** running *Microsoft Office* macros requires your own Office license. By default the Windows guest uses LibreOffice, and static macro analysis always runs.
-
-### M7 · Hardening and v1.0.0 (2 wks, 4 tasks)
+### M7 · Hardening and v1.0.0 (2 wks, 4 tasks), runs after M5
 | ID | Task |
 |---|---|
 | T7.1 | False-positive sweep: about 100 popular repos and PDFs; tune weights |
-| T7.2 | Threat model + security review of host code |
+| T7.2 | Threat model + security review of host code, including the macOS cgo bridge |
 | T7.3 | Docs: README, usage, decision-api, threat model |
 | T7.4 | `v1.0.0` release + install script |
 
-**🎬 Demo:** a full scripted demo from a clean machine: install, doctor, setup, scanning the P1–P6 samples, safe-work, and verifying the release checksums.
+**🎬 Demo:** a full scripted demo from a clean Linux machine and a clean Mac: install, doctor, setup, scanning the P1–P6 samples, safe-work, and verifying the release checksums.
+
+### M6 · Windows host, Windows guest and Windows dynamic analysis (7 wks, 9 tasks), after v1.0.0
+| ID | Task |
+|---|---|
+| T6.1 | Windows backend: HCS through `x/sys/windows` + AF_HYPERV channel |
+| T6.2 | Windows `doctor` checks (Windows Pro or Enterprise, Hyper-V enabled) and a manual acceptance checklist on a real Windows Pro machine |
+| T6.3 | `setup --windows`: download Microsoft's evaluation image, prompt for EULA acceptance, unattended provisioning (Sysmon, Acrobat Reader, LibreOffice, Node, Python) |
+| T6.4 | Windows build of `galahad-agent`, running as a service with the hvsocket/vsock channel |
+| T6.5 | Sysmon telemetry export + `encoding/xml` parsing |
+| T6.6 | Scenarios: exe/msi/lnk/js/vbs/ps1, documents, repo scenarios |
+| T6.7 | Windows honeytokens (credential files, browser dirs, registry) |
+| T6.8 | Snapshot reset + automatic rebuild before the evaluation expires |
+| T6.9 | QA: harmless Windows fixtures (a ps1 that reads fake credentials and POSTs to the sinkhole, a `.lnk` → PowerShell, a benign macro) |
+
+**🎬 Demo:** the same `galahad scan` on a Windows Pro laptop, and `galahad scan invoice.pdf.lnk --dynamic --os windows` → MALICIOUS, with the Sysmon process tree.
+
+**Note:** running *Microsoft Office* macros requires your own Office license. By default the Windows guest uses LibreOffice, and static macro analysis always runs.
 
 ### Summary
 | Milestone | Weeks | Tasks | Demo |
@@ -237,10 +240,10 @@ This is a dev-only command, used on fixtures only. `--unsafe-host` is needed unt
 | M2 Linux sandbox | 4 | 9 | real `galahad scan <link>` on Linux |
 | M3 Decision API | 1 | 5 | AI opinion in the report |
 | M4 Dynamic + safe-work | 5 | 7 | "would have stolen your AWS key" + browser VS Code |
-| M5 Mac + Windows hosts | 5 | 6 | same scan on a MacBook / Windows |
-| M6 Windows guest | 5 | 7 | LNK/PS1 detonation |
-| M7 v1.0 | 2 | 4 | clean-machine end-to-end demo |
-| **Total** | **~27** | **61** | |
+| M5 macOS host | 3 | 5 | same scan on a MacBook |
+| M7 v1.0 (after M5) | 2 | 4 | clean-machine end-to-end demo on Linux and macOS |
+| M6 Windows host + guest (after v1.0) | 7 | 9 | same scan on Windows + LNK/PS1 detonation |
+| **Total** | **~27** | **62** | v1.0.0 after ~20 weeks |
 
 ---
 
