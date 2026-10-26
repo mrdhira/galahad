@@ -1,0 +1,9 @@
+{
+  "provider": "mock",
+  "url": "https://api.mock.test",
+  "model": "fake-model/v1",
+  "status": "skipped",
+  "reason": "no_findings",
+  "latency_ms": 0,
+  "attempts": 0
+}

@@ -62,7 +62,32 @@ footer{margin-top:32px;border-top:1px solid var(--line)}
 {{end}}</ul>
 {{end}}</header>
 <main>
-{{if .AutoExec}}<section aria-labelledby="auto">
+{{with .AI}}<section aria-labelledby="ai">
+<h2 id="ai">AI opinions</h2>
+{{if .Warning}}<p class="warn">{{.Warning}}</p>
+{{end}}<dl>
+<dt>Provider</dt><dd><code>{{.Provider}}</code></dd>
+<dt>URL</dt><dd><code>{{.URL}}</code></dd>
+<dt>Model</dt><dd><code>{{.Model}}</code></dd>
+{{if .AnsweredBy}}<dt>Answered by model</dt><dd><code>{{.AnsweredBy}}</code></dd>
+{{end}}<dt>Status</dt><dd>{{.Status}}</dd>
+{{if .Attempts}}<dt>Attempts</dt><dd>{{.Attempts}}</dd>
+<dt>Latency</dt><dd>{{.Latency}}</dd>
+{{end}}{{if .InputTokens}}<dt>Input tokens</dt><dd>{{.InputTokens}}</dd>
+{{end}}{{if .RequestID}}<dt>Request ID</dt><dd><code>{{.RequestID}}</code></dd>
+{{end}}<dt>Effect</dt><dd>{{.Effect}}</dd>
+</dl>
+{{if .Answers}}<ul>
+{{range .Answers}}<li><strong>{{.Title}}:</strong> {{.Probs}}{{if .Pick}}; {{.Pick}}{{end}}; <span class="muted">{{.Mass}}</span></li>
+{{end}}</ul>
+<p class="muted">{{.Note}}</p>
+{{end}}{{if .HasSent}}<details><summary>What was sent</summary>
+<p>{{.Redactions}}</p>
+<p>{{.Auth}}</p>
+<pre>{{.Sent}}</pre>
+</details>
+{{end}}</section>
+{{end}}{{if .AutoExec}}<section aria-labelledby="auto">
 <h2 id="auto">Runs automatically ({{len .AutoExec}})</h2>
 <p class="muted">These run without you choosing to, when you open the folder, install dependencies, build or commit.</p>
 <ul class="auto">
