@@ -401,9 +401,9 @@ From: PR 104 review.
 From: PR 101 review.
 
 ### Decision step details
-- A Result whose `file_count`, `files_seen` or `files_analyzed` is negative or above 2^31-1 passes `Result.Validate` but fails `DecisionRequest.Validate`. `Select` then returns an error and the job fails with exit 1 instead of keeping the static verdict. Only a compromised guest can send this. Range-check the counts in `Result.Validate`, or have `Ask` turn the error into a `failed` decision.
+- A Result whose `file_count`, `files_seen` or `files_analyzed` is negative or above 2^31-1, and that has a guest finding at low or above, passes `Result.Validate` but fails `DecisionRequest.Validate`. `Select` then returns an error and the job fails with exit 1 instead of keeping the static verdict. Only a compromised guest can send this. Range-check the counts in `Result.Validate`, or have `Ask` turn the error into a `failed` decision.
 - If the scanned input contains the key value, it is sent inside `sent` and stored in `report.json`. It is already in the findings without `--decision`. As defence in depth, `Ask` could replace the key with `[REDACTED:key]` in the request.
-- When the job deadline has already passed during the call, a later Ctrl-C or `Decide` error is recorded as state `timeout`, not `canceled`, because the `switch` in `execute` (`internal/job/run.go`) reads the job context. The exit code is 1 either way.
+- When the job deadline has already passed during the call, any later failure of `conclude` (Ctrl-C, a `Decide` error, a `Validate` or `report.Write` error) is recorded as state `timeout` instead of `canceled` or `failed`, because the `switch` in `execute` (`internal/job/run.go`) reads the job context, not `caller`. The exit code is 1 either way.
 - In `internal/decision/ask_test.go` the "cannot be built" case is last, though it is the first branch. `internal/job/decision_tag_test.go` has no case for a `res.Validate()` or `report.Write` failure inside `conclude`.
 From: PR 106 review.
 
