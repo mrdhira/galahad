@@ -327,14 +327,6 @@ From: PR 87 review.
 
 ## Decision provider (M3)
 
-### Sweep targets promptfoo and garak are MALICIOUS before any M3 change
-Decide this in T3.5, before v0.3.0. The M3 definition of done says `promptfoo/promptfoo` and `NVIDIA/garak` must not be MALICIOUS, but `galahad-agent analyze` on main already gives:
-- promptfoo: MALICIOUS from GAL-EXFIL-001, GAL-EXEC-001 and others;
-- garak: MALICIOUS from GAL-SIG-001 (critical) and GAL-DEPS-001 (high).
-
-garak also gets one `GAL-INJECT-001` medium at `garak/data/inthewild_jailbreak_llms.json:34`, a real jailbreak prompt in its dataset. Both repos ship attack samples on purpose. Run the full sweep first (CLAUDE.md, Scope), then either fix real false alarms or narrow the definition of done for repos that carry samples, with the owner's approval.
-From: PR 98 review.
-
 ### Provider config hardening
 - `Load` does not compare the opened file with the `Lstat` result, so a symlink swapped in between them is followed. Refuse unless `os.SameFile`, or open with `O_NOFOLLOW` (`internal/config/file.go`).
 - `encoding/json` matches field names without regard to case, and a duplicate key takes the last value. Neither lets a key in.
@@ -404,6 +396,20 @@ From: PR 101 review.
 - When the job deadline has already passed during the call, any later failure of `conclude` (Ctrl-C, a `Decide` error, a `Validate` or `report.Write` error) is recorded as state `timeout` instead of `canceled` or `failed`, because the `switch` in `execute` (`internal/job/run.go`) reads the job context, not `caller`. The exit code is 1 either way.
 - In `internal/decision/ask_test.go` the "cannot be built" case is last, though it is the first branch. `internal/job/decision_tag_test.go` has no case for a `res.Validate()` or `report.Write` failure inside `conclude`.
 From: PR 106 review.
+
+### Repos that ship attack samples on purpose
+promptfoo/promptfoo and NVIDIA/garak are MALICIOUS in the v0.3.0 sweep from rules older than M3: GAL-EXFIL-001 on red-team payloads under `src/redteam/plugins/`, and GAL-SIG-001 plus a YARA EICAR hit on the EICAR string in `garak/probes/av_spam_scanning.py`. garak also gets one `GAL-INJECT-001` medium at `garak/data/inthewild_jailbreak_llms.json:34`, a real jailbreak prompt in its dataset. The owner accepted this for v0.3.0. Decide in M7 (the false-positive sweep) whether folders of deliberate samples (`redteam/`, `probes/`, test data of security tools) get a lower weight, and how a user can still tell when such a folder holds code that runs on install or open.
+From: the v0.3.0 sweep.
+
+### ClamAV time on very large repos
+ClamAV hit its 5-minute limit on promptfoo/promptfoo and was left out. Measure ClamAV time against tree size, and either scale the limit with the input or scan only what the other analyzers cannot read.
+From: the v0.3.0 sweep.
+
+### Sweep check details
+- `sweep.sh` could record whether a repo without GAL-INJECT-001 would still be SUSPICIOUS from coverage under 50% or a content-hiding skip; today a new repo with low coverage and a medium GAL-INJECT-001 is blamed on the rule (the strict side).
+- `sweep-check.sh` does not compare the 12 CLEAN and 10 SUSPICIOUS repos' scores and finding IDs with the M2 table, so a SUSPICIOUS repo that gains a rule is not flagged; it is compared by hand.
+- The `rest_score` jq copies the weights and cap of `internal/scoring` by hand; add a check or a cross-reference.
+From: PR 108 review.
 
 ## Windows (M6, after v1.0.0)
 
