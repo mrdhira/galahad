@@ -232,6 +232,40 @@ func TestAIOpinions(t *testing.T) {
 			wantTermAbsent: []string{"MODELMARK", "script", "click"},
 		},
 		{
+			name: "a hostile url, request id, answering model and snippet cannot break out",
+			mutate: func(r *protocol.Result) {
+				d := okDecision(0.5, "m1")
+				d.URL = "https://e.test/<script>alert(1)</script>"
+				d.RequestID = "<img onerror=alert(1)>[x](https://e.test/a)`"
+				d.Answers.Model = "<iframe //e.test>"
+				d.Sent.Input.Findings[0].Snippet = "<img onerror=alert(1)> ``` \n```"
+				r.Decision = d
+			},
+			wantMD: []string{
+				"- URL: ` hxxps://e[.]test/\\u003cscript\\u003ealert(1)\\u003c/script\\u003e `\n",
+				"- Request ID: `` \\u003cimg onerror=alert(1)\\u003e[x](hxxps://e[.]test/a)` ``\n",
+				"- Answered by model: ` \\u003ciframe //e.test\\u003e `\n",
+			},
+			wantHTML: []string{
+				"<dd><code>hxxps://e[.]test/&lt;script&gt;alert(1)&lt;/script&gt;</code></dd>",
+				"<dd><code>&lt;img onerror=alert(1)&gt;[x](hxxps://e[.]test/a)`</code></dd>",
+				"<dd><code>&lt;iframe //e.test&gt;</code></dd>",
+			},
+			wantMDAbsent:   []string{"<script", "<img", "<iframe", "](https://", "https://e.test"},
+			wantHTMLAbsent: []string{"<script", "<img", "<iframe", "https://e.test"},
+			wantTermAbsent: []string{"onerror", "iframe", "e.test", "<img"},
+		},
+		{
+			name: "a hostile error message is escaped and defanged",
+			mutate: func(r *protocol.Result) {
+				r.Decision = failedDecision(protocol.DecisionError{Code: protocol.DecisionErrInvalid, Message: "<script>alert(1)</script>[click](https://e.test/a)"})
+			},
+			wantHTML:       []string{"&lt;script&gt;alert(1)&lt;/script&gt;[click](hxxps://e[.]test/a)"},
+			wantMDAbsent:   []string{"<script", "](https://", "https://e.test"},
+			wantHTMLAbsent: []string{"<script", "https://e.test"},
+			wantTermAbsent: []string{"](https://", "https://e.test"},
+		},
+		{
 			name: "the injection warning shows with GAL-INJECT-001",
 			mutate: func(r *protocol.Result) {
 				r.Findings = append(r.Findings, protocol.Finding{RuleID: "GAL-INJECT-001", Severity: protocol.SeverityMedium, Title: "Text addresses an AI reviewer", Analyzer: "inject"})
