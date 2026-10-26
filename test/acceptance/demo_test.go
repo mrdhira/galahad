@@ -1,6 +1,8 @@
 package acceptance_test
 
 import (
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -275,4 +277,125 @@ func hasRuleSnippet(rep report, rule, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestDemoM3 runs the M3 demo from docs/milestones/M3.md section 5 in order, on the fake sandbox. The provider is
+// a loopback mock (the galahadtest build accepts http on loopback) that is named "mock" instead of "netra", and the
+// repositories are the fixtures in testdata/corpus. "{mock}" stands for the URL of the mock, "{corpus}" for
+// testdata/corpus and "{id}" for the ID of the first scan.
+func TestDemoM3(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		args []string
+		// expectations
+		wantCode     int
+		wantStdout   []string // each must be in stdout
+		wantEvidence []string // "RULE path:line" that must be in report.json of the job the step made
+		wantHTML     []string // each must be in report.html of the job the step made
+	}{
+		{
+			name:     "provider add registers the mock with the key variable",
+			args:     []string{"provider", "add", "mock", "--url", "{mock}", "--model", "test/model-1", "--key-env", "NETRA_API_KEY"},
+			wantCode: 0, wantStdout: []string{"added provider mock"},
+		},
+		{
+			name:     "provider list shows the provider and that its key is set",
+			args:     []string{"provider", "list"},
+			wantCode: 0, wantStdout: []string{"mock", "NETRA_API_KEY  yes"},
+		},
+		{
+			name:     "provider test gets the three answers",
+			args:     []string{"provider", "test", "mock"},
+			wantCode: 0, wantStdout: []string{"provider mock: ok", "verdict", "risk", "steals_secrets", "input tokens: ", "request id: req_t34b"},
+		},
+		{
+			name:     "fake-interview-repo exits 20 and shows the AI opinion",
+			args:     []string{"scan", "--decision", "mock", "{corpus}/fake-interview-repo"},
+			wantCode: 20, wantStdout: []string{"MALICIOUS", "AI opinion (mock): malicious 90%, no change"},
+			wantEvidence: []string{"GAL-AUTOEXEC-010 .vscode/tasks.json:7", "GAL-EXFIL-001 scripts/setup.js:3"},
+			wantHTML:     []string{"AI opinions", "What was sent"},
+		},
+		{
+			name:     "p9-prompt-injection-repo exits 20 with GAL-INJECT-001 and the keys redacted",
+			args:     []string{"scan", "--decision", "mock", "{corpus}/p9-prompt-injection-repo"},
+			wantCode: 20, wantStdout: []string{"MALICIOUS", "AI opinion (mock): "},
+			wantEvidence: []string{"GAL-INJECT-001 README.md:5"},
+			wantHTML:     []string{"tries to steer an AI reviewer", "[REDACTED:aws-access-key]", "[REDACTED:aws-secret]"},
+		},
+		{
+			name:     "report prints the AI line of the first scan again",
+			args:     []string{"report", "{id}"},
+			wantCode: 20, wantStdout: []string{"MALICIOUS", "AI opinion (mock): malicious 90%, no change"},
+		},
+	}
+	// Given a fake key, a mock that answers the test and every scan with a malicious opinion, and an empty state
+	mock := newMockProvider(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "GAL-TEST-001") {
+			answers(providerTestAnswer)(w, r, n)
+			return
+		}
+		answers(decisionAnswer(0.05, 0.05, 0.9))(w, r, n)
+	})
+	home := t.TempDir()
+	t.Setenv("GALAHAD_HOME", home)
+	t.Setenv("GALAHAD_SANDBOX", "fake")
+	t.Setenv("NETRA_API_KEY", decisionKey)
+	var seen []string // the job directories of the scans so far
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// When the step runs
+			id := ""
+			if len(seen) > 0 {
+				id = seen[0]
+			}
+			args := make([]string, len(tt.args))
+			for i, a := range tt.args {
+				a = strings.ReplaceAll(a, "{mock}", mock.srv.URL)
+				a = strings.ReplaceAll(a, "{corpus}", corpus(t, "."))
+				args[i] = strings.ReplaceAll(a, "{id}", id)
+			}
+			stdout, stderr, code := run(t, args...)
+
+			// Then the exit code and the output match, and the key is not in the output
+			if code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout, stderr)
+			}
+			for _, w := range tt.wantStdout {
+				if !strings.Contains(stdout, w) {
+					t.Errorf("stdout lacks %q:\n%s", w, stdout)
+				}
+			}
+			if strings.Contains(stdout+stderr, decisionKey) {
+				t.Errorf("the key is in the output:\n%s%s", stdout, stderr)
+			}
+			if args[0] != "scan" {
+				return
+			}
+			// And the job of a scan is done, and its report has the evidence and the opinion
+			dir := newJob(t, home, seen)
+			seen = append(seen, filepath.Base(dir))
+			if j := readJob(t, dir); j.State != "done" || j.ExitCode != tt.wantCode {
+				t.Errorf("job.json = %+v, want state done and exit code %d", j, tt.wantCode)
+			}
+			rep, err := readReport(filepath.Join(dir, "report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range tt.wantEvidence {
+				rule, at, _ := strings.Cut(want, " ")
+				if !hasFinding(rep, rule, at) {
+					t.Errorf("no %s at %s in %+v", rule, at, rep.Findings)
+				}
+			}
+			page := readFile(t, filepath.Join(dir, "report.html"))
+			for _, want := range tt.wantHTML {
+				if !strings.Contains(page, want) {
+					t.Errorf("report.html lacks %q", want)
+				}
+			}
+		})
+	}
+	keyFree(t, home, decisionKey)
 }
