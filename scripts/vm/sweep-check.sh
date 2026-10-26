@@ -4,13 +4,15 @@
 #   - each of the 12 repos that must stay clean (group clean) is CLEAN;
 #   - none of the 10 repos that were SUSPICIOUS in v0.1.0 (group suspicious) is MALICIOUS;
 #   - none of the 12 clean repos gets GAL-INJECT-001, and neither of the 2 repos with no baseline (group new,
-#     promptfoo/promptfoo and NVIDIA/garak, docs/milestones/M3.md section 4) is MALICIOUS or is SUSPICIOUS only because
-#     of GAL-INJECT-001. That last case is the score reaching 15 with the rule and not without it: sweep.sh records
-#     rest_score, the score of the other rules by the model of internal/scoring. A SUSPICIOUS verdict from coverage
-#     (a score under 15) is not blamed on the rule;
+#     promptfoo/promptfoo and NVIDIA/garak, docs/milestones/M3.md section 4) is MALICIOUS or SUSPICIOUS because of
+#     GAL-INJECT-001: the score reaches 70 or 15 with the rule and not without it. sweep.sh records rest_score, the
+#     score of the other rules by the model of internal/scoring. Both repos ship attack samples and are MALICIOUS from
+#     older rules; the owner accepted that on 2026-10-26, so only the new rule is held against them. A SUSPICIOUS
+#     verdict from coverage (a score under 15) is not blamed on the rule;
 #   - the built galahad binary (group binary) is CLEAN.
 # A target that has no result, or whose scan ended in an error, does not meet its rule either. ClamAV, YARA and
-# OSV must be among the analyzers of each repo, and ClamAV and YARA among those of the binary, because the
+# OSV must be among the analyzers of each repo (a repo with no baseline may have ClamAV left out by its time limit,
+# as it is on the large promptfoo tree), and ClamAV and YARA among those of the binary, because the
 # sweep means nothing when a tool was left out. For the binary, capa may be left out only by its time limit: it does
 # not finish on large Go binaries (a known gap in docs/milestones/M2.md section 4). Any other reason fails.
 # Each failure prints one ::error:: line (at most 9, as GitHub shows 10 per step).
@@ -39,7 +41,7 @@ failures=$(jq -rs --argjson wc "$want_clean" --argjson ws "$want_suspicious" --a
 	  | if .group == "clean" and .verdict != "clean" then "\(.target): want CLEAN, got \(.verdict) (exit \(.exit_code)) \(.error)"
 	    elif .group == "suspicious" and .verdict == "malicious" then "\(.target): MALICIOUS, want at most SUSPICIOUS (score \(.score), \(.findings | join(",")))"
 	    elif .group == "suspicious" and .verdict == "error" then "\(.target): the scan ended in an error (exit \(.exit_code)) \(.error)"
-	    elif .group == "new" and .verdict == "malicious" then "\(.target): MALICIOUS, want at most SUSPICIOUS (score \(.score), \(.findings | join(",")))"
+	    elif .group == "new" and .verdict == "malicious" and (.findings | index("GAL-INJECT-001")) and .rest_score < 70 then "\(.target): MALICIOUS only because of GAL-INJECT-001 (score \(.score), \(.rest_score) without it): a false alarm"
 	    elif .group == "new" and .verdict == "error" then "\(.target): the scan ended in an error (exit \(.exit_code)) \(.error)"
 	    elif .group == "new" and .verdict == "suspicious" and (.findings | index("GAL-INJECT-001")) and .score >= 15 and .rest_score < 15 then "\(.target): SUSPICIOUS only because of GAL-INJECT-001 (score \(.score), \(.rest_score) without it): a false alarm"
 	    elif .group == "binary" and .verdict != "clean" then "\(.target): want CLEAN, got \(.verdict) (exit \(.exit_code)) \(.error)"
@@ -50,7 +52,9 @@ failures=$(jq -rs --argjson wc "$want_clean" --argjson ws "$want_suspicious" --a
 	[ .[]
 	  | select(.verdict != "error")
 	  | . as $r
-	  | (if .group == "binary" then ["clamav", "yara"] else ["clamav", "yara", "osv"] end) as $need
+	  | (if .group == "binary" then ["clamav", "yara"]
+	     elif .group == "new" and ((.tools // "") | test("clamav: left out: [^;]*timed out")) then ["yara", "osv"]
+	     else ["clamav", "yara", "osv"] end) as $need
 	  | missing($r.analyzers; $need)
 	  | select(length > 0)
 	  | "\($r.target): not active: \(join(", ")) \($r.tools // "")" ] +
