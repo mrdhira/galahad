@@ -34,6 +34,7 @@ type htmlData struct {
 	Skips                 []protocol.Skip
 	HasNetwork            bool
 	Network               []netRow
+	AI                    *aiView
 }
 
 // htmlLine is one line of the Why and Runs automatically lists.
@@ -69,6 +70,7 @@ func renderHTML(res *protocol.Result) ([]byte, error) {
 		CoverageLine:    coverageLine(res.Coverage),
 		CoverageWarning: coverageWarning(res.Coverage),
 		Truncated:       res.Coverage.Truncated,
+		AI:              aiSection(res),
 	}
 	d.Target.SHA256 = clean(d.Target.SHA256)
 	if res.Verdict == protocol.VerdictSuspicious || res.Verdict == protocol.VerdictMalicious {

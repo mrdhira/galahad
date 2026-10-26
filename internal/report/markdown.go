@@ -80,6 +80,10 @@ func renderMarkdown(res *protocol.Result) string {
 		}
 	}
 
+	if ai := aiSection(res); ai != nil {
+		mdAI(&b, ai)
+	}
+
 	if auto := groups(res, isAutoexec); len(auto) > 0 {
 		w("\n## Runs automatically (%d)\n\n", len(auto))
 		for i, g := range auto {
@@ -161,6 +165,61 @@ func renderMarkdown(res *protocol.Result) string {
 		w("- %s\n", mdText(hosts, r))
 	}
 	return b.String()
+}
+
+// mdCode shows s as an inline code span. <, > and & are written as JSON escapes, so no raw markup
+// is in the file, and the span is delimited by more backticks than s holds in a row.
+func mdCode(s string) string {
+	s = strings.NewReplacer("<", "\\u003c", ">", "\\u003e", "&", "\\u0026").Replace(s)
+	longest, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	fence := strings.Repeat("`", longest+1)
+	return fence + " " + s + " " + fence
+}
+
+// mdAI writes the "AI opinions" section.
+func mdAI(b *strings.Builder, ai *aiView) {
+	b.WriteString("\n## AI opinions\n\n")
+	if ai.Warning != "" {
+		fmt.Fprintf(b, "**Warning:** %s\n\n", mdEscape(ai.Warning))
+	}
+	fmt.Fprintf(b, "- Provider: %s\n- URL: %s\n- Model: %s\n", mdCode(ai.Provider), mdCode(ai.URL), mdCode(ai.Model))
+	if ai.AnsweredBy != "" {
+		fmt.Fprintf(b, "- Answered by model: %s\n", mdCode(ai.AnsweredBy))
+	}
+	fmt.Fprintf(b, "- Status: %s\n", mdCode(ai.Status))
+	if ai.Attempts != "" {
+		fmt.Fprintf(b, "- Attempts: %s\n- Latency: %s\n", ai.Attempts, mdEscape(ai.Latency))
+	}
+	if ai.InputTokens != "" {
+		fmt.Fprintf(b, "- Input tokens: %s\n", ai.InputTokens)
+	}
+	if ai.RequestID != "" {
+		fmt.Fprintf(b, "- Request ID: %s\n", mdCode(ai.RequestID))
+	}
+	fmt.Fprintf(b, "- Effect: %s\n", mdEscape(ai.Effect))
+	if len(ai.Answers) > 0 {
+		b.WriteString("\n")
+		for _, a := range ai.Answers {
+			fmt.Fprintf(b, "- %s: %s", mdEscape(a.Title), mdEscape(a.Probs))
+			if a.Pick != "" {
+				fmt.Fprintf(b, "; %s", mdEscape(a.Pick))
+			}
+			fmt.Fprintf(b, "; %s\n", mdEscape(a.Mass))
+		}
+		fmt.Fprintf(b, "\n%s\n", mdEscape(ai.Note))
+	}
+	if ai.HasSent {
+		// A JSON line starts with a space, a quote or a bracket, so nothing in it can close the fence.
+		fmt.Fprintf(b, "\n### What was sent\n\n```json\n%s\n```\n\n%s\n\n%s\n", ai.Sent, mdEscape(ai.Redactions), mdEscape(ai.Auth))
+	}
 }
 
 // mdLine writes one list item of the Why and Runs automatically lists.
