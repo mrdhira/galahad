@@ -327,14 +327,6 @@ From: PR 87 review.
 
 ## Decision provider (M3)
 
-### Sweep targets promptfoo and garak are MALICIOUS before any M3 change
-Decide this in T3.5, before v0.3.0. The M3 definition of done says `promptfoo/promptfoo` and `NVIDIA/garak` must not be MALICIOUS, but `galahad-agent analyze` on main already gives:
-- promptfoo: MALICIOUS from GAL-EXFIL-001, GAL-EXEC-001 and others;
-- garak: MALICIOUS from GAL-SIG-001 (critical) and GAL-DEPS-001 (high).
-
-garak also gets one `GAL-INJECT-001` medium at `garak/data/inthewild_jailbreak_llms.json:34`, a real jailbreak prompt in its dataset. Both repos ship attack samples on purpose. Run the full sweep first (CLAUDE.md, Scope), then either fix real false alarms or narrow the definition of done for repos that carry samples, with the owner's approval.
-From: PR 98 review.
-
 ### Provider config hardening
 - `Load` does not compare the opened file with the `Lstat` result, so a symlink swapped in between them is followed. Refuse unless `os.SameFile`, or open with `O_NOFOLLOW` (`internal/config/file.go`).
 - `encoding/json` matches field names without regard to case, and a duplicate key takes the last value. Neither lets a key in.
@@ -408,7 +400,7 @@ From: PR 101 review.
 From: PR 106 review.
 
 ### Repos that ship attack samples on purpose
-promptfoo/promptfoo and NVIDIA/garak are MALICIOUS in the v0.3.0 sweep from rules older than M3: GAL-EXFIL-001 on red-team payloads under `src/redteam/plugins/`, and GAL-SIG-001 plus a YARA EICAR hit on the EICAR string in `garak/probes/av_spam_scanning.py`. The owner accepted this for v0.3.0. Decide in M7 (the false-positive sweep) whether folders of deliberate samples (`redteam/`, `probes/`, test data of security tools) get a lower weight, and how a user can still tell when such a folder holds code that runs on install or open.
+promptfoo/promptfoo and NVIDIA/garak are MALICIOUS in the v0.3.0 sweep from rules older than M3: GAL-EXFIL-001 on red-team payloads under `src/redteam/plugins/`, and GAL-SIG-001 plus a YARA EICAR hit on the EICAR string in `garak/probes/av_spam_scanning.py`. garak also gets one `GAL-INJECT-001` medium at `garak/data/inthewild_jailbreak_llms.json:34`, a real jailbreak prompt in its dataset. The owner accepted this for v0.3.0. Decide in M7 (the false-positive sweep) whether folders of deliberate samples (`redteam/`, `probes/`, test data of security tools) get a lower weight, and how a user can still tell when such a folder holds code that runs on install or open.
 From: the v0.3.0 sweep.
 
 ### ClamAV time on very large repos
