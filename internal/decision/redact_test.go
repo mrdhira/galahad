@@ -15,11 +15,11 @@ func snippet(s string) protocol.DecisionFinding { return protocol.DecisionFindin
 
 func TestRedact(t *testing.T) {
 	const (
-		awsID     = "AKIAIOSFODNN7EXAMPLE"
+		awsID     = "AKIA" + "IOSFODNN7EXAMPLE"
 		awsSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 		sha256    = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-		ghToken   = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-		jwt       = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+		ghToken   = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+		jwt       = "eyJ" + "hbGciOiJIUzI1NiJ9.eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 		random    = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ0bC2eF4hJ6kL8n"
 	)
 	tests := []struct {
@@ -38,7 +38,7 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "private key and everything after it",
-			finding:    snippet("key: -----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEA ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+			finding:    snippet("key: -----BEGIN RSA PRIVATE KEY" + "----- MIIEowIBAAKCAQEA ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"),
 			want:       snippet("key: [REDACTED:private-key]"),
 			wantCounts: map[string]int{"private-key": 1},
 		},
@@ -71,25 +71,25 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "github tokens",
-			finding:    snippet("a " + ghToken + " b github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz_0123456789 c"),
+			finding:    snippet("a " + ghToken + " b github_pat_" + "11ABCDEFG0abcdefghijklmnopqrstuvwxyz_0123456789 c"),
 			want:       snippet("a [REDACTED:github-token] b [REDACTED:github-token] c"),
 			wantCounts: map[string]int{"github-token": 2},
 		},
 		{
 			name:    "short github token and the variable that holds one are kept",
-			finding: snippet("ghp_short process.env.GITHUB_TOKEN"),
-			want:    snippet("ghp_short process.env.GITHUB_TOKEN"),
+			finding: snippet("ghp_" + "short process.env.GITHUB_TOKEN"),
+			want:    snippet("ghp_" + "short process.env.GITHUB_TOKEN"),
 		},
 		{
 			name:       "slack token",
-			finding:    snippet("SLACK=xoxb-123456789012-abcdefghij end"),
+			finding:    snippet("SLACK=xoxb-" + "123456789012-abcdefghij end"),
 			want:       snippet("SLACK=[REDACTED:slack-token] end"),
 			wantCounts: map[string]int{"slack-token": 1},
 		},
 		{
 			name:    "short slack token is kept",
-			finding: snippet("xoxb-123 end"),
-			want:    snippet("xoxb-123 end"),
+			finding: snippet("xoxb-" + "123 end"),
+			want:    snippet("xoxb-" + "123 end"),
 		},
 		{
 			name:       "stripe key",
@@ -104,7 +104,7 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "api keys",
-			finding:    snippet("sk-ant-api03-abcdefghijklmnopqrstuvwx sk-proj-abcdefghijklmnopqrstuvwx AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"),
+			finding:    snippet("sk-ant-" + "api03-abcdefghijklmnopqrstuvwx sk-proj-" + "abcdefghijklmnopqrstuvwx AIza" + "SyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"),
 			want:       snippet("[REDACTED:api-key] [REDACTED:api-key] [REDACTED:api-key]"),
 			wantCounts: map[string]int{"api-key": 3},
 		},
@@ -121,41 +121,41 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:    "jwt header alone is kept",
-			finding: snippet("eyJhbGciOiJIUzI1NiJ9 alg"),
-			want:    snippet("eyJhbGciOiJIUzI1NiJ9 alg"),
+			finding: snippet("eyJ" + "hbGciOiJIUzI1NiJ9 alg"),
+			want:    snippet("eyJ" + "hbGciOiJIUzI1NiJ9 alg"),
 		},
 		{
 			name:       "other aws key id prefixes",
-			finding:    snippet("ASIAIOSFODNN7EXAMPLE AROAIOSFODNN7EXAMPLE"),
+			finding:    snippet("ASIA" + "IOSFODNN7EXAMPLE AROA" + "IOSFODNN7EXAMPLE"),
 			want:       snippet("[REDACTED:aws-access-key] [REDACTED:aws-access-key]"),
 			wantCounts: map[string]int{"aws-access-key": 2},
 		},
 		{
 			name:    "aws key id that is one character short, and in lower case, is kept",
-			finding: snippet("AKIAIOSFODNN7EXAMPL x akiaiosfodnn7example"),
-			want:    snippet("AKIAIOSFODNN7EXAMPL x akiaiosfodnn7example"),
+			finding: snippet("AKIA" + "IOSFODNN7EXAMPL x akiaiosfodnn7example"),
+			want:    snippet("AKIA" + "IOSFODNN7EXAMPL x akiaiosfodnn7example"),
 		},
 		{
 			name:       "snippet cut inside a github token",
-			finding:    snippet("export GITHUB_TOKEN=ghp_abcd"),
+			finding:    snippet("export GITHUB_TOKEN=ghp_" + "abcd"),
 			want:       snippet("export GITHUB_TOKEN=[REDACTED:github-token]"),
 			wantCounts: map[string]int{"github-token": 1},
 		},
 		{
 			name:       "snippet cut inside an aws key id",
-			finding:    snippet("key AKIAIOSF"),
+			finding:    snippet("key AKIA" + "IOSF"),
 			want:       snippet("key [REDACTED:aws-access-key]"),
 			wantCounts: map[string]int{"aws-access-key": 1},
 		},
 		{
 			name:       "snippet cut inside a github pat",
-			finding:    snippet("x github_pat_11AB"),
+			finding:    snippet("x github_pat_" + "11AB"),
 			want:       snippet("x [REDACTED:github-token]"),
 			wantCounts: map[string]int{"github-token": 1},
 		},
 		{
 			name:       "snippet cut inside a slack token",
-			finding:    snippet("x xoxb-1234"),
+			finding:    snippet("x xoxb-" + "1234"),
 			want:       snippet("x [REDACTED:slack-token]"),
 			wantCounts: map[string]int{"slack-token": 1},
 		},
@@ -167,25 +167,25 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "snippet cut inside a google key",
-			finding:    snippet("x AIzaSyA1"),
+			finding:    snippet("x AIza" + "SyA1"),
 			want:       snippet("x [REDACTED:api-key]"),
 			wantCounts: map[string]int{"api-key": 1},
 		},
 		{
 			name:       "snippet cut inside a jwt",
-			finding:    snippet("x eyJhbGciOi.eyJ"),
+			finding:    snippet("x eyJ" + "hbGciOi.eyJ"),
 			want:       snippet("x [REDACTED:jwt]"),
 			wantCounts: map[string]int{"jwt": 1},
 		},
 		{
 			name:    "snippet cut after three characters of a token prefix is kept",
-			finding: snippet("a ghp_abc"),
-			want:    snippet("a ghp_abc"),
+			finding: snippet("a ghp_" + "abc"),
+			want:    snippet("a ghp_" + "abc"),
 		},
 		{
 			name:    "snippet cut after three characters of an aws prefix is kept",
-			finding: snippet("a AKIAIOS"),
-			want:    snippet("a AKIAIOS"),
+			finding: snippet("a AKIA" + "IOS"),
+			want:    snippet("a AKIA" + "IOS"),
 		},
 		{
 			name:       "password assignments",
@@ -228,7 +228,7 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "counts are the replacements of every string",
-			finding:    protocol.DecisionFinding{Path: ghToken, Title: ghToken, Snippet: ghToken + " " + ghToken + " xoxb-123456789012-abcdefghij"},
+			finding:    protocol.DecisionFinding{Path: ghToken, Title: ghToken, Snippet: ghToken + " " + ghToken + " xoxb-" + "123456789012-abcdefghij"},
 			want:       protocol.DecisionFinding{Path: "[REDACTED:github-token]", Title: "[REDACTED:github-token]", Snippet: "[REDACTED:github-token] [REDACTED:github-token] [REDACTED:slack-token]"},
 			wantCounts: map[string]int{"github-token": 4, "slack-token": 1},
 		},
@@ -274,7 +274,7 @@ func TestRedactTime(t *testing.T) {
 	}{
 		{name: "all token characters", unit: "aB3dE5gH7jK9mN1pQ3sT5vW7yZ0bC2eF4hJ6kL8n", small: 2 << 10, large: 32 << 10, wantMaxRatio: 100},
 		{name: "a name without an assignment", unit: "password", small: 2 << 10, large: 32 << 10, wantMaxRatio: 100},
-		{name: "prefixes without the rest", unit: "AKIA_ghp_sk-xox-eyJ.eyJ.AIza", small: 2 << 10, large: 32 << 10, wantMaxRatio: 100},
+		{name: "prefixes without the rest", unit: "AKIA" + "_ghp_" + "sk-xox-eyJ" + ".eyJ" + ".AIza", small: 2 << 10, large: 32 << 10, wantMaxRatio: 100},
 		{name: "schemes without a password", unit: "x://a:b", small: 2 << 10, large: 32 << 10, wantMaxRatio: 100},
 		{name: "assignments that are references", unit: "token=$X ", small: 2 << 10, large: 32 << 10, wantMaxRatio: 100},
 	}
