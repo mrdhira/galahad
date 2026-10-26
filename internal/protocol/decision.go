@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -122,7 +123,9 @@ type DecisionQuestion struct {
 	Levels   []string         `json:"levels,omitempty"`
 }
 
-// Labels returns the names the provider scores for the question.
+// Labels returns the keys of the probabilities the provider gives for the question. For a score
+// question they are the zero-based index of each level as a string ("0" to "3"), not its name;
+// Levels[i] is the name of key i, for a report.
 func (q DecisionQuestion) Labels() []string {
 	switch q.Type {
 	case QuestionChoice:
@@ -132,7 +135,11 @@ func (q DecisionQuestion) Labels() []string {
 		}
 		return names
 	case QuestionScore:
-		return slices.Clone(q.Levels)
+		keys := make([]string, len(q.Levels))
+		for i := range q.Levels {
+			keys[i] = strconv.Itoa(i)
+		}
+		return keys
 	default:
 		return []string{LabelYes, LabelNo}
 	}

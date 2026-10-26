@@ -3,6 +3,7 @@ package protocol_test
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -42,7 +43,7 @@ func goodResponse() map[string]any {
 				"type": "choice", "probabilities": map[string]any{"clean": 0.05, "suspicious": 0.15, "malicious": 0.8}, "label_mass": 0.6, "choice": "malicious",
 			},
 			"risk": map[string]any{
-				"type": "score", "probabilities": map[string]any{"no harm": 0.05, "minor harm": 0.1, "serious harm": 0.35, "severe harm": 0.5}, "label_mass": 0.4, "score": 2.3,
+				"type": "score", "probabilities": map[string]any{"0": 0.05, "1": 0.1, "2": 0.35, "3": 0.5}, "label_mass": 0.4, "score": 2.3,
 			},
 			"steals_secrets": map[string]any{
 				"type": "yes_no", "probabilities": map[string]any{"yes": 0.9, "no": 0.1}, "label_mass": 0.5,
@@ -79,7 +80,7 @@ func TestDecisionQuestions(t *testing.T) {
 		{name: "verdict", index: 0, wantID: "verdict", wantType: "choice", wantQuestion: "How would you classify this input?",
 			wantLabels: []string{"clean", "suspicious", "malicious"}},
 		{name: "risk", index: 1, wantID: "risk", wantType: "score", wantQuestion: "How much harm could opening or installing this input do to the developer?",
-			wantLabels: []string{"no harm", "minor harm", "serious harm", "severe harm"}},
+			wantLabels: []string{"0", "1", "2", "3"}},
 		{name: "steals_secrets", index: 2, wantID: "steals_secrets", wantType: "yes_no",
 			wantQuestion: "Do the findings show code that reads secrets or environment variables and sends them away?", wantLabels: []string{"yes", "no"}},
 	}
@@ -263,9 +264,12 @@ func TestParseDecisionResponse(t *testing.T) {
 		wantAbsent  string // text that must not be in the stored answers
 		wantTokens  int
 		wantChoice  string
-		wantNoScore string // id of an answer that has no score
+		wantNoScore string  // id of an answer that has no score
+		wantScore   float64 // the score of the risk answer, to within 0.001; 0 means not checked
 	}{
 		{name: "a valid response", mutate: func(map[string]any) {}, wantTokens: 3600, wantChoice: "malicious"},
+		{name: "a response of the live API, 2026-10-26", raw: []byte(`{"answers":{"risk":{"label_mass":0.999902918380958,"probabilities":{"0":5.714260023314e-07,"1":6.961393822391209e-06,"2":0.00012339365797840718,"3":0.999869073522197},"score":2.9998609692763702,"type":"score"},"steals_secrets":{"label_mass":0.9626706521675075,"probabilities":{"no":2.382369552559206e-07,"yes":0.9999997617630446},"type":"yes_no"},"verdict":{"choice":"malicious","label_mass":0.9999903639203892,"probabilities":{"clean":9.422410824096034e-07,"malicious":0.9999953311231453,"suspicious":3.7266357724177115e-06},"type":"choice"}},"model":"deepseek/deepseek-v4.1-flash","object":"decisions","prompt_format_version":1,"usage":{"completion_tokens":0,"prompt_tokens":897,"total_tokens":897}}`),
+			wantTokens: 897, wantChoice: "malicious", wantScore: 3.0},
 		{name: "unknown fields at every level are dropped", mutate: func(m map[string]any) {
 			m["system_fingerprint"] = "fp-extra"
 			m["usage"].(map[string]any)["cached_tokens"] = 5
@@ -310,6 +314,18 @@ func TestParseDecisionResponse(t *testing.T) {
 			ps["evil"] = ps["malicious"]
 			delete(ps, "malicious")
 		}, wantErr: `label "evil", which was not asked`},
+		{name: "a score keyed by level name", mutate: func(m map[string]any) {
+			answerOf(m, "risk")["probabilities"] = map[string]any{"no harm": 0.05, "minor harm": 0.1, "serious harm": 0.35, "severe harm": 0.5}
+		}, wantErr: `label "minor harm", which was not asked`},
+		{name: "a score key past the last level", mutate: func(m map[string]any) {
+			answerOf(m, "risk")["probabilities"] = map[string]any{"0": 0.05, "1": 0.1, "2": 0.35, "3": 0.4, "4": 0.1}
+		}, wantErr: `label "4", which was not asked`},
+		{name: "a score key with a leading zero", mutate: func(m map[string]any) {
+			answerOf(m, "risk")["probabilities"] = map[string]any{"0": 0.05, "1": 0.1, "2": 0.35, "03": 0.5}
+		}, wantErr: `label "03", which was not asked`},
+		{name: "a score key that is negative", mutate: func(m map[string]any) {
+			answerOf(m, "risk")["probabilities"] = map[string]any{"-1": 0.05, "1": 0.1, "2": 0.35, "3": 0.5}
+		}, wantErr: `label "-1", which was not asked`},
 		{name: "a missing label", mutate: func(m map[string]any) {
 			delete(answerOf(m, "verdict")["probabilities"].(map[string]any), "clean")
 		}, wantErr: `no label "clean"`},
@@ -354,6 +370,11 @@ func TestParseDecisionResponse(t *testing.T) {
 			}
 			if got := answers.Questions["verdict"].Choice; got != tt.wantChoice {
 				t.Errorf("verdict choice = %q, want %q", got, tt.wantChoice)
+			}
+			if tt.wantScore != 0 {
+				if sc := answers.Questions["risk"].Score; sc == nil || math.Abs(*sc-tt.wantScore) > 0.001 {
+					t.Errorf("risk score = %v, want %v", sc, tt.wantScore)
+				}
 			}
 			if tt.wantNoScore != "" && answers.Questions[tt.wantNoScore].Score != nil {
 				t.Errorf("answer %s has a score, want none", tt.wantNoScore)

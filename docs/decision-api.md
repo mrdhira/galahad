@@ -68,7 +68,7 @@ User-Agent: galahad/<version>
   "prompt_format_version": 1,
   "answers": {
     "verdict": {"type": "choice", "probabilities": {"clean": 0.05, "suspicious": 0.15, "malicious": 0.80}, "label_mass": 0.6, "choice": "malicious"},
-    "risk": {"type": "score", "probabilities": {"no harm": 0.05, "minor harm": 0.1, "serious harm": 0.35, "severe harm": 0.5}, "label_mass": 0.4, "score": 2.3},
+    "risk": {"type": "score", "probabilities": {"0": 0.05, "1": 0.1, "2": 0.35, "3": 0.5}, "label_mass": 0.4, "score": 2.3},
     "steals_secrets": {"type": "yes_no", "probabilities": {"yes": 0.9, "no": 0.1}, "label_mass": 0.5}
   },
   "usage": {"prompt_tokens": 3600, "completion_tokens": 0, "total_tokens": 3600}
@@ -77,7 +77,7 @@ User-Agent: galahad/<version>
 
 - The probabilities are model scores over the given labels. They sum to 1, but they are not calibrated chances. `score` is the expected level index, from 0 to 3. `label_mass` is a diagnostic: a low value does not make an answer wrong.
 - Only the `verdict` answer feeds the score. `risk` and `steals_secrets` are shown in the report as opinion only.
-- The keys of the probabilities of a `score` answer are the level names. This is an assumption that one real call has to confirm.
+- The probabilities of a `score` answer are keyed by the zero-based index of the level as a string (`"0"` to `"3"`, for `no harm` to `severe harm`), not by the level name. `choice` and `yes_no` answers are keyed by name. This was confirmed against the live API on 2026-10-26.
 
 ## Response checks
 
@@ -87,7 +87,7 @@ Galahad reads the body through a 64 KiB limit; a longer body is `too_large`. Any
 - One JSON object and no trailing data. Fields Galahad does not read are ignored and never stored, so a new field on the provider's side does not break the call.
 - `object` is `decisions` and `prompt_format_version` is 1.
 - `answers` has exactly the three question IDs, and each `type` matches its question.
-- `probabilities` has exactly the asked labels as keys (`yes` and `no` for `yes_no`). Each value is a finite number in [0, 1], and they sum to 1 within 0.02.
+- `probabilities` has exactly the asked labels as keys: the option names for `choice`, `yes` and `no` for `yes_no`, and the strings `"0"` to `"3"` for `score` (no leading zero, sign or space). Each value is a finite number in [0, 1], and they sum to 1 within 0.02.
 - `choice`, when present, is one of the options. `score`, for the `score` question, is present and in [0, 3].
 - `label_mass` is present, finite and in [0, 1].
 - `usage.prompt_tokens` and `usage.total_tokens` are whole numbers from 0 to 2^31−1.
