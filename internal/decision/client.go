@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mrdhira/galahad/internal/config"
 	"github.com/mrdhira/galahad/internal/protocol"
@@ -62,14 +63,23 @@ func Send(ctx context.Context, p config.Provider, key, version string, req proto
 	finish := func() Reply {
 		reply.LatencyMS = int(min(time.Since(start).Milliseconds(), protocol.MaxDecisionLatencyMS))
 		reply.Attempts = max(reply.Attempts, 1) // a call refused before the first attempt still counts as one
-		if reply.Error != nil && key != "" {
-			reply.Error.Message = strings.ReplaceAll(reply.Error.Message, key, "[REDACTED:"+protocol.RedactKey+"]")
+		if key != "" {
+			// One last scrub, so that no field can carry the key.
+			if reply.Error != nil {
+				reply.Error.Message = strings.ReplaceAll(reply.Error.Message, key, "[REDACTED:"+protocol.RedactKey+"]")
+			}
+			if strings.Contains(reply.RequestID, key) {
+				reply.RequestID = ""
+			}
 		}
 		return reply
 	}
 
 	var body []byte
-	err := protocol.CheckDecisionURL(p.URL)
+	err := CheckKey(key)
+	if err == nil {
+		err = protocol.CheckDecisionURL(p.URL)
+	}
 	if err == nil {
 		err = req.Validate()
 	}
@@ -77,7 +87,7 @@ func Send(ctx context.Context, p config.Provider, key, version string, req proto
 		body, err = req.Encode()
 	}
 	if err != nil {
-		reply.Error = &protocol.DecisionError{Code: protocol.DecisionErrInvalid, Message: "request or provider URL is not valid"}
+		reply.Error = &protocol.DecisionError{Code: protocol.DecisionErrInvalid, Message: "request, key or provider URL is not valid"}
 		return finish()
 	}
 
@@ -87,6 +97,7 @@ func Send(ctx context.Context, p config.Provider, key, version string, req proto
 		Proxy:                  http.ProxyFromEnvironment,
 		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
 		DisableKeepAlives:      true,
+		DisableCompression:     true, // no Accept-Encoding: the headers are the ones in the contract
 		MaxResponseHeaderBytes: maxHeaderBytes,
 	}
 	defer tr.CloseIdleConnections()
@@ -173,7 +184,7 @@ func (c *caller) once(ctx context.Context) attempt {
 		return attempt{err: &protocol.DecisionError{Code: protocol.DecisionErrNetwork, Message: "could not reach the provider"}, retry: true}
 	}
 	defer func() { _ = resp.Body.Close() }() // the body is not needed after the checks below
-	res := attempt{gotResponse: true, requestID: requestID(resp.Header)}
+	res := attempt{gotResponse: true, requestID: requestID(resp.Header, c.key)}
 
 	if resp.StatusCode != http.StatusOK {
 		msg, ok := statusMessages[resp.StatusCode]
@@ -234,10 +245,19 @@ func parseRetryAfter(v string) (time.Duration, bool) {
 	return time.Duration(n) * time.Second, true
 }
 
-// requestID returns the X-Request-Id header when it is 1 to 128 bytes of printable ASCII.
-func requestID(h http.Header) string {
+// CheckKey refuses a key with a control character, which cannot go in a header.
+func CheckKey(key string) error {
+	if strings.ContainsFunc(key, unicode.IsControl) {
+		return errors.New("the key has a control character")
+	}
+	return nil
+}
+
+// requestID returns the X-Request-Id header when it is 1 to 128 bytes of printable ASCII and does
+// not hold the key (a mock may echo the Authorization header into it).
+func requestID(h http.Header, key string) string {
 	id := h.Get("X-Request-Id")
-	if id == "" || len(id) > protocol.MaxDecisionRequestID {
+	if id == "" || len(id) > protocol.MaxDecisionRequestID || key != "" && strings.Contains(id, key) {
 		return ""
 	}
 	for i := 0; i < len(id); i++ {

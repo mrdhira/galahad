@@ -68,7 +68,8 @@ for pkg in analyze ingest vsock agent; do
 done
 # The reverse: the agent must not link the decision client, so it never reads a key.
 for tags in "" galahadtest; do
-  if go list -tags "$tags" -deps ./cmd/galahad-agent | grep -E -q "^$main_module/internal/decision(/|$)"; then
+  agent_deps="$(go list -tags "$tags" -deps ./cmd/galahad-agent)"
+  if printf '%s\n' "$agent_deps" | grep -E -q "^$main_module/internal/decision(/|$)"; then
     echo "cmd/galahad-agent must not depend on internal/decision (the guest never holds a key; tags: '$tags')" >&2
     exit 1
   fi

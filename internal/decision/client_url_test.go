@@ -19,11 +19,13 @@ func TestSendRefusesURL(t *testing.T) {
 		// expectations
 		wantMessage string
 	}{
-		{name: "plain http to a remote host", url: "http://example.com", wantMessage: "request or provider URL is not valid"},
-		{name: "user info", url: "https://user:pw@example.com", wantMessage: "request or provider URL is not valid"},
-		{name: "a query", url: "https://example.com/?a=b", wantMessage: "request or provider URL is not valid"},
-		{name: "no URL", url: "", wantMessage: "request or provider URL is not valid"},
-		{name: "the key value in a message is replaced", url: "", key: "provider", wantMessage: "request or [REDACTED:key] URL is not valid"},
+		{name: "plain http to a remote host", url: "http://example.com", wantMessage: "request, key or provider URL is not valid"},
+		{name: "user info", url: "https://user:pw@example.com", wantMessage: "request, key or provider URL is not valid"},
+		{name: "a query", url: "https://example.com/?a=b", wantMessage: "request, key or provider URL is not valid"},
+		{name: "no URL", url: "", wantMessage: "request, key or provider URL is not valid"},
+		{name: "the key value in a message is replaced", url: "", key: "provider", wantMessage: "request, key or [REDACTED:key] URL is not valid"},
+		{name: "a key with a line break", url: "https://example.com", key: "fake-key\r\nX-Evil: 1", wantMessage: "request, key or provider URL is not valid"},
+		{name: "a key with a control character", url: "https://example.com", key: "fake-key\x01", wantMessage: "request, key or provider URL is not valid"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

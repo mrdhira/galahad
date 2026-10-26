@@ -218,6 +218,10 @@ func runProviderTest(args []string, stdout, stderr io.Writer, env Env) int {
 			fmt.Fprintf(stderr, "galahad provider test: provider %s needs the key in $%s, which is not set\n", p.Name, p.KeyEnv)
 			return ExitUsage
 		}
+		if err := decision.CheckKey(key); err != nil {
+			fmt.Fprintf(stderr, "galahad provider test: $%s: %v\n", p.KeyEnv, err)
+			return ExitUsage
+		}
 	}
 
 	reply := decision.Send(context.Background(), p, key, env.version(), sampleRequest(p.Model))

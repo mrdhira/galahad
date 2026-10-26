@@ -187,6 +187,11 @@ func TestProvider(t *testing.T) {
 			before: [][]string{addNetra}, args: []string{"provider", "test", "netra"}, wantCode: 2, wantStderr: "$NETRA_API_KEY, which is not set",
 		},
 		{
+			name:   "test with a control character in the key is a usage error",
+			before: [][]string{addNetra}, env: map[string]string{"NETRA_API_KEY": "fake-key\r\nX-Evil: 1"},
+			args: []string{"provider", "test", "netra"}, wantCode: 2, wantStderr: "$NETRA_API_KEY: the key has a control character", wantNot: "X-Evil",
+		},
+		{
 			name: "test refuses a config it cannot load",
 			file: `not json ` + fakeKey,
 			args: []string{"provider", "test", "netra"}, wantCode: 1, wantStderr: "not valid JSON", wantNot: fakeKey,

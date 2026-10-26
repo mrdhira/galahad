@@ -185,6 +185,16 @@ func TestSend(t *testing.T) {
 			wantAttempts: 1, wantRequests: 1,
 		},
 		{
+			name:  "a request ID that holds the key is dropped",
+			steps: []step{{status: 402, header: map[string]string{"X-Request-Id": "echo-" + fakeKey}}}, wantCode: "status", wantHTTP: 402, wantMessage: "insufficient credit",
+			wantAttempts: 1, wantRequests: 1,
+		},
+		{
+			name:         "a request ID that holds the Authorization value is dropped",
+			steps:        []step{{status: 200, header: map[string]string{"Content-Type": "application/json", "X-Request-Id": "Bearer " + fakeKey}, body: goodBody}},
+			wantAttempts: 1, wantRequests: 1, wantModel: "test/model-1",
+		},
+		{
 			name:  "a mock that never answers is a timeout within the limit",
 			steps: []step{{hang: true}}, timeoutSeconds: 1, wantCode: "timeout", wantMessage: "provider did not answer in time",
 			wantAttempts: 1, wantRequests: 1, wantMinTime: 900 * time.Millisecond, wantMaxTime: 2 * time.Second,
