@@ -360,7 +360,6 @@ From: PR 98 review.
 ### Decision client details
 - A request ID or an answer `model` that holds part of the key, or the key in another case or in base64, is kept. Accepted risk: only a provider that already holds the key can do this.
 - `TestSend` cases are not in code order, and `TestSendRefusesURL` has no success case first. `TestSend`'s 400 ms upper bounds under `-race` with `t.Parallel` may flake.
-- The T3.2b card in `docs/milestones/M3.md` names `internal/decision/loopback_galahadtest.go`; the code reuses `protocol.DecisionLoopback`.
 From: PR 102 review.
 
 ### Selection and redaction gaps
@@ -383,7 +382,6 @@ From: PR 103 review and QA.
 
 ### AI opinions report details
 - The report cannot name the key variable: `Decision` has no `key_env`, so it says "Authorization from the provider's key variable (not shown)". Either add `key_env` to `Decision` or change the spec wording. With an empty `key_env`, print no Authorization line (`aiAuthNoName` in `internal/report/ai.go`).
-- The Reports section of `docs/milestones/M3.md` still says "raised clean to suspicious"; the report says "raised to suspicious", and "unavailable (...); the verdict comes from the analysis alone" for a 402 too.
 - `TestAIOpinions` runs the "no decision, no section" case last; it covers the first branch.
 From: PR 104 review.
 
