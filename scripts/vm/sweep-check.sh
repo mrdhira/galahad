@@ -53,7 +53,7 @@ failures=$(jq -rs --argjson wc "$want_clean" --argjson ws "$want_suspicious" --a
 	  | select(.verdict != "error")
 	  | . as $r
 	  | (if .group == "binary" then ["clamav", "yara"]
-	     elif .group == "new" and ((.tools // "") | test("(^| )clamav: left out: timed out after ")) then ["yara", "osv"]
+	     elif .group == "new" and ((.tools // "") | test("^clamav: left out: timed out after [0-9]")) then ["yara", "osv"]
 	     else ["clamav", "yara", "osv"] end) as $need
 	  | missing($r.analyzers; $need)
 	  | select(length > 0)
