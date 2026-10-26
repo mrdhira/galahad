@@ -320,10 +320,8 @@ From: PR 69, PR 70 and PR 75 reviews.
 - `TestRawName` and `TestGuestRemote` are out of code order.
 From: PR 78, PR 82 and PR 84 reviews.
 
-### `vm.yml` and `vmtest.sh` details
-- The comment on `concurrency` in `.github/workflows/vm.yml` says a push to main is not cancelled by the next one. GitHub keeps only one pending run per group, so in a burst of merges a middle commit can have no VM run (the release fails closed; dispatch `vm.yml` for the tag). Say so in the comment.
-- `scripts/vm/vmtest.sh` prints the `--- PASS/FAIL` lines without `tr -cd '[:print:]\n'`. Add it so a `\r` in a test name cannot split a line into a workflow command.
-- The path filters in `vm.yml` miss `test/acceptance/{scan_test,link_test,git_test,main_test}.go` and the `Makefile`.
+### `vmtest.sh` output
+`scripts/vm/vmtest.sh` prints the `--- PASS/FAIL` lines without `tr -cd '[:print:]\n'`. Add it so a `\r` in a test name cannot split a line into a workflow command.
 From: PR 87 review.
 
 ## Decision provider (M3)

@@ -152,7 +152,7 @@ make gate    # run the full quality gate
 
 Set `SKIP_VULN=1` for `make gate` only where vuln.go.dev is unreachable.
 
-The tests that need a real VM carry the `vm` build tag and run in CI on a KVM runner (`.github/workflows/vm.yml`). The release sweep of popular repositories is a separate workflow that you start by hand (`.github/workflows/sweep.yml`).
+The tests that need a real VM carry the `vm` build tag and run on a KVM runner when started by hand, at the end of each milestone and before each release (`.github/workflows/vm.yml`). The release sweep of popular repositories is a separate workflow that you start by hand (`.github/workflows/sweep.yml`).
 
 ## Security
 
