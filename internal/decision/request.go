@@ -16,6 +16,9 @@ import (
 // the network log, so they are sent as rule, severity and title only.
 const hostAnalyzer = "network"
 
+// filenameAnalyzer is the analyzer whose snippet is the name of the file.
+const filenameAnalyzer = "filename"
+
 // targetName stands for the name of a file target in an evidence path.
 const targetName = "(target)"
 
@@ -43,7 +46,8 @@ type entry struct {
 // Select builds the request for the provider from a validated Result. It takes the findings at low
 // or above, one for each rule and path, ordered by severity (highest first), then rule ID, path and
 // line, at most protocol.MaxDecisionFindings of them, and the first evidence entry of each. The name
-// of a file target in a path is replaced by "(target)", and a finding that the host made goes
+// of a file target in a path, a title or a snippet is replaced by "(target)", a filename finding
+// for the target itself goes without snippet (it is the name), and a finding that the host made goes
 // without path, line or snippet. Nothing else of the Result is used: not the name, the IOCs, the
 // files, the hashes, the network log, the verdict, the score or the reasons.
 //
@@ -68,7 +72,11 @@ func Select(res protocol.Result, model string) (protocol.DecisionRequest, bool, 
 		if len(f.Evidence) > 0 {
 			ev := f.Evidence[0]
 			e.path = ev.Path
-			e.finding.Path, e.finding.Line, e.finding.Snippet = targetPath(res.Target, ev.Path), ev.Line, ev.Snippet
+			e.finding.Path, e.finding.Line = targetPath(res.Target, ev.Path), ev.Line
+			e.finding.Title, e.finding.Snippet = hideName(res.Target, f.Title), hideName(res.Target, ev.Snippet)
+			if f.Analyzer == filenameAnalyzer && isFileTarget(res.Target) && ev.Path == res.Target.Name {
+				e.finding.Snippet = "" // the snippet is the name of the file, as it was or as it is shown
+			}
 		}
 		entries = append(entries, e)
 	}
@@ -125,10 +133,25 @@ func Select(res protocol.Result, model string) (protocol.DecisionRequest, bool, 
 	}
 }
 
+// isFileTarget reports whether t is a file target that has a name to hide.
+func isFileTarget(t protocol.Target) bool { return t.Kind == protocol.TargetFile && t.Name != "" }
+
+// minHiddenName is the shortest name that hideName replaces in a text. "(target)" is longer than a
+// shorter name, and a text full of it (a file named "a") would outgrow the limits of Validate.
+const minHiddenName = 3
+
+// hideName replaces every occurrence of the name of a file target in text by "(target)".
+func hideName(t protocol.Target, text string) string {
+	if !isFileTarget(t) || len(t.Name) < minHiddenName {
+		return text
+	}
+	return strings.ReplaceAll(text, t.Name, targetName)
+}
+
 // targetPath replaces the name of a file target at the start of an evidence path by "(target)": the
 // path of the file itself, or of a member after "!/".
 func targetPath(t protocol.Target, path string) string {
-	if t.Kind != protocol.TargetFile || t.Name == "" {
+	if !isFileTarget(t) {
 		return path
 	}
 	if path == t.Name {

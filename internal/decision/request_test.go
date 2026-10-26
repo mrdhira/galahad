@@ -66,9 +66,10 @@ func TestSelect(t *testing.T) {
 		res   protocol.Result
 		model string
 		// expectations
-		wantOK    bool
-		wantInput protocol.DecisionInput
-		wantErr   bool
+		wantOK     bool
+		wantInput  protocol.DecisionInput
+		wantAbsent string // text that is in neither encoding of the request
+		wantErr    bool
 	}{
 		{
 			name: "findings by severity, rule, path and line, one for each rule and path, the first evidence only",
@@ -130,6 +131,46 @@ func TestSelect(t *testing.T) {
 			}, 0),
 		},
 		{
+			name: "the name of a file target in a title or a snippet becomes (target)",
+			res: resultOf(protocol.TargetFile, marker,
+				func() protocol.Finding {
+					f := finding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", ev(marker+"!/a.js", 1, "open "+marker+" and "+marker))
+					f.Title = "Opens " + marker
+					return f
+				}(),
+			),
+			model:  "test/model-1",
+			wantOK: true,
+			wantInput: inputOf(protocol.TargetFile, []protocol.DecisionFinding{
+				{RuleID: "GAL-SCRIPT-001", Severity: protocol.SeverityMedium, Title: "Opens (target)", Analyzer: "script", Path: "(target)!/a.js", Line: 1, Snippet: "open (target) and (target)"},
+			}, 0),
+			wantAbsent: marker,
+		},
+		{
+			name: "the snippet of the filename analyzer for the target itself is left out",
+			res: resultOf(protocol.TargetFile, "MARKER-NAME.pdf.exe",
+				finding("GAL-NAME-001", protocol.SeverityHigh, "filename", ev("MARKER-NAME.pdf.exe", 0, "MARKER-NAME.pdf.exe")),
+			),
+			model:  "test/model-1",
+			wantOK: true,
+			wantInput: inputOf(protocol.TargetFile, []protocol.DecisionFinding{
+				dfinding("GAL-NAME-001", protocol.SeverityHigh, "filename", "(target)", 0, ""),
+			}, 0),
+			wantAbsent: "MARKER-NAME",
+		},
+		{
+			name: "the raw name of a download in the snippet of the filename analyzer is left out",
+			res: resultOf(protocol.TargetFile, "MARKER-NAME.pdf.exe",
+				finding("GAL-NAME-001", protocol.SeverityHigh, "filename", ev("MARKER-NAME.pdf.exe", 0, "MARKER-NAME\u202efdp.exe")),
+			),
+			model:  "test/model-1",
+			wantOK: true,
+			wantInput: inputOf(protocol.TargetFile, []protocol.DecisionFinding{
+				dfinding("GAL-NAME-001", protocol.SeverityHigh, "filename", "(target)", 0, ""),
+			}, 0),
+			wantAbsent: "MARKER-NAME",
+		},
+		{
 			name: "a path in a directory target is not changed, even when it equals the name",
 			res: resultOf(protocol.TargetDir, "src",
 				finding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", ev("src", 1, "a")),
@@ -186,6 +227,19 @@ func TestSelect(t *testing.T) {
 			}
 			if err := req.Validate(); err != nil {
 				t.Errorf("Validate() = %v", err)
+			}
+			wire, err := req.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			escaped, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, data := range [][]byte{wire, escaped} {
+				if tt.wantAbsent != "" && strings.Contains(string(data), tt.wantAbsent) {
+					t.Errorf("request holds %q: %s", tt.wantAbsent, data)
+				}
 			}
 		})
 	}

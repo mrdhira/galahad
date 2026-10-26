@@ -29,8 +29,8 @@ const valueRe = `[^\s"',;&|)]`
 // once and under its own kind, and the rules after it see only the marker, which none of them match.
 var redactRules = []redactRule{
 	{kind: protocol.RedactPrivateKey, re: regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*`)},
-	{kind: protocol.RedactURLCredentials, re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://([^\s/@:]+:[^\s/@]+@)`)},
-	{kind: protocol.RedactAWSSecret, re: regexp.MustCompile(`(?i)aws_secret_access_key["']?[ \t]*[=:][ \t]*["']?(` + valueRe + `+)`), keep: isReference},
+	{kind: protocol.RedactURLCredentials, re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://([^\s/@:]*:[^\s/@]{2,}@)`)},
+	{kind: protocol.RedactAWSSecret, re: regexp.MustCompile(`(?i)aws_secret_access_key["']?[ \t]*(?::=|=>|[=:])[ \t]*["']?(` + valueRe + `+)`), keep: isReference},
 	{kind: protocol.RedactGitHubToken, re: regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}`)},
 	{kind: protocol.RedactSlackToken, re: regexp.MustCompile(`xox[abpors]-[A-Za-z0-9-]{10,}`)},
 	{kind: protocol.RedactStripeKey, re: regexp.MustCompile(`[sr]k_(?:live|test)_[A-Za-z0-9]{16,}`)},
@@ -45,7 +45,7 @@ var redactRules = []redactRule{
 	{kind: protocol.RedactAPIKey, re: regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}$|AIza[A-Za-z0-9_-]{4,}$`)},
 	{kind: protocol.RedactJWT, re: regexp.MustCompile(`eyJ[A-Za-z0-9_.-]{4,}$`)},
 
-	{kind: protocol.RedactAssignment, re: regexp.MustCompile(`(?i)(?:password|passwd|secret|token|api_key|apikey|access_key|auth)[A-Za-z0-9_.-]*["']?[ \t]*[=:][ \t]*["']?((?:(?:bearer|basic|token)[ \t]+)?` + valueRe + `{6,})`), keep: isReference},
+	{kind: protocol.RedactAssignment, re: regexp.MustCompile(`(?i)(?:password|passwd|secret|token|api_key|apikey|access_key|auth)[A-Za-z0-9_.-]*["']?[ \t]*(?::=|=>|[=:])[ \t]*["']?((?:(?:bearer|basic|token)[ \t]+)?` + valueRe + `{6,})`), keep: isReference},
 	{kind: protocol.RedactHighEntropy, re: regexp.MustCompile(`[A-Za-z0-9+/_=-]{32,}`), keep: func(s string) bool { return entropy(s) <= minEntropy }},
 }
 

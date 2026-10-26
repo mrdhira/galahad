@@ -21,6 +21,7 @@ func TestRedact(t *testing.T) {
 		ghToken   = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
 		jwt       = "eyJ" + "hbGciOiJIUzI1NiJ9.eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 		random    = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ0bC2eF4hJ6kL8n"
+		awsFake   = "abcdefghij" + "KLMNOPQRST" + "0123456789" + "uvwxyzABCD"
 	)
 	tests := []struct {
 		name string
@@ -54,6 +55,12 @@ func TestRedact(t *testing.T) {
 			wantCounts: map[string]int{"url-credentials": 1},
 		},
 		{
+			name:       "url credentials without a user",
+			finding:    snippet("redis://:p4ssw0rdXYZ@redis:6379/0"),
+			want:       snippet("redis://[REDACTED:url-credentials]redis:6379/0"),
+			wantCounts: map[string]int{"url-credentials": 1},
+		},
+		{
 			name:    "url with a port or a user and no password is kept",
 			finding: snippet("https://example.com:8080/path https://user@example.com/x"),
 			want:    snippet("https://example.com:8080/path https://user@example.com/x"),
@@ -62,6 +69,12 @@ func TestRedact(t *testing.T) {
 			name:       "aws secret in quotes and after a colon",
 			finding:    snippet(`"aws_secret_access_key": "abc123"`),
 			want:       snippet(`"aws_secret_access_key": "[REDACTED:aws-secret]"`),
+			wantCounts: map[string]int{"aws-secret": 1},
+		},
+		{
+			name:       "aws secret after :=",
+			finding:    snippet(`aws_secret_access_key := "` + awsFake + `"`),
+			want:       snippet(`aws_secret_access_key := "[REDACTED:aws-secret]"`),
 			wantCounts: map[string]int{"aws-secret": 1},
 		},
 		{
@@ -194,6 +207,30 @@ func TestRedact(t *testing.T) {
 			wantCounts: map[string]int{"assignment": 4},
 		},
 		{
+			name:       "assignment with :=",
+			finding:    snippet(`apiToken := "s3cr3tvalue123"`),
+			want:       snippet(`apiToken := "[REDACTED:assignment]"`),
+			wantCounts: map[string]int{"assignment": 1},
+		},
+		{
+			name:       "password with :=",
+			finding:    snippet(`password := "hunter2hunter2"`),
+			want:       snippet(`password := "[REDACTED:assignment]"`),
+			wantCounts: map[string]int{"assignment": 1},
+		},
+		{
+			name:       "quoted key with =>",
+			finding:    snippet(`'password' => 'hunter2hunter2'`),
+			want:       snippet(`'password' => '[REDACTED:assignment]'`),
+			wantCounts: map[string]int{"assignment": 1},
+		},
+		{
+			name:       "symbol key with =>",
+			finding:    snippet(`:password => "hunter2hunter2"`),
+			want:       snippet(`:password => "[REDACTED:assignment]"`),
+			wantCounts: map[string]int{"assignment": 1},
+		},
+		{
 			name:       "authorization header with a bearer token",
 			finding:    snippet("Authorization: Bearer abcdefghij"),
 			want:       snippet("Authorization: [REDACTED:assignment]"),
@@ -240,9 +277,9 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:       "the shortest matches grow the string by less than the validation limit",
-			finding:    snippet(strings.Repeat("x://a:b@", 25)),
-			want:       snippet(strings.Repeat("x://[REDACTED:url-credentials]", 25)),
-			wantCounts: map[string]int{"url-credentials": 25},
+			finding:    snippet(strings.Repeat("x://a:bc@x://:bc@", 11)),
+			want:       snippet(strings.Repeat("x://[REDACTED:url-credentials]", 22)),
+			wantCounts: map[string]int{"url-credentials": 22},
 		},
 	}
 	for _, tt := range tests {
