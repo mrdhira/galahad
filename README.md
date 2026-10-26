@@ -4,7 +4,7 @@ Galahad inspects untrusted files, links and Git repositories inside an isolated 
 
 It targets the fake-recruiter attacks that ship a "take-home" repo, PDF or archive which runs code when you open it in VS Code, run `npm install`, or start the app.
 
-> Status: v0.2.0. `galahad scan` runs the analysis in its own Firecracker microVM. It needs a Linux amd64 host with KVM. The analysis is static: nothing is run or detonated.
+> Status: v0.3.0. `galahad scan` runs the analysis in its own Firecracker microVM. It needs a Linux amd64 host with KVM. The analysis is static: nothing is run or detonated. An optional decision provider can add a capped AI opinion.
 
 New to the security terms (IOC, defang, sandbox, zip-slip, ...)? See the [glossary](docs/glossary.md).
 
@@ -139,7 +139,7 @@ On top of its own checks the guest runs ClamAV and the YARA-Forge core rules (wh
 
 The problems are defined in [docs/plan.md](docs/plan.md).
 
-## Known gaps in v0.2.0
+## Known gaps in v0.3.0
 
 - Linux amd64 hosts only.
 - Static analysis only. Nothing is executed, so code that hides its behavior until run is not seen. Ghidra is installed in the `re` image but not run.
@@ -155,6 +155,8 @@ The problems are defined in [docs/plan.md](docs/plan.md).
 - capa does not finish on large Go binaries in its time limit, so it is left out for them; the report says so.
 - The bundled fixtures are the tested baseline. Real-world files can be missed or flagged wrongly. A repo whose only automation is a harmless install script can come out suspicious.
 - Archive formats are limited to zip, tar, gzip and bzip2. Files that are too large, encrypted or unsupported are listed as skipped in the report.
+- Repos that ship attack samples on purpose, such as red-team payloads or the EICAR test string, come out MALICIOUS.
+- The decision provider sees findings and short redacted snippets only, so it cannot find what the analyzers missed. Redaction is pattern-based. Its scores are not calibrated probabilities, and only the `verdict` question feeds the score.
 
 ## Install
 
