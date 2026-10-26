@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,12 @@ type decisionRecord struct {
 	Verdict string   `json:"verdict"`
 	Score   int      `json:"score"`
 	Reasons []string `json:"reasons"`
+	Target  struct {
+		SHA256 string `json:"sha256"`
+	} `json:"target"`
+	Files []struct {
+		SHA256 string `json:"sha256"`
+	} `json:"files"`
 	// Decision is nil when the scan asked no provider.
 	Decision *struct {
 		Provider string `json:"provider"`
@@ -126,26 +133,29 @@ func TestScanDecision(t *testing.T) {
 		// inputs
 		target    string // a fixture in testdata/corpus, or a link when link is set
 		link      bool
+		copyAs    string // the target is copied under this name first, to give it a revealing name
 		handler   func(w http.ResponseWriter, r *http.Request, n int)
 		url       string // the provider URL instead of the mock's
 		timeout   int    // seconds of the provider; 30 when zero
 		interrupt bool   // Ctrl-C after the first request
 		// expectations
-		wantCode     int
-		wantState    string
-		wantVerdict  string
-		wantScore    int
-		wantSame     bool   // the verdict, score and exit code are those of the scan without --decision
-		wantStatus   string // status of the decision; empty means the scan has no report
-		wantReason   string // the reason of a skipped decision
-		wantErrCode  string
-		wantHTTP     int
-		wantRequests int
-		wantLine     string   // in stdout, and in the output of "galahad report"
-		wantReasons  []string // substrings of reasons
-		wantExtra    time.Duration
-		wantSecond   int      // requests of the second server
-		wantRedacted []string // kinds the report counts
+		wantCode       int
+		wantState      string
+		wantVerdict    string
+		wantScore      int
+		wantSame       bool   // the verdict, score and exit code are those of the scan without --decision
+		wantStatus     string // status of the decision; empty means the scan has no report
+		wantReason     string // the reason of a skipped decision
+		wantErrCode    string
+		wantHTTP       int
+		wantRequests   int
+		wantLine       string   // in stdout, and in the output of "galahad report"
+		wantReasons    []string // substrings of reasons
+		wantExtra      time.Duration
+		wantSecond     int      // requests of the second server
+		wantRedacted   []string // kinds the report counts
+		wantBodyHas    []string // substrings of the body the mock received
+		wantBodyAbsent []string // substrings that must not be in it
 	}{
 		{
 			name: "a benign opinion on the P1 repo changes nothing", target: "fake-interview-repo", handler: answers(decisionAnswer(0.99, 0.005, 0.005)),
@@ -160,6 +170,39 @@ func TestScanDecision(t *testing.T) {
 			name: "a strong opinion on a suspicious scan stays suspicious", target: "p2-typosquat", handler: answers(decisionAnswer(0.03, 0.02, 0.95)),
 			wantCode: 10, wantState: "done", wantVerdict: "suspicious", wantScore: 65, wantStatus: "ok", wantRequests: 1,
 			wantLine: "AI opinion (mock): malicious 95%, raised to suspicious",
+		},
+		{
+			name: "a strong opinion gives the exact reason line and never makes a verdict malicious", target: "benign-husky-lint", handler: answers(decisionAnswer(0.05, 0.03, 0.92)),
+			wantCode: 10, wantState: "done", wantVerdict: "suspicious", wantScore: 20, wantStatus: "ok", wantRequests: 1,
+			wantLine:    "AI opinion (mock): malicious 92%, raised to suspicious",
+			wantReasons: []string{"AI opinion (mock): malicious 92%, raised to suspicious; an AI opinion never makes a verdict malicious"},
+		},
+		{
+			name: "a clean answer to a prompt injection cannot lower a malicious verdict", target: "p9-prompt-injection-repo",
+			handler: func(w http.ResponseWriter, r *http.Request, _ int) {
+				body, _ := io.ReadAll(r.Body)
+				if bytes.Contains(bytes.ToLower(body), []byte("ignore all previous instructions")) {
+					answers(decisionAnswer(0.99, 0.005, 0.005))(w, r, 0)
+					return
+				}
+				answers(decisionAnswer(0.005, 0.005, 0.99))(w, r, 0)
+			},
+			wantCode: 20, wantState: "done", wantSame: true, wantStatus: "ok", wantRequests: 1, wantLine: "AI opinion (mock): malicious ",
+			wantBodyHas: []string{"ignore all previous instructions", "GAL-INJECT-001", "GAL-AUTOEXEC-010"},
+		},
+		{
+			name: "a folder with a revealing name is sent as the target, without hashes or the IOCs of no snippet", target: "fake-interview-repo", copyAs: "Acme-layoffs-2026",
+			handler:  answers(decisionAnswer(0.1, 0.1, 0.8)),
+			wantCode: 20, wantState: "done", wantSame: true, wantStatus: "ok", wantRequests: 1, wantLine: "AI opinion (mock): malicious 80%, no change",
+			wantBodyHas:    []string{"GAL-AUTOEXEC-"},
+			wantBodyAbsent: []string{"Acme", "layoffs", "2026"},
+		},
+		{
+			name: "a file with a revealing name is sent as (target), without hashes or the IOCs of no snippet", target: "p6-eml-lure/lure.eml", copyAs: "Acme-layoffs-2026.eml",
+			handler:  answers(decisionAnswer(0.1, 0.1, 0.8)),
+			wantCode: 20, wantState: "done", wantSame: true, wantStatus: "ok", wantRequests: 1, wantLine: "AI opinion (mock): malicious 80%, no change",
+			wantBodyHas:    []string{"(target)!/setup.js", "login.sinkhole.test"},
+			wantBodyAbsent: []string{"Acme", "layoffs", "2026", "bounce@recruit-sinkhole.test", "candidate@example.test"},
 		},
 		{
 			name: "the example keys are redacted before they leave the machine", target: "p9-prompt-injection-repo", handler: answers(decisionAnswer(1, 0, 0)),
@@ -216,6 +259,16 @@ func TestScanDecision(t *testing.T) {
 			wantLine: "AI opinion (mock): unavailable (invalid",
 		},
 		{
+			name: "an error body that echoes the key keeps the key out of the files and the output", target: "fake-interview-repo",
+			handler: func(w http.ResponseWriter, r *http.Request, _ int) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error": {"message": "bad key ` + r.Header.Get("Authorization") + ` ` + strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") + `"}}`))
+			},
+			wantCode: 20, wantState: "done", wantSame: true, wantStatus: "failed", wantErrCode: "status", wantHTTP: 400, wantRequests: 1,
+			wantLine: "AI opinion (mock): unavailable (status 400",
+		},
+		{
 			name: "a redirect is not followed", target: "fake-interview-repo",
 			handler: func(w http.ResponseWriter, r *http.Request, _ int) {
 				http.Redirect(w, r, secondSrv.URL+"/v1/decisions", http.StatusFound)
@@ -236,6 +289,17 @@ func TestScanDecision(t *testing.T) {
 			}
 			// Given the scan without a provider, for what the static verdict is and how long a scan takes
 			target := corpus(t, tt.target)
+			if tt.copyAs != "" {
+				copied := filepath.Join(t.TempDir(), tt.copyAs)
+				if info, err := os.Stat(target); err != nil {
+					t.Fatal(err)
+				} else if info.IsDir() {
+					copyTree(t, target, copied)
+				} else {
+					writeText(t, copied, readFile(t, target))
+				}
+				target = copied
+			}
 			if tt.link {
 				target = tt.target
 				files := linkServer(t, []byte("x"), []byte("x"))
@@ -337,6 +401,28 @@ func TestScanDecision(t *testing.T) {
 			}
 			if d.Sent != nil && mock != nil {
 				checkSent(t, mock, d.Sent, d.Redactions)
+				hashes := []string{rep.Target.SHA256}
+				for _, f := range rep.Files {
+					hashes = append(hashes, f.SHA256)
+				}
+				mock.mu.Lock()
+				body := string(mock.bodies[0])
+				mock.mu.Unlock()
+				for _, h := range hashes {
+					if h != "" && strings.Contains(body, h) {
+						t.Errorf("the mock received the hash %s", h)
+					}
+				}
+				for _, want := range tt.wantBodyHas {
+					if !strings.Contains(body, want) {
+						t.Errorf("the mock received no %q:\n%s", want, body)
+					}
+				}
+				for _, absent := range tt.wantBodyAbsent {
+					if strings.Contains(body, absent) {
+						t.Errorf("the mock received %q:\n%s", absent, body)
+					}
+				}
 			}
 
 			// And "galahad report" shows the same decision
@@ -424,4 +510,66 @@ func scanInterrupted(t *testing.T, home string, mock *mockProvider, args ...stri
 		t.Fatal(err)
 	}
 	return out.String(), errb.String(), code
+}
+
+// TestScanDecisionPreBoot checks that "scan --decision" refuses before anything boots (P9, Q4, Q7): exit 2,
+// a message on stderr, no job directory, and no request to the provider.
+func TestScanDecisionPreBoot(t *testing.T) {
+	tests := []struct {
+		name string
+		// inputs
+		args   []string // after "scan"; the target follows
+		keyEnv string   // the variable the provider reads
+		setKey bool     // the variable is set to the fake key
+		// expectations
+		wantCode   int
+		wantStderr string
+	}{
+		{
+			name: "--no-network with a provider", args: []string{"--decision", "mock", "--no-network"}, keyEnv: "QA_DECISION_KEY", setKey: true,
+			wantCode: 2, wantStderr: "--no-network",
+		},
+		{
+			name: "a name that is not a provider", args: []string{"--decision", "nobody"}, keyEnv: "QA_DECISION_KEY", setKey: true,
+			wantCode: 2, wantStderr: "no provider nobody",
+		},
+		{
+			name: "a key variable that is not set", args: []string{"--decision", "mock"}, keyEnv: "QA_DECISION_KEY_UNSET",
+			wantCode: 2, wantStderr: "$QA_DECISION_KEY_UNSET",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given a provider in the config, a mock that counts requests, and a key variable that is set or not
+			mock := newMockProvider(t, answers(decisionAnswer(0, 0, 1)))
+			home := t.TempDir()
+			t.Setenv("GALAHAD_HOME", home)
+			t.Setenv("QA_DECISION_KEY_UNSET", "")
+			if tt.setKey {
+				t.Setenv(tt.keyEnv, decisionKey)
+			}
+			add := []string{"provider", "add", "mock", "--url", mock.srv.URL, "--model", "test/model-1", "--key-env", tt.keyEnv}
+			if stdout, stderr, code := run(t, add...); code != 0 {
+				t.Fatalf("%v = %d\n%s%s", add, code, stdout, stderr)
+			}
+
+			// When it is scanned with --decision
+			stdout, stderr, code := scan(t, home, append(tt.args, corpus(t, "fake-interview-repo"))...)
+
+			// Then it exits 2 before the boot, with no job and no request
+			if code != tt.wantCode || !strings.Contains(stderr, tt.wantStderr) {
+				t.Errorf("scan = %d, want %d with %q on stderr\nstdout: %s\nstderr: %s", code, tt.wantCode, tt.wantStderr, stdout, stderr)
+			}
+			if entries, err := os.ReadDir(filepath.Join(home, "jobs")); err == nil && len(entries) > 0 {
+				t.Errorf("jobs = %d entries, want none", len(entries))
+			}
+			if n := mock.requests(); n != 0 {
+				t.Errorf("the mock got %d requests, want 0", n)
+			}
+			if strings.Contains(stdout+stderr, decisionKey) {
+				t.Errorf("the key is in the output:\n%s%s", stdout, stderr)
+			}
+			keyFree(t, home, decisionKey)
+		})
+	}
 }
