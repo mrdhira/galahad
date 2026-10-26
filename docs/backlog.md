@@ -405,6 +405,13 @@ From: the v0.3.0 sweep.
 ClamAV hit its 5-minute limit on promptfoo/promptfoo and was left out. Measure ClamAV time against tree size, and either scale the limit with the input or scan only what the other analyzers cannot read.
 From: the v0.3.0 sweep.
 
+### P9 test details
+- `test/acceptance/decision_test.go`: the injection row's `wantLine` "AI opinion (mock): malicious " cannot tell a clean answer from a malicious one; tighten it to "malicious 0%, no change".
+- `test/acceptance/p9_test.go`: `TestP9Keys` has a `wantStderr` field that no row sets.
+- `test/acceptance/vm_p9_test.go`: the cleanup removes `config.json` without checking that it was absent before, so on a real `GALAHAD_HOME` it would delete the user's config. Fail if it exists at the start, or save and restore it. `TestVMP9` also does not compare the score with a scan without `--decision`.
+- `TestP9ProviderDown` has only failure rows, so the "success path first" rule does not fit it.
+From: PR 109 review.
+
 ### Sweep check details
 - `sweep.sh` could record whether a repo without GAL-INJECT-001 would still be SUSPICIOUS from coverage under 50% or a content-hiding skip; today a new repo with low coverage and a medium GAL-INJECT-001 is blamed on the rule (the strict side).
 - `sweep-check.sh` does not compare the 12 CLEAN and 10 SUSPICIOUS repos' scores and finding IDs with the M2 table, so a SUSPICIOUS repo that gains a rule is not flagged; it is compared by hand.
