@@ -39,6 +39,8 @@ Commands:
               --allow-host <host>  (repeatable: let the sandbox reach one more host)
               --timeout 0, or no --timeout, means the default of the image: 10m for core, 20m for re
               --git  (clone an https link as a Git repository)  --submodules  (also fetch the submodules of a Git repository)
+              --decision <name>  (after the scan, ask this provider for a second opinion; it can raise a clean verdict to suspicious, never lower one;
+                                  needs the network and the provider's key variable)
   setup     Download and verify the pinned Firecracker and guest images, then fill the ClamAV and YARA signatures: galahad setup [--image core|re] [--skip-signatures]
   doctor    Check that this host can run scans, and say how to fix what is wrong
   provider  Manage decision providers: galahad provider add <name> [--url <u> --model <m>] [--key-env VAR] [--timeout 60s] | list | remove <name> | test <name>

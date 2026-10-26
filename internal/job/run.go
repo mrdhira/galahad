@@ -73,6 +73,9 @@ type Spec struct {
 	Signatures string
 	// Progress is called with each stage the guest reports. It may be nil.
 	Progress func(stage string)
+	// Decide asks a decision provider for an opinion on the scored Result and returns the record for
+	// Result.Decision. It is called once, after the machine is killed. Nil means no provider is asked.
+	Decide func(ctx context.Context, res protocol.Result) (protocol.Decision, error)
 }
 
 // Outcome is what a job leaves. Job is set as soon as the job directory exists. Result and
@@ -126,10 +129,15 @@ func execute(ctx context.Context, backend sandbox.Backend, spec Spec, in *plan, 
 	}
 	out := Outcome{Job: j}
 
+	caller := ctx // the decision step has its own time limit, so the limit of the job does not cut it
 	ctx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 	r := &runner{backend: backend, spec: spec, in: in, pol: pol, jobDir: Dir(spec.JobsDir, j.ID), job: &out.Job, start: now}
 	runErr := r.run(ctx, &out)
+	if runErr == nil && r.res != nil {
+		// The machine is gone: run killed it before it returned.
+		runErr = r.conclude(caller, &out)
+	}
 
 	switch {
 	case runErr == nil:
@@ -170,6 +178,9 @@ type runner struct {
 	job     *Job
 	start   time.Time
 	px      *netProxy // nil without network
+
+	res    *protocol.Result // the scored Result of a scan, not yet reported
+	scored int              // len(res.Reasons) right after scoring.Apply: the reasons after it are the host's own
 }
 
 func (r *runner) setState(s State) error {
@@ -451,12 +462,36 @@ func (r *runner) finish(payload []byte, fileSHA string, out *Outcome) error {
 	r.job.Blocked = slices.ContainsFunc(events, func(ev proxy.Event) bool { return countsAsBlocked(ev.Host, ev.Blocked) })
 	addNetworkFinding(&res)
 	scoring.Apply(&res)
+	r.scored = len(res.Reasons)
 	addInfraReason(&res)
-	paths, err := report.Write(r.jobDir, &res)
+	r.res = &res
+	return nil
+}
+
+// conclude finishes a scan once the machine is gone: it asks the decision provider, if there is one,
+// scores the Result again with the opinion, and writes the reports. The second scoring.Apply
+// rebuilds the reasons, so the reasons the host added after the first one come back. ctx is the one
+// of the caller of the job: Ctrl-C ends the call and the job.
+func (r *runner) conclude(ctx context.Context, out *Outcome) error {
+	res := r.res
+	if r.spec.Decide != nil {
+		d, err := r.spec.Decide(ctx, *res)
+		if err := cmp.Or(ctx.Err(), err); err != nil {
+			return fmt.Errorf("the decision step: %w", err)
+		}
+		host := slices.Clone(res.Reasons[r.scored:])
+		res.Decision = &d
+		scoring.Apply(res)
+		res.Reasons = append(res.Reasons, host[:min(len(host), protocol.MaxReasonCount-len(res.Reasons))]...)
+		if err := res.Validate(); err != nil {
+			return fmt.Errorf("the result with the decision: %w", err)
+		}
+	}
+	paths, err := report.Write(r.jobDir, res)
 	if err != nil {
 		return fmt.Errorf("write the report: %w", err)
 	}
-	out.Result, out.Paths = &res, paths
+	out.Result, out.Paths = res, paths
 	return nil
 }
 
@@ -593,14 +628,11 @@ func (r *runner) blockedResult(events []proxy.Event, out *Outcome) error {
 	r.job.Blocked = true
 	addNetworkFinding(&res)
 	scoring.Apply(&res)
+	r.scored = len(res.Reasons)
 	res.Reasons = append(res.Reasons, "the input could not be downloaded, so only the network requests were examined")
 	if err := res.Validate(); err != nil {
 		return fmt.Errorf("the result of the host: %w", err)
 	}
-	paths, err := report.Write(r.jobDir, &res)
-	if err != nil {
-		return fmt.Errorf("write the report: %w", err)
-	}
-	out.Result, out.Paths = &res, paths
+	r.res = &res
 	return nil
 }

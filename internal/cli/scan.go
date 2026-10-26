@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/mrdhira/galahad/internal/config"
+	"github.com/mrdhira/galahad/internal/decision"
 	"github.com/mrdhira/galahad/internal/job"
 	"github.com/mrdhira/galahad/internal/protocol"
 	"github.com/mrdhira/galahad/internal/proxy"
@@ -42,6 +43,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	forceGit := fs.Bool("git", false, "treat an https link as a Git repository and clone it")
 	submodules := fs.Bool("submodules", false, "also fetch the submodules of a Git repository")
 	probe := addProbeFlag(fs)
+	decisionName := fs.String("decision", "", "ask this decision provider for a second opinion after the scan")
 	var allowHosts []string
 	fs.Func("allow-host", "let the sandbox reach this host as well; may be repeated", func(h string) error {
 		// The proxy policy is the one that decides what a host name is.
@@ -92,6 +94,12 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		return ExitUsage
 	}
 
+	// A provider that cannot be asked is found now, before anything boots and before a job is made.
+	decide, code, ok := decisionStep(*decisionName, *noNetwork, stderr, env)
+	if !ok {
+		return code
+	}
+
 	backend, err := env.Backend()
 	if err != nil {
 		fmt.Fprintf(stderr, "galahad scan: %v\n", err)
@@ -131,6 +139,7 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 		Progress: func(stage string) {
 			fmt.Fprintf(stderr, "galahad: %s\n", stage)
 		},
+		Decide: decide,
 	}, tgt.value)
 	if err != nil {
 		// The error can carry a file name from the target, which is untrusted text.
@@ -148,6 +157,48 @@ func runScan(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	report.Terminal(stdout, out.Result, out.Paths, useColor(stdout))
 	return out.Result.Verdict.ExitCode()
+}
+
+// decisionStep checks the provider named by --decision and returns the function that asks it, or nil
+// when the flag is not given. It reads the key from the variable of the provider, and keeps it in
+// the returned function only. When ok is false, it has printed why and code is the exit code. The
+// provider is never asked with --no-network, because the user expects nothing to leave the machine.
+func decisionStep(name string, noNetwork bool, stderr io.Writer, env Env) (decide func(context.Context, protocol.Result) (protocol.Decision, error), code int, ok bool) {
+	if name == "" {
+		return nil, 0, true
+	}
+	if noNetwork {
+		fmt.Fprintf(stderr, "galahad scan: --decision needs the network; drop --no-network, or drop --decision\n\n%s", usage)
+		return nil, ExitUsage, false
+	}
+	home, err := env.home()
+	var cfg config.Config
+	if err == nil {
+		cfg, err = config.Load(home)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "galahad scan: %s\n", protocol.CleanPath(err.Error()))
+		return nil, ExitError, false
+	}
+	p, found := cfg.Find(name)
+	if !found {
+		fmt.Fprintf(stderr, "galahad scan: no provider %s; add it with galahad provider add\n\n%s", protocol.CleanPath(name), usage)
+		return nil, ExitUsage, false
+	}
+	key := ""
+	if p.KeyEnv != "" {
+		if key = os.Getenv(p.KeyEnv); key == "" {
+			fmt.Fprintf(stderr, "galahad scan: provider %s needs the key in $%s, which is not set\n", p.Name, p.KeyEnv)
+			return nil, ExitUsage, false
+		}
+		if err := decision.CheckKey(key); err != nil {
+			fmt.Fprintf(stderr, "galahad scan: $%s: %v\n", p.KeyEnv, err)
+			return nil, ExitUsage, false
+		}
+	}
+	return func(ctx context.Context, res protocol.Result) (protocol.Decision, error) {
+		return decision.Ask(ctx, p, key, env.version(), res)
+	}, 0, true
 }
 
 // checkLimits checks the values of the scan flags against their ranges.

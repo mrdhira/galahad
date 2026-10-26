@@ -10,9 +10,9 @@ import (
 )
 
 // TestReportAIOpinions covers the "AI opinions" report section (T3.4c, P9) from the user's side.
-// No scan writes a Decision yet (the decision step is T3.4b), so each case scans a fixture through the
-// fake sandbox and then adds a decision from testdata/corpus/ai-opinions to the job's report.json, as the
-// host will. "galahad report <id>" must show it. summary.md and report.html only come out of a scan, so
+// Each case scans a fixture through the fake sandbox and then puts a fixed decision from
+// testdata/corpus/ai-opinions into the job's report.json, so every status can be shown without a provider
+// (TestScanDecision covers the real decision step). "galahad report <id>" must show it. summary.md and report.html only come out of a scan, so
 // their Decision cases are in internal/report/ai_test.go.
 func TestReportAIOpinions(t *testing.T) {
 	const reasonRaised = "AI opinion (mock): malicious 92%, raised to suspicious; an AI opinion never makes a verdict malicious"

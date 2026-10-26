@@ -364,12 +364,6 @@ From: PR 96 review.
 - The test helper `cmpOr` duplicates `cmp.Or`.
 From: PR 98 review.
 
-### Must be done in T3.4b (decision step in scan)
-- `Select` does not redact its output; it redacts a clone only to check that it is valid. The scan must run `Redact` on the request before `Send`.
-- `Reply.Answers.Model` can carry the key: a provider can answer `"model": "Bearer <key>"`. Before answers reach `report.json`, `finish()` in `internal/decision/client.go` must turn an ok reply whose model holds the key into `invalid`. The comment there ("no field can carry the key") is wrong until then.
-- The second `scoring.Apply` rebuilds the reasons and drops the host's own reasons (the infra-host note from `addInfraReason` and "the input could not be downloaded..."); add them back.
-From: PR 102 and PR 103 review and QA.
-
 ### Decision client details
 - A request ID that holds part of the key, or the key in another case or in base64, is kept. Accepted risk: only a provider that already holds the key can do this.
 - `TestSend` cases are not in code order, and `TestSendRefusesURL` has no success case first. `TestSend`'s 400 ms upper bounds under `-race` with `t.Parallel` may flake.
