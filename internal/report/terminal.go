@@ -20,7 +20,7 @@ const (
 )
 
 // Terminal prints the verdict, what to do about it, score, confidence, why, what runs
-// automatically, up to 10 findings, up to 10 network destinations and the report paths.
+// automatically, one line for an AI opinion, up to 10 findings, up to 10 network destinations and the report paths.
 // color adds ANSI colors; the caller decides (stdout is a TTY and NO_COLOR is unset).
 // Untrusted text is defanged and stripped of control characters either way.
 func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
@@ -67,6 +67,9 @@ func Terminal(w io.Writer, res *protocol.Result, p Paths, color bool) {
 			}
 			fmt.Fprintf(w, "  %s\n", sevPaint(e.Severity, line))
 		}
+	}
+	if line := aiTerminal(res); line != "" {
+		fmt.Fprintf(w, "\n%s\n", line)
 	}
 	if auto := groups(res, isAutoexec); len(auto) > 0 {
 		fmt.Fprintf(w, "\nRuns automatically (%d):\n", len(auto))

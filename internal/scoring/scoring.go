@@ -23,6 +23,13 @@ const (
 	minCoverage     = 0.5
 )
 
+// Limits of an AI opinion (docs/milestones/M3.md, "The cap").
+const (
+	opinionThreshold = 0.80
+	opinionRaise     = 15
+	opinionCeiling   = maliciousScore - 1
+)
+
 var weights = map[protocol.Severity]int{
 	protocol.SeverityInfo:     0,
 	protocol.SeverityLow:      5,
@@ -40,7 +47,10 @@ var rank = map[protocol.Severity]int{
 }
 
 // Apply scores res in place: it sets Verdict, Score, Confidence,
-// ConfidenceLevel and Reasons from res.Findings and res.Coverage.
+// ConfidenceLevel and Reasons from res.Findings and res.Coverage. When
+// res.Decision holds an answer of status ok, a strong "malicious" opinion may
+// raise a verdict that is not malicious to suspicious, by at most 15 points
+// and not above 69.
 func Apply(res *protocol.Result) {
 	// Each rule ID counts once, at its highest severity. The first finding at
 	// that severity gives the evidence shown in the reasons.
@@ -155,6 +165,16 @@ func Apply(res *protocol.Result) {
 		conf = int(math.Round(100 * cov * a))
 	}
 
+	// An AI opinion can only raise the verdict, never to malicious, and never lowers or changes
+	// anything else. The confidence above is the one of the evidence.
+	if p, ok := maliciousOpinion(res.Decision); ok && p >= opinionThreshold && verdict != protocol.VerdictMalicious {
+		verdict = protocol.VerdictSuspicious
+		score = max(score, min(score+opinionRaise, opinionCeiling))
+		reasons = append(reasons, fmt.Sprintf(
+			"AI opinion (%s): malicious %d%%, raised to suspicious; an AI opinion never makes a verdict malicious",
+			res.Decision.Provider, int(math.Round(p*100))))
+	}
+
 	res.Verdict = verdict
 	res.Score = score
 	res.Confidence = conf
@@ -164,6 +184,16 @@ func Apply(res *protocol.Result) {
 		reasons[i] = limit(r)
 	}
 	res.Reasons = reasons
+}
+
+// maliciousOpinion returns the probability of "malicious" in the verdict answer of d. It reports
+// false unless d is a Decision of status ok that holds that answer.
+func maliciousOpinion(d *protocol.Decision) (float64, bool) {
+	if d == nil || d.Status != protocol.DecisionOK || d.Answers == nil {
+		return 0, false
+	}
+	p, ok := d.Answers.Questions[protocol.QuestionVerdict].Probabilities[protocol.LabelMalicious]
+	return p, ok
 }
 
 // leftOutWhy is how the reason of a clean verdict names the cause of a tool that was left out.
