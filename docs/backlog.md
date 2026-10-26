@@ -365,14 +365,14 @@ From: PR 96 review.
 From: PR 98 review.
 
 ### Must be done in T3.4b (decision step in scan)
-- `Select` does not redact its output; it redacts a clone only to check sizes. The scan must run `Redact` on the request before `Send`.
+- `Select` does not redact its output; it redacts a clone only to check that it is valid. The scan must run `Redact` on the request before `Send`.
 - `Reply.Answers.Model` can carry the key: a provider can answer `"model": "Bearer <key>"`. Before answers reach `report.json`, `finish()` in `internal/decision/client.go` must turn an ok reply whose model holds the key into `invalid`. The comment there ("no field can carry the key") is wrong until then.
-- The second `scoring.Apply` rebuilds the reasons and drops the host's own reasons; add them back.
+- The second `scoring.Apply` rebuilds the reasons and drops the host's own reasons (the infra-host note from `addInfraReason` and "the input could not be downloaded..."); add them back.
 From: PR 102 and PR 103 review and QA.
 
 ### Decision client details
 - A request ID that holds part of the key, or the key in another case or in base64, is kept. Accepted risk: only a provider that already holds the key can do this.
-- `TestSend` cases are not in code order, and `TestSendRefusesURL` has no success case first. Its 400 ms upper bounds under `-race` with `t.Parallel` may flake.
+- `TestSend` cases are not in code order, and `TestSendRefusesURL` has no success case first. `TestSend`'s 400 ms upper bounds under `-race` with `t.Parallel` may flake.
 - The T3.2b card in `docs/milestones/M3.md` names `internal/decision/loopback_galahadtest.go`; the code reuses `protocol.DecisionLoopback`.
 From: PR 102 review.
 
@@ -387,7 +387,7 @@ From: PR 102 review.
 - About 0.6% of random 32-character base64 strings score 4.2 bits or less and are sent unredacted. This is a threshold question.
 - `hideName` runs before `Redact`, so a secret that contains the target name is split (`ghp_...(target)...`) and its pieces are sent. Hide the name after redaction, and never rewrite a marker.
 - Hiding the target name:
-  - Names of 1 or 2 runes are hidden only in an exact path and after the `!/` prefix.
+  - Names of 1 or 2 runes are hidden only as an exact path and as the `<name>!/` prefix of a member path.
   - A member name that holds only the target's stem is sent.
 - The filename analyzer's LNK launch-string snippet at the target is dropped with the name rules' snippets. Only GAL-NAME-001/002/003 need it dropped; run `hideName` on the LNK snippet instead.
 - After the size loop, `ok` is not checked again for a remaining guest finding. This cannot happen today; a one-line check would keep it so.
