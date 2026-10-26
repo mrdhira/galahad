@@ -15,7 +15,7 @@ New to the security terms (IOC, defang, sandbox, zip-slip, ...)? See the [glossa
 - `galahad` and `galahad-agent` side by side in the same directory (the release archives do this). The agent runs inside the VM.
 - Network access for `galahad setup`, and for scans of links, Drive files and Git repositories.
 
-macOS and Windows hosts are not supported yet. There the `galahad scan` command says so.
+macOS and Windows hosts are not supported yet: macOS comes next (M5), Windows after v1.0.0 (M6). There the `galahad scan` command says so.
 
 ## Quick start
 
@@ -78,6 +78,7 @@ macOS and Windows hosts are not supported yet. There the `galahad scan` command 
 | `--allow-host <host>` | let the VM reach one more host |
 | `--git`, `--submodules` | see above |
 | `--no-network` | no proxy at all |
+| `--decision <name>` | ask a decision provider for a second opinion after the scan (see below) |
 
 ### Past scans
 
@@ -89,6 +90,37 @@ macOS and Windows hosts are not supported yet. There the `galahad scan` command 
 ```
 
 The state directory is `~/.galahad`, or the directory in `GALAHAD_HOME`. It must be private to you (mode 0700).
+
+## Decision provider (optional)
+
+A decision provider gives a second opinion on a finished scan. It is off unless you pass `--decision`, and nothing leaves your machine otherwise. Galahad speaks the [Netra Decisions API](docs/decision-api.md): it sends the findings and gets back probabilities, not text.
+
+```sh
+export NETRA_API_KEY=...                  # the key lives in the environment only
+./galahad provider add netra              # the preset: URL, key variable and model
+./galahad provider list                   # KEY_SET shows whether the variable is set, never its value
+./galahad provider test netra             # one request with a fixed sample that holds no user data
+./galahad scan --decision netra ./take-home
+```
+
+Any other provider needs `provider add <name> --url <https url> --model <model> [--key-env VAR] [--timeout 60s]`. The config (`~/.galahad/config.json`) stores the name of the variable and never a key. `scan --decision` with an unknown name, an unset key variable or `--no-network` exits 2 before anything boots.
+
+What is sent, after the VM is gone: up to 24 findings of severity low or above (rule ID, severity, title, analyzer, evidence path and line, and the snippet, at most 200 characters), the kind of the target, the file counts and whether the scan was truncated. The target's own name in a path becomes `(target)`. A scan with no such finding sends nothing.
+
+What is never sent: the name or URL of the target, the file list, hashes, IOCs, the network log, the job ID, details of your machine, and Galahad's own verdict and score.
+
+Every string is redacted right before it goes out: AWS, GitHub, Slack, Stripe and other API keys, JWTs, private keys, passwords in URLs, values assigned to names like `password` or `token`, and long high-entropy runs become `[REDACTED:<kind>]`. The patterns are fixed, so a secret in an unknown, low-entropy format can still be sent. The "AI opinions" section of `summary.md` and `report.html` shows the exact request and the redaction counts, so you can check it. The Findings section of the local reports is not redacted.
+
+The cap: an AI opinion never lowers a verdict or a score, and never makes a verdict MALICIOUS. When the provider's `malicious` score is 0.80 or more, a CLEAN scan becomes SUSPICIOUS and the score rises by at most 15 (never above 69). A provider that says "clean" about a MALICIOUS repo changes nothing. If the provider is down, slow, out of credit or answers wrongly, the scan still ends with its own verdict and exit code, and the report says why there is no opinion. A text in the input that tries to steer an AI reviewer is found by the guest (`GAL-INJECT-001`) and the report warns about it.
+
+Cost: the API repeats the input for each of the three questions (verdict, risk, steals secrets), so a call costs about three times the input tokens. The request is at most 64 KiB. Only the verdict answer feeds the score.
+
+Known gaps of the decision provider:
+- One provider per scan, with three fixed questions. The scores are model scores, not calibrated probabilities.
+- The provider sees findings and short snippets, never whole files, so it cannot find what the analyzers missed.
+- Redaction is pattern-based.
+- The prompt-injection check reads text files only, not PDF or Office text, and not text hidden by encoding.
+- No raw response is stored: an invalid answer is reported by its error code only.
 
 ## What it detects
 

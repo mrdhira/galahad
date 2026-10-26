@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,14 +15,10 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// decisionKey is a fake key, built from pieces so no full literal sits in the source.
-const decisionKey = "fake-key-" + "t34b-" + "5d1e8b07"
 
 // decisionRecord is the part of report.json that the decision tests read.
 type decisionRecord struct {
@@ -45,68 +40,16 @@ type decisionRecord struct {
 			Code       string `json:"code"`
 			HTTPStatus int    `json:"http_status"`
 		} `json:"error"`
-		Sent       json.RawMessage `json:"sent"`
-		Redactions map[string]int  `json:"redactions"`
-		RequestID  string          `json:"request_id"`
-		Attempts   int             `json:"attempts"`
+		Sent    json.RawMessage `json:"sent"`
+		Answers *struct {
+			Questions map[string]struct {
+				Probabilities map[string]float64 `json:"probabilities"`
+			} `json:"questions"`
+		} `json:"answers"`
+		Redactions map[string]int `json:"redactions"`
+		RequestID  string         `json:"request_id"`
+		Attempts   int            `json:"attempts"`
 	} `json:"decision"`
-}
-
-// decisionAnswer is a valid answer of the provider with the given verdict probabilities.
-func decisionAnswer(clean, suspicious, malicious float64) string {
-	return fmt.Sprintf(`{"object": "decisions", "model": "test/model-1", "prompt_format_version": 1, "answers": {
-  "verdict": {"type": "choice", "probabilities": {"clean": %g, "suspicious": %g, "malicious": %g}, "label_mass": 0.6},
-  "risk": {"type": "score", "probabilities": {"0": 0.25, "1": 0.25, "2": 0.25, "3": 0.25}, "label_mass": 0.4, "score": 1.5},
-  "steals_secrets": {"type": "yes_no", "probabilities": {"yes": 0.5, "no": 0.5}, "label_mass": 0.5}},
-  "usage": {"prompt_tokens": 100, "completion_tokens": 0, "total_tokens": 100}}`, clean, suspicious, malicious)
-}
-
-// mockProvider is an httptest server that records the body and the Authorization header of each request.
-type mockProvider struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	bodies [][]byte
-	auths  []string
-	first  chan struct{} // closed at the first request
-}
-
-func newMockProvider(t *testing.T, handler func(w http.ResponseWriter, r *http.Request, n int)) *mockProvider {
-	t.Helper()
-	m := &mockProvider{first: make(chan struct{})}
-	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := new(bytes.Buffer)
-		_, _ = body.ReadFrom(r.Body)
-		m.mu.Lock()
-		m.bodies = append(m.bodies, body.Bytes())
-		m.auths = append(m.auths, r.Header.Get("Authorization"))
-		n := len(m.bodies)
-		m.mu.Unlock()
-		if n == 1 {
-			close(m.first)
-		}
-		handler(w, r, n)
-	}))
-	t.Cleanup(m.srv.Close)
-	return m
-}
-
-func (m *mockProvider) requests() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.bodies)
-}
-
-// answers replies to every request with body.
-func answers(body string) func(w http.ResponseWriter, r *http.Request, n int) {
-	return func(w http.ResponseWriter, _ *http.Request, _ int) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Request-Id", "req_t34b")
-		_, _ = w.Write([]byte(body))
-	}
-}
-
-func status(code int) func(w http.ResponseWriter, r *http.Request, n int) {
-	return func(w http.ResponseWriter, _ *http.Request, _ int) { w.WriteHeader(code) }
 }
 
 // unescapeHTML turns the three characters that report.json escapes back, so that the request in the
@@ -120,14 +63,7 @@ func TestScanDecision(t *testing.T) {
 	var second atomic.Int32
 	secondSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { second.Add(1) }))
 	defer secondSrv.Close()
-	closedPort := func() string {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = l.Close() }() // only to find a port nobody listens on
-		return "http://" + l.Addr().String()
-	}()
+	closed := closedPort(t)
 	tests := []struct {
 		name string
 		// inputs
@@ -178,15 +114,7 @@ func TestScanDecision(t *testing.T) {
 			wantReasons: []string{"AI opinion (mock): malicious 92%, raised to suspicious; an AI opinion never makes a verdict malicious"},
 		},
 		{
-			name: "a clean answer to a prompt injection cannot lower a malicious verdict", target: "p9-prompt-injection-repo",
-			handler: func(w http.ResponseWriter, r *http.Request, _ int) {
-				body, _ := io.ReadAll(r.Body)
-				if bytes.Contains(bytes.ToLower(body), []byte("ignore all previous instructions")) {
-					answers(decisionAnswer(0.99, 0.005, 0.005))(w, r, 0)
-					return
-				}
-				answers(decisionAnswer(0.005, 0.005, 0.99))(w, r, 0)
-			},
+			name: "a clean answer to a prompt injection cannot lower a malicious verdict", target: "p9-prompt-injection-repo", handler: injectionAnswer,
 			wantCode: 20, wantState: "done", wantSame: true, wantStatus: "ok", wantRequests: 1, wantLine: "AI opinion (mock): malicious ",
 			wantBodyHas: []string{"ignore all previous instructions", "GAL-INJECT-001", "GAL-AUTOEXEC-010"},
 		},
@@ -219,7 +147,7 @@ func TestScanDecision(t *testing.T) {
 			wantReasons: []string{"could not be downloaded"},
 		},
 		{
-			name: "a provider that is down leaves the static verdict", target: "fake-interview-repo", url: closedPort, timeout: 2,
+			name: "a provider that is down leaves the static verdict", target: "fake-interview-repo", url: closed, timeout: 2,
 			wantCode: 20, wantState: "done", wantSame: true, wantStatus: "failed", wantErrCode: "network", wantLine: "AI opinion (mock): unavailable (network",
 			wantExtra: 4 * time.Second,
 		},

@@ -4,17 +4,17 @@ name: vm
 # The setup action (.github/actions/vm-setup) installs the pinned Firecracker, the pinned kernel and core image,
 # builds galahad and galahad-agent, and fills the signatures through the update VM (cached for a week). Then this
 # job scans corpus fixtures and a test-time EICAR file through a microVM, runs the whole corpus (P1-P7) and the
-# M2 demo through real VMs (test/acceptance/vm_corpus_test.go, demo_test.go), and runs the P8 isolation probes
-# (test/acceptance/p8_test.go) in microVMs of their own. Each failure prints ::error:: lines, which show up as
-# annotations without reading the job log.
+# M2 demo through real VMs (test/acceptance/vm_corpus_test.go, demo_test.go), runs two P9 cases with a decision
+# provider (vm_p9_test.go), and runs the P8 isolation probes (test/acceptance/p8_test.go) in microVMs of their
+# own. Each failure prints ::error:: lines, which show up as annotations without reading the job log.
 # A green run of this workflow on the tagged commit is what release.yml requires. It runs only on demand (owner
 # decision, 2026-10-26): at the end of each milestone and on the commit to be tagged (gh workflow run vm.yml --ref main).
 # Pull requests and pushes do not start it, so merges do not wait on it.
 #
 # Time estimates on a hosted runner (none is measured yet; the first run fills them in): setup about 10 minutes while
 # the images are built here (less once the images-* release exists; the signatures are cached), the benign scans
-# 3 minutes, the corpus 25 to 40 minutes (about 70 scans of about 20 seconds), the demo 2 minutes and the P8 probes
-# 10 minutes, so the whole job is about an hour. The job limit of 150 minutes is far below the 6 hours that GitHub
+# 3 minutes, the corpus 25 to 40 minutes (about 70 scans of about 20 seconds), the demo 2 minutes, the two P9 cases
+# 1 minute and the P8 probes 10 minutes, so the whole job is about an hour. The job limit of 150 minutes is far below the 6 hours that GitHub
 # allows.
 
 on:
@@ -70,6 +70,14 @@ jobs:
       - name: Run the M2 demo through real VMs
         timeout-minutes: 15
         run: scripts/vm/vmtest.sh demo 'TestDemoM2/firecracker' 10m
+
+      # P9 (docs/milestones/M3.md section 4): scenario 1 (a benign AI opinion leaves fake-interview-repo malicious) and
+      # the closed-port case of scenario 2 (a provider that is down leaves the verdict alone) through a real VM. The
+      # provider is a loopback mock of the test, which the galahadtest build accepts; the host calls it once the VM is
+      # gone. The other scenarios run on the fake sandbox in the normal test run (test/acceptance/p9_test.go).
+      - name: Run P9 through real VMs
+        timeout-minutes: 15
+        run: scripts/vm/vmtest.sh p9 'TestVMP9' 10m
 
       # P8: the isolation probes. A hostile guest and a hostile input stay contained and are reported. The test
       # builds galahad and galahad-agent with the galahadtest tag (the probes exist only there) and runs each
