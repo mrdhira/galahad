@@ -220,6 +220,11 @@ func TestSend(t *testing.T) {
 			wantCode: "invalid", wantMessage: "response failed the checks", wantAttempts: 1, wantRequests: 1,
 		},
 		{
+			name:     "an ok answer whose model holds the key is invalid",
+			steps:    []step{{status: 200, header: map[string]string{"Content-Type": "application/json"}, body: strings.Replace(goodBody, `"model": "test/model-1"`, `"model": "Bearer `+fakeKey+`"`, 1)}},
+			wantCode: "invalid", wantMessage: "response failed the checks", wantAttempts: 1, wantRequests: 1,
+		},
+		{
 			name:  "a mock that echoes the Authorization header leaves the key out of the error",
 			steps: []step{{status: 402, echo: true}}, wantCode: "status", wantHTTP: 402, wantMessage: "insufficient credit", wantAttempts: 1, wantRequests: 1,
 		},

@@ -42,7 +42,24 @@ func TestRunReport(t *testing.T) {
 			write(strings.Replace(string(data), old, new, 1))(t, path)
 		}
 	}
+	// grow makes report.json a sparse file of the given size.
+	grow := func(size int64) func(t *testing.T, path string) {
+		return func(t *testing.T, path string) {
+			f, err := os.OpenFile(path, os.O_WRONLY, 0o600) // #nosec G304 -- test fixture path under t.TempDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = f.Close() }() // the file is only truncated
+			if err := f.Truncate(size); err != nil {
+				t.Skipf("filesystem cannot hold a sparse %d byte file: %v", size, err)
+			}
+		}
+	}
 	malicious := testResult(protocol.VerdictMalicious, 95)
+	withDecision := testResult(protocol.VerdictSuspicious, 40)
+	withDecision.Decision = &protocol.Decision{
+		Provider: "mock", URL: "https://api.mock.test", Model: "fake-model/v1", Status: protocol.DecisionSkipped, Reason: protocol.DecisionSkipNoFindings,
+	}
 	tests := []struct {
 		name string
 		// inputs
@@ -71,6 +88,16 @@ func TestRunReport(t *testing.T) {
 			name: "clean exits 0",
 			args: []string{idOld}, setup: withReport(testResult(protocol.VerdictClean, 0), nil),
 			wantCode: cli.ExitClean, wantStdout: []string{"Verdict: CLEAN"},
+		},
+		{
+			name: "a report with a decision prints the AI line",
+			args: []string{idOld}, setup: withReport(withDecision, nil),
+			wantCode: cli.ExitSuspicious, wantStdout: []string{"Verdict: SUSPICIOUS", "AI opinion (mock): skipped: no findings to send"},
+		},
+		{
+			name: "--json includes the decision",
+			args: []string{"--json", idOld}, setup: withReport(withDecision, nil),
+			wantCode: cli.ExitSuspicious, wantFileJSON: true, wantStdout: []string{`"decision": {`, `"provider": "mock"`, `"status": "skipped"`},
 		},
 		{
 			name: "--json before the id prints the file and exits with the verdict",
@@ -115,18 +142,14 @@ func TestRunReport(t *testing.T) {
 			wantCode: cli.ExitError, wantStderr: []string{"job " + idOld + ": report.json is not a regular file"},
 		},
 		{
+			name: "report.json over 64 MiB is read, because the Decision adds up to 1 MiB",
+			args: []string{idOld}, setup: withReport(malicious, grow(64<<20+1)),
+			wantCode: cli.ExitError, wantStderr: []string{"report.json:"}, wantAbsent: []string{"is larger than"},
+		},
+		{
 			name: "report.json over the size cap",
-			args: []string{idOld}, setup: withReport(malicious, func(t *testing.T, path string) {
-				f, err := os.OpenFile(path, os.O_WRONLY, 0o600) // #nosec G304 -- test fixture path under t.TempDir()
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer func() { _ = f.Close() }() // the file is only truncated
-				if err := f.Truncate(64<<20 + 1); err != nil {
-					t.Skipf("filesystem cannot hold a sparse 64 MiB file: %v", err)
-				}
-			}),
-			wantCode: cli.ExitError, wantStderr: []string{"report.json is larger than 67108864 bytes"},
+			args: []string{idOld}, setup: withReport(malicious, grow(65<<20+1)),
+			wantCode: cli.ExitError, wantStderr: []string{"report.json is larger than 68157440 bytes"},
 		},
 		{
 			name: "report.json with a field the schema does not have",

@@ -14,8 +14,9 @@ import (
 	"github.com/mrdhira/galahad/internal/report"
 )
 
-// maxReportSize is the largest report.json that is read: the largest Result the host accepts.
-const maxReportSize = 64 << 20
+// maxReportSize is the largest report.json that is read: the largest Result the host accepts, 64 MiB,
+// plus 1 MiB for the Decision that the host adds.
+const maxReportSize = 64<<20 + 1<<20
 
 // runReport prints the report of a past job and exits with the code of its verdict.
 func runReport(args []string, stdout, stderr io.Writer, env Env) int {

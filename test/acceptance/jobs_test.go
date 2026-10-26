@@ -79,15 +79,15 @@ func TestJobsAndReport(t *testing.T) {
 		},
 		{
 			name: "a report.json over the size cap is an error",
-			args: []string{"report", "{id}"}, wantCode: 1, wantStderr: "larger than 67108864 bytes",
+			args: []string{"report", "{id}"}, wantCode: 1, wantStderr: "larger than 68157440 bytes",
 			setup: func(t *testing.T, jobsDir, id string) {
 				f, err := os.OpenFile(filepath.Join(jobsDir, id, "report.json"), os.O_WRONLY, 0o600) // #nosec G304 -- test fixture path under t.TempDir()
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer func() { _ = f.Close() }() // the file is only truncated
-				if err := f.Truncate(64<<20 + 1); err != nil {
-					t.Skipf("filesystem cannot hold a sparse 64 MiB file: %v", err)
+				if err := f.Truncate(65<<20 + 1); err != nil {
+					t.Skipf("filesystem cannot hold a sparse 65 MiB file: %v", err)
 				}
 			},
 		},

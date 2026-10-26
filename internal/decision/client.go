@@ -64,12 +64,18 @@ func Send(ctx context.Context, p config.Provider, key, version string, req proto
 		reply.LatencyMS = int(min(time.Since(start).Milliseconds(), protocol.MaxDecisionLatencyMS))
 		reply.Attempts = max(reply.Attempts, 1) // a call refused before the first attempt still counts as one
 		if key != "" {
-			// One last scrub, so that no field can carry the key.
+			// One last scrub, so that no field of the reply carries the key. The model name is the only
+			// text of an ok answer that the provider writes, so an ok answer that holds the key there is
+			// not valid.
 			if reply.Error != nil {
 				reply.Error.Message = strings.ReplaceAll(reply.Error.Message, key, "[REDACTED:"+protocol.RedactKey+"]")
 			}
 			if strings.Contains(reply.RequestID, key) {
 				reply.RequestID = ""
+			}
+			if reply.Answers != nil && strings.Contains(reply.Answers.Model, key) {
+				reply.Answers, reply.Usage = nil, nil
+				reply.Error = &protocol.DecisionError{Code: protocol.DecisionErrInvalid, Message: "response failed the checks"}
 			}
 		}
 		return reply
