@@ -364,6 +364,47 @@ From: PR 96 review.
 - The test helper `cmpOr` duplicates `cmp.Or`.
 From: PR 98 review.
 
+### Must be done in T3.4b (decision step in scan)
+- `Select` does not redact its output; it redacts a clone only to check that it is valid. The scan must run `Redact` on the request before `Send`.
+- `Reply.Answers.Model` can carry the key: a provider can answer `"model": "Bearer <key>"`. Before answers reach `report.json`, `finish()` in `internal/decision/client.go` must turn an ok reply whose model holds the key into `invalid`. The comment there ("no field can carry the key") is wrong until then.
+- The second `scoring.Apply` rebuilds the reasons and drops the host's own reasons (the infra-host note from `addInfraReason` and "the input could not be downloaded..."); add them back.
+From: PR 102 and PR 103 review and QA.
+
+### Decision client details
+- A request ID that holds part of the key, or the key in another case or in base64, is kept. Accepted risk: only a provider that already holds the key can do this.
+- `TestSend` cases are not in code order, and `TestSendRefusesURL` has no success case first. `TestSend`'s 400 ms upper bounds under `-race` with `t.Parallel` may flake.
+- The T3.2b card in `docs/milestones/M3.md` names `internal/decision/loopback_galahadtest.go`; the code reuses `protocol.DecisionLoopback`.
+From: PR 102 review.
+
+### Selection and redaction gaps
+- Redaction misses:
+  - JSON-escaped keys (`{\"password\":\"...\"}`);
+  - `-----BEGIN PGP PRIVATE KEY BLOCK-----`;
+  - a raw `@` inside a URL password (`https://user:p@ssw0rd@host/x` is sent);
+  - default values in `os.environ.get("X", "secret")` and `process.env.X || "secret"`;
+  - a literal value that starts with `$`;
+  - `_sk-...` (the `\b` before `sk-` does not match).
+- About 0.6% of random 32-character base64 strings score 4.2 bits or less and are sent unredacted. This is a threshold question.
+- `hideName` runs before `Redact`, so a secret that contains the target name is split (`ghp_...(target)...`) and its pieces are sent. Hide the name after redaction, and never rewrite a marker.
+- Hiding the target name:
+  - Names of 1 or 2 runes are hidden only as an exact path and as the `<name>!/` prefix of a member path.
+  - A member name that holds only the target's stem is sent.
+- The filename analyzer's LNK launch-string snippet at the target is dropped with the name rules' snippets. Only GAL-NAME-001/002/003 need it dropped; run `hideName` on the LNK snippet instead.
+- After the size loop, `ok` is not checked again for a remaining guest finding. This cannot happen today; a one-line check would keep it so.
+- `TestSelect` cases are not in code order.
+From: PR 103 review and QA.
+
+### AI opinions report details
+- The report cannot name the key variable: `Decision` has no `key_env`, so it says "Authorization from the provider's key variable (not shown)". Either add `key_env` to `Decision` or change the spec wording. With an empty `key_env`, print no Authorization line (`aiAuthNoName` in `internal/report/ai.go`).
+- The Reports section of `docs/milestones/M3.md` still says "raised clean to suspicious"; the report says "raised to suspicious", and "unavailable (...); the verdict comes from the analysis alone" for a 402 too.
+- `TestAIOpinions` runs the "no decision, no section" case last; it covers the first branch.
+From: PR 104 review.
+
+### Capped scoring test shape
+- `TestApplyDecisionCap` runs `t.Run(tt.name+"/"+a.name)` in a second loop over answers, and `TestApplyDecisionIgnored` has no `want*` fields.
+- `maliciousOpinion` could refuse a probability that is not finite or is above 1. `Validate` already refuses both, but `+Inf` would print a broken percentage.
+From: PR 101 review.
+
 ## Windows (M6, after v1.0.0)
 
 ### Windows host and Windows guest
