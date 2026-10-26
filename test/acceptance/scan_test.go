@@ -214,6 +214,12 @@ func TestScan(t *testing.T) {
 			wantCode:   1, wantStderr: "unknown field", wantState: "failed", wantNoReport: true,
 		},
 		{
+			name:       "result with a decision of its own",
+			target:     func(t *testing.T) string { return writeEICAR(t, t.TempDir()) },
+			fakeResult: "decision",
+			wantCode:   1, wantStderr: "decision data", wantState: "failed", wantNoReport: true,
+		},
+		{
 			name:       "result frame over the limit",
 			target:     func(t *testing.T) string { return writeEICAR(t, t.TempDir()) },
 			fakeResult: "oversize",

@@ -228,4 +228,6 @@ type Result struct {
 	Reasons         []string   `json:"reasons"`
 	// Network is set by the host from its proxy. A guest never sends it.
 	Network *Network `json:"network,omitempty"`
+	// Decision is set by the host after the call to a decision provider. A guest never sends it.
+	Decision *Decision `json:"decision,omitempty"`
 }
