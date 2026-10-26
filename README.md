@@ -156,6 +156,7 @@ The problems are defined in [docs/plan.md](docs/plan.md).
 - The bundled fixtures are the tested baseline. Real-world files can be missed or flagged wrongly. A repo whose only automation is a harmless install script can come out suspicious.
 - Archive formats are limited to zip, tar, gzip and bzip2. Files that are too large, encrypted or unsupported are listed as skipped in the report.
 - Repos that ship attack samples on purpose, such as red-team payloads or the EICAR test string, come out MALICIOUS.
+- ClamAV can run out of time on very large trees; it is then left out and the confidence is lower.
 - The decision provider sees findings and short redacted snippets only, so it cannot find what the analyzers missed. Redaction is pattern-based. Its scores are not calibrated probabilities, and only the `verdict` question feeds the score.
 
 ## Install
