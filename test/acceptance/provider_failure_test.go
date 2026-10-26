@@ -376,6 +376,7 @@ func TestProviderLoopbackURL(t *testing.T) {
 			wantCode: 0, wantStdout: "added provider mock", wantConfig: true,
 		},
 	}
+	release := buildRelease(t) // before HOME changes, so go build keeps the real module and build caches
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -384,7 +385,7 @@ func TestProviderLoopbackURL(t *testing.T) {
 			t.Setenv("GALAHAD_HOME", "")
 			bin := binPath
 			if tt.release {
-				bin = buildRelease(t)
+				bin = release
 			}
 			stdout, stderr, code := runBinary(t, bin, tt.args...)
 			if code != tt.wantCode {
@@ -418,6 +419,7 @@ func TestProviderLoopbackConfig(t *testing.T) {
 		{name: "a galahadtest build calls the loopback provider", wantCode: 0, wantRequests: 1},
 		{name: "a release build does not call it", release: true, wantCode: 1, wantRequests: 0},
 	}
+	release := buildRelease(t) // before HOME changes, so go build keeps the real module and build caches
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var requests atomic.Int32
@@ -439,7 +441,7 @@ func TestProviderLoopbackConfig(t *testing.T) {
 			}
 			bin := binPath
 			if tt.release {
-				bin = buildRelease(t)
+				bin = release
 			}
 			stdout, stderr, code := runBinary(t, bin, "provider", "test", "mock")
 			if code != tt.wantCode {
