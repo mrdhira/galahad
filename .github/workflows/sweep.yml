@@ -7,6 +7,8 @@ name: sweep
 # It scans, with ClamAV, YARA and OSV active (the signatures come from the update VM, OSV through the proxy):
 #   - the 12 repos that must stay CLEAN;
 #   - the 10 repos that were SUSPICIOUS in v0.1.0 (docs/milestones/M1.md), none of which may become MALICIOUS;
+#   - two repos with no baseline, promptfoo/promptfoo and NVIDIA/garak (docs/milestones/M3.md section 4): neither may be
+#     MALICIOUS or be SUSPICIOUS only because of GAL-INJECT-001, and none of the 12 clean repos may get that rule;
 #   - the built galahad binary with --image re, which must be CLEAN. The re image comes from the images-* release, or
 #     is built here with the same container, scripts and cache as image.yml (about four minutes with a warm cache,
 #     more with a cold one), so it is not skipped.
@@ -14,8 +16,8 @@ name: sweep
 # at most 10 notices per step, so the targets are split over steps of at most six. The job fails when a rule of the
 # sweep is broken (scripts/vm/sweep-check.sh), and sweep.json, with every result, is uploaded as an artifact.
 #
-# Time: setup about 10 to 15 minutes, then about 3 to 8 minutes for each of the 23 scans (a clone, ClamAV over the
-# whole tree, OSV), so one to three hours. A scan has the default limit of its image, 10 minutes for core and 20
+# Time: setup about 10 to 15 minutes, then about 3 to 8 minutes for each of the 25 scans (a clone, ClamAV over the
+# whole tree, OSV), so one to three and a half hours. A scan has the default limit of its image, 10 minutes for core and 20
 # for re. The job limit is 330 minutes, under the 6 hours that GitHub allows.
 
 on:
@@ -78,6 +80,14 @@ jobs:
         run: |
           for repo in prettier/prettier facebook/react typescript-eslint/typescript-eslint vitejs/vite microsoft/vscode-extension-samples; do
             scripts/vm/sweep.sh suspicious "https://github.com/$repo"
+          done
+
+      # No baseline: the injection detector (GAL-INJECT-001) must not give a false alarm on these two popular repos.
+      - name: Sweep the repos with no baseline
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          for repo in promptfoo/promptfoo NVIDIA/garak; do
+            scripts/vm/sweep.sh new "https://github.com/$repo"
           done
 
       # The binary built by "make build" in the setup, scanned in the re image. capa times out on it (a known gap),
