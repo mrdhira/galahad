@@ -23,9 +23,9 @@ jobs:
 
   # Nothing is released unless the vm workflow (real Firecracker VMs: the corpus, the demo and the P8 probes) passed
   # on the tagged commit. The job reads the list of workflow runs through the API, so its token has the single
-  # scope "actions: read" and nothing else; it does not even check out the code. vm.yml runs for pull requests and
-  # for pushes to main on the paths that matter, so a commit that touched none of them (a change to the docs, for
-  # example) has no run: start one for it, wait for it, and run this workflow again.
+  # scope "actions: read" and nothing else; it does not even check out the code. vm.yml runs only on demand, so
+  # dispatch it on the commit you tag and wait for it to be green before you push the tag; if you forgot, start it,
+  # wait for it, and run this workflow again.
   vm:
     runs-on: ubuntu-latest
     permissions:

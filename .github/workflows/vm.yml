@@ -7,8 +7,9 @@ name: vm
 # M2 demo through real VMs (test/acceptance/vm_corpus_test.go, demo_test.go), and runs the P8 isolation probes
 # (test/acceptance/p8_test.go) in microVMs of their own. Each failure prints ::error:: lines, which show up as
 # annotations without reading the job log.
-# A green run of this workflow on the tagged commit is what release.yml requires. It runs for pull requests and
-# for pushes to main on the paths below, and on demand; a commit that touches none of them needs a dispatch.
+# A green run of this workflow on the tagged commit is what release.yml requires. It runs only on demand (owner
+# decision, 2026-10-26): at the end of each milestone and on the commit to be tagged (gh workflow run vm.yml --ref main).
+# Pull requests and pushes do not start it, so merges do not wait on it.
 #
 # Time estimates on a hosted runner (none is measured yet; the first run fills them in): setup about 10 minutes while
 # the images are built here (less once the images-* release exists; the signatures are cached), the benign scans
@@ -17,35 +18,6 @@ name: vm
 # allows.
 
 on:
-  pull_request:
-    paths:
-      - 'cmd/**'
-      - 'images/**'
-      - 'internal/**'
-      - 'scripts/vm/**'
-      - 'testdata/corpus/**'
-      - 'test/acceptance/p8*'
-      - 'test/acceptance/vm_*'
-      - 'test/acceptance/corpus_test.go'
-      - 'test/acceptance/demo_test.go'
-      - 'test/acceptance/sinkhole_test.go'
-      - '.github/actions/vm-setup/**'
-      - '.github/workflows/vm.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'cmd/**'
-      - 'images/**'
-      - 'internal/**'
-      - 'scripts/vm/**'
-      - 'testdata/corpus/**'
-      - 'test/acceptance/p8*'
-      - 'test/acceptance/vm_*'
-      - 'test/acceptance/corpus_test.go'
-      - 'test/acceptance/demo_test.go'
-      - 'test/acceptance/sinkhole_test.go'
-      - '.github/actions/vm-setup/**'
-      - '.github/workflows/vm.yml'
   workflow_dispatch:
 
 permissions:
@@ -53,8 +25,8 @@ permissions:
 
 concurrency:
   group: vm-${{ github.ref }}
-  # A push to main is not cancelled by the next one: release.yml needs the run of the tagged commit.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A run is never cancelled by the next one: release.yml needs the run of the tagged commit.
+  cancel-in-progress: false
 
 jobs:
   scan:

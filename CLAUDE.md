@@ -53,6 +53,8 @@ At most 3 fix loops per task. After that, escalate to opus with high effort, the
 ## Quality gate
 `make gate` runs, in order: `gofmt -l`, `go vet`, `golangci-lint run`, cross-build for linux/darwin/windows x amd64/arm64, `govulncheck`, `gosec`, `go test -race -count=1 -cover ./...`, `go mod verify` plus the dependency allowlist, and the acceptance smoke tests. CI runs the same target. On a pull request that only changes docs (Markdown under `docs/` and `.claude/`, skill `LICENSE` files, top-level Markdown, `LICENSE`, `.gitignore` or the Dependabot config), the `gate` and `test` jobs skip their steps but still report, so the required checks pass quickly. If the change detection fails, everything runs. Pushes to `main` always run in full.
 
+The real-VM workflow (`vm.yml`: Firecracker, the corpus, the demo and the P8 probes) does not run on pull requests or pushes. It is dispatched by hand (`gh workflow run vm.yml --ref main`) at the end of each milestone and on the commit to be tagged; a red run is fixed before the milestone closes, and `release.yml` refuses a tag without a green run.
+
 ## Tests
 - Unit tests sit next to the code and are black-box: `package <name>_test`, exported API only. White-box tests (`package <name>`) are not used for now.
 - Acceptance tests: `test/acceptance/` (`package acceptance_test`). They build the binary and run it with `os/exec`, then assert exit code, verdict, evidence and report files.
