@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/mrdhira/galahad/internal/protocol"
 )
 
 const (
@@ -86,6 +88,8 @@ func (p Provider) Validate() error {
 	return nil
 }
 
+// validateURL accepts an https URL. A galahadtest build also accepts plain http to a loopback
+// address with a port, so that the tests can point a provider at a local mock.
 func validateURL(s string) error {
 	if len(s) > maxURLBytes {
 		return fmt.Errorf("url is longer than %d bytes", maxURLBytes)
@@ -99,7 +103,7 @@ func validateURL(s string) error {
 	switch {
 	case err != nil:
 		return errors.New("url is not valid")
-	case u.Scheme != "https" || u.Hostname() == "":
+	case u.Hostname() == "" || u.Scheme != "https" && !isLoopbackHTTP(u):
 		return errors.New("url must be https with a host")
 	case u.User != nil:
 		return errors.New("url must not have user info")
@@ -107,6 +111,12 @@ func validateURL(s string) error {
 		return errors.New("url must not have a query or a fragment")
 	}
 	return nil
+}
+
+// isLoopbackHTTP reports whether u is plain http to a loopback address with a port, which only a
+// galahadtest build allows.
+func isLoopbackHTTP(u *url.URL) bool {
+	return u.Scheme == "http" && u.Port() != "" && protocol.DecisionLoopback(u.Hostname())
 }
 
 // Validate checks the version, the number of providers, every provider and the uniqueness of the names.

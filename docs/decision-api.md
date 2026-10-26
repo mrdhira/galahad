@@ -108,6 +108,19 @@ A failed call has one code: `timeout`, `network`, `status` (with the HTTP code),
 
 A failed call is not a failed scan: the scan still ends with the verdict and exit code of the analysis alone, and the report says why there is no opinion.
 
+## Testing a provider
+
+`galahad provider test <name>` sends one request to the provider and prints the answers, the input tokens, the request ID and the latency. It exits 0 when the call worked, 1 when it failed (with the error code), and 2 when the name is unknown or the key variable is not set. No scan is involved.
+
+The input is fixed and holds no user data: a directory target with one file, full coverage, and one made-up finding.
+
+```json
+{"rule_id": "GAL-TEST-001", "severity": "low", "title": "Sample finding for provider test", "analyzer": "test",
+ "path": "sample.txt", "line": 1, "snippet": "echo hello"}
+```
+
+The three questions, the headers, the retries and the response checks are the same as for a scan.
+
 ## The cap
 
 Let S be the verdict, score and confidence that Galahad computes from the findings and the coverage. The opinion counts only when the call worked. Let p be the `malicious` probability of the `verdict` answer.

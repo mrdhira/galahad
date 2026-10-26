@@ -41,8 +41,9 @@ Commands:
               --git  (clone an https link as a Git repository)  --submodules  (also fetch the submodules of a Git repository)
   setup     Download and verify the pinned Firecracker and guest images, then fill the ClamAV and YARA signatures: galahad setup [--image core|re] [--skip-signatures]
   doctor    Check that this host can run scans, and say how to fix what is wrong
-  provider  Manage decision providers: galahad provider add <name> [--url <u> --model <m>] [--key-env VAR] [--timeout 60s] | list | remove <name>
+  provider  Manage decision providers: galahad provider add <name> [--url <u> --model <m>] [--key-env VAR] [--timeout 60s] | list | remove <name> | test <name>
               "provider add netra" needs no flags. The key is read from the variable named by --key-env, never stored
+              "provider test <name>" sends a fixed sample with no user data and prints the answers
   report    Show the report of a past scan: galahad report <id> [--json]
   jobs      List past scans, or remove them: galahad jobs [rm <id>...]
   version   Print version information

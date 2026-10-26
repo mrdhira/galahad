@@ -81,11 +81,11 @@ func TestProvider(t *testing.T) {
 		},
 		{
 			name: "no subcommand is a usage error",
-			args: []string{"provider"}, wantCode: 2, wantStderr: "want add, list or remove",
+			args: []string{"provider"}, wantCode: 2, wantStderr: "want add, list, remove or test",
 		},
 		{
 			name: "an unknown subcommand is a usage error",
-			args: []string{"provider", "test", "netra"}, wantCode: 2, wantStderr: "want add, list or remove",
+			args: []string{"provider", "bogus", "netra"}, wantCode: 2, wantStderr: "want add, list, remove or test",
 		},
 		{
 			name: "add with a bad flag is a usage error",
@@ -173,6 +173,28 @@ func TestProvider(t *testing.T) {
 			name: "remove refuses a config it cannot load",
 			file: `not json ` + fakeKey,
 			args: []string{"provider", "remove", "netra"}, wantCode: 1, wantStderr: "not valid JSON", wantNot: fakeKey,
+		},
+		{
+			name: "test without a name is a usage error",
+			args: []string{"provider", "test"}, wantCode: 2, wantStderr: "want one provider name",
+		},
+		{
+			name: "test of an unknown provider is a usage error",
+			args: []string{"provider", "test", "other"}, wantCode: 2, wantStderr: "no provider other",
+		},
+		{
+			name:   "test with the key variable unset is a usage error",
+			before: [][]string{addNetra}, args: []string{"provider", "test", "netra"}, wantCode: 2, wantStderr: "$NETRA_API_KEY, which is not set",
+		},
+		{
+			name:   "test with a control character in the key is a usage error",
+			before: [][]string{addNetra}, env: map[string]string{"NETRA_API_KEY": "fake-key\r\nX-Evil: 1"},
+			args: []string{"provider", "test", "netra"}, wantCode: 2, wantStderr: "$NETRA_API_KEY: the key has a control character", wantNot: "X-Evil",
+		},
+		{
+			name: "test refuses a config it cannot load",
+			file: `not json ` + fakeKey,
+			args: []string{"provider", "test", "netra"}, wantCode: 1, wantStderr: "not valid JSON", wantNot: fakeKey,
 		},
 		{
 			name:   "remove of an unknown provider is an error",

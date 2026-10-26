@@ -66,6 +66,14 @@ for pkg in analyze ingest vsock agent; do
     exit 1
   fi
 done
+# The reverse: the agent must not link the decision client, so it never reads a key.
+for tags in "" galahadtest; do
+  agent_deps="$(go list -tags "$tags" -deps ./cmd/galahad-agent)"
+  if printf '%s\n' "$agent_deps" | grep -E -q "^$main_module/internal/decision(/|$)"; then
+    echo "cmd/galahad-agent must not depend on internal/decision (the guest never holds a key; tags: '$tags')" >&2
+    exit 1
+  fi
+done
 # The fake sandbox backend exists only in galahadtest builds.
 if printf '%s\n' "$host_deps" | grep -F -q "$main_module/internal/sandbox/fake"; then
   echo "a build without tags must not contain internal/sandbox/fake" >&2

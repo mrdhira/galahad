@@ -527,7 +527,7 @@ func (d *Decision) Validate() error {
 	if !providerRe.MatchString(d.Provider) {
 		return fmt.Errorf("provider %q does not match %s", cleanName(d.Provider), providerRe)
 	}
-	if err := checkDecisionURL(d.URL); err != nil {
+	if err := CheckDecisionURL(d.URL); err != nil {
 		return err
 	}
 	if !modelRe.MatchString(d.Model) {
@@ -616,9 +616,9 @@ func (e DecisionError) validate() error {
 	return checkText("message", e.Message)
 }
 
-// checkDecisionURL checks the base URL of the provider: at most 256 bytes, https (plain http for a
+// CheckDecisionURL checks the base URL of the provider: at most 256 bytes, https (plain http for a
 // loopback address in galahadtest builds), with a host and no user info, query or fragment.
-func checkDecisionURL(s string) error {
+func CheckDecisionURL(s string) error {
 	if len(s) > MaxDecisionURL {
 		return fmt.Errorf("url is %d bytes, max %d", len(s), MaxDecisionURL)
 	}
