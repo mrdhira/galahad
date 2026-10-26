@@ -98,7 +98,8 @@ From: M3 planning.
 
 ### Fake backend leaks a temp directory per scan
 The fake backend starts the agent with `--unsafe-host`, which makes `/tmp/galahad-input-*`. The host kills the agent before its deferred `RemoveAll` runs, so every scan leaves a directory (1724 directories, 1.4 GB, filled a dev disk). Test-only, but it fills CI and dev disks. Give the agent a temp directory that the fake backend removes, or have the agent remove the directory before it sends the Result.
-From: PR 86 review.
+Since T3.4b the host kills the machine right after the Result frame, so it happens more often: 12 of 15 scans left a directory, against 2 of 15 before, some with a copy of the input.
+From: PR 86 and PR 106 review.
 
 ### `fake.Kill` can block forever
 In `internal/sandbox/fake/fake.go`, if `Process.Kill` fails with anything but `os.ErrProcessDone`, `Kill` still waits on `<-m.done`. Return the error or bound the wait. `fake.Start` also overwrites a listener when the same port appears twice and leaks the first one. Test-only.
@@ -365,7 +366,7 @@ From: PR 96 review.
 From: PR 98 review.
 
 ### Decision client details
-- A request ID that holds part of the key, or the key in another case or in base64, is kept. Accepted risk: only a provider that already holds the key can do this.
+- A request ID or an answer `model` that holds part of the key, or the key in another case or in base64, is kept. Accepted risk: only a provider that already holds the key can do this.
 - `TestSend` cases are not in code order, and `TestSendRefusesURL` has no success case first. `TestSend`'s 400 ms upper bounds under `-race` with `t.Parallel` may flake.
 - The T3.2b card in `docs/milestones/M3.md` names `internal/decision/loopback_galahadtest.go`; the code reuses `protocol.DecisionLoopback`.
 From: PR 102 review.
@@ -398,6 +399,13 @@ From: PR 104 review.
 - `TestApplyDecisionCap` runs `t.Run(tt.name+"/"+a.name)` in a second loop over answers, and `TestApplyDecisionIgnored` has no `want*` fields.
 - `maliciousOpinion` could refuse a probability that is not finite or is above 1. `Validate` already refuses both, but `+Inf` would print a broken percentage.
 From: PR 101 review.
+
+### Decision step details
+- A Result whose `file_count`, `files_seen` or `files_analyzed` is negative or above 2^31-1, and that has a guest finding at low or above, passes `Result.Validate` but fails `DecisionRequest.Validate`. `Select` then returns an error and the job fails with exit 1 instead of keeping the static verdict. Only a compromised guest can send this. Range-check the counts in `Result.Validate`, or have `Ask` turn the error into a `failed` decision.
+- If the scanned input contains the key value, it is sent inside `sent` and stored in `report.json`. It is already in the findings without `--decision`. As defence in depth, `Ask` could replace the key with `[REDACTED:key]` in the request.
+- When the job deadline has already passed during the call, any later failure of `conclude` (Ctrl-C, a `Decide` error, a `Validate` or `report.Write` error) is recorded as state `timeout` instead of `canceled` or `failed`, because the `switch` in `execute` (`internal/job/run.go`) reads the job context, not `caller`. The exit code is 1 either way.
+- In `internal/decision/ask_test.go` the "cannot be built" case is last, though it is the first branch. `internal/job/decision_tag_test.go` has no case for a `res.Validate()` or `report.Write` failure inside `conclude`.
+From: PR 106 review.
 
 ## Windows (M6, after v1.0.0)
 
