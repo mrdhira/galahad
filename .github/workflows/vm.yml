@@ -25,7 +25,8 @@ permissions:
 
 concurrency:
   group: vm-${{ github.ref }}
-  # A run is never cancelled by the next one: release.yml needs the run of the tagged commit.
+  # A running run is not cancelled. GitHub keeps one pending run per ref, so a dispatch queued behind another can be
+  # replaced by a newer one; release.yml needs a green run on the tagged commit, so dispatch again for it if needed.
   cancel-in-progress: false
 
 jobs:
