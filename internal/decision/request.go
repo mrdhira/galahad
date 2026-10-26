@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mrdhira/galahad/internal/protocol"
 )
@@ -51,9 +52,10 @@ type entry struct {
 // without path, line or snippet. Nothing else of the Result is used: not the name, the IOCs, the
 // files, the hashes, the network log, the verdict, the score or the reasons.
 //
-// ok is false when there is nothing to send, that is when no guest finding is at low or above.
-// If the redacted request would be over protocol.MaxDecisionRequest, the entries of the lowest rank
-// are dropped until it fits, and Input.Omitted counts the entries that were not sent. The request is
+// ok is false when there is nothing to send, that is when no guest finding is at low or above, or
+// none of them is valid once redacted. An entry that is not valid on its own is left out. If the
+// redacted request would be over protocol.MaxDecisionRequest, the entries of the lowest rank are
+// dropped until it fits. Input.Omitted counts the entries that were not sent. The request is
 // not redacted: the caller runs Redact on it before encoding. err is set when the request is not
 // valid even without findings, for example when model is not a model name.
 func Select(res protocol.Result, model string) (protocol.DecisionRequest, bool, error) {
@@ -63,7 +65,7 @@ func Select(res protocol.Result, model string) (protocol.DecisionRequest, bool, 
 		if severityRank(f.Severity) == 0 {
 			continue
 		}
-		e := entry{finding: protocol.DecisionFinding{RuleID: f.RuleID, Severity: f.Severity, Title: f.Title, Analyzer: f.Analyzer}}
+		e := entry{finding: protocol.DecisionFinding{RuleID: f.RuleID, Severity: f.Severity, Title: hideName(res.Target, f.Title), Analyzer: f.Analyzer}}
 		if f.Analyzer == hostAnalyzer {
 			entries = append(entries, e)
 			continue
@@ -73,7 +75,7 @@ func Select(res protocol.Result, model string) (protocol.DecisionRequest, bool, 
 			ev := f.Evidence[0]
 			e.path = ev.Path
 			e.finding.Path, e.finding.Line = targetPath(res.Target, ev.Path), ev.Line
-			e.finding.Title, e.finding.Snippet = hideName(res.Target, f.Title), hideName(res.Target, ev.Snippet)
+			e.finding.Snippet = hideName(res.Target, ev.Snippet)
 			if f.Analyzer == filenameAnalyzer && isFileTarget(res.Target) && ev.Path == res.Target.Name {
 				e.finding.Snippet = "" // the snippet is the name of the file, as it was or as it is shown
 			}
@@ -92,16 +94,6 @@ func Select(res protocol.Result, model string) (protocol.DecisionRequest, bool, 
 			cmp.Compare(a.finding.Line, b.finding.Line),
 		)
 	})
-	type key struct{ rule, path string }
-	seen := make(map[key]bool, len(entries))
-	findings := make([]protocol.DecisionFinding, 0, protocol.MaxDecisionFindings)
-	for _, e := range entries {
-		if k := (key{e.finding.RuleID, e.path}); !seen[k] {
-			seen[k] = true
-			findings = append(findings, e.finding)
-		}
-	}
-
 	req := protocol.DecisionRequest{
 		Model:               model,
 		PromptFormatVersion: protocol.PromptFormatVersion,
@@ -110,46 +102,71 @@ func Select(res protocol.Result, model string) (protocol.DecisionRequest, bool, 
 			Notice:   protocol.DecisionNotice,
 			Target:   protocol.DecisionTarget{Kind: res.Target.Kind, FileCount: res.Target.FileCount},
 			Coverage: protocol.DecisionCoverage{FilesSeen: res.Coverage.FilesSeen, FilesAnalyzed: res.Coverage.FilesAnalyzed, Truncated: res.Coverage.Truncated},
-			Findings: findings,
+			Findings: []protocol.DecisionFinding{},
 		},
 		Questions: protocol.DecisionQuestions(),
 	}
-	if n := len(findings) - protocol.MaxDecisionFindings; n > 0 {
-		req.Input.Findings, req.Input.Omitted = findings[:protocol.MaxDecisionFindings], n
+	if err := req.Validate(); err != nil {
+		return protocol.DecisionRequest{}, false, fmt.Errorf("decision request: %w", err)
 	}
-	for {
+
+	// A finding that is not valid on its own, once redacted, is left out. Omitted counts every
+	// unique entry that is not sent, whatever the reason.
+	type key struct{ rule, path string }
+	seen := make(map[key]bool, len(entries))
+	guest = false
+	for _, e := range entries {
+		k := key{e.finding.RuleID, e.path}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		req.Input.Omitted++
+		if len(req.Input.Findings) < protocol.MaxDecisionFindings && validAlone(req, e.finding) {
+			guest = guest || e.finding.Analyzer != hostAnalyzer
+			req.Input.Findings = append(req.Input.Findings, e.finding)
+		}
+	}
+	if !guest {
+		return protocol.DecisionRequest{}, false, nil
+	}
+	for len(req.Input.Findings) > 0 {
 		redacted := req
 		redacted.Input.Findings = slices.Clone(req.Input.Findings)
 		Redact(&redacted)
-		err := redacted.Validate()
-		if err == nil {
+		if redacted.Validate() == nil {
+			req.Input.Omitted -= len(req.Input.Findings)
 			return req, true, nil
 		}
-		if len(req.Input.Findings) == 0 {
-			return protocol.DecisionRequest{}, false, fmt.Errorf("decision request: %w", err)
-		}
 		req.Input.Findings = req.Input.Findings[:len(req.Input.Findings)-1]
-		req.Input.Omitted++
 	}
+	return protocol.DecisionRequest{}, false, nil
+}
+
+// validAlone reports whether req is valid, once redacted, with f as its only finding.
+func validAlone(req protocol.DecisionRequest, f protocol.DecisionFinding) bool {
+	req.Input.Findings = []protocol.DecisionFinding{f}
+	Redact(&req)
+	return req.Validate() == nil
 }
 
 // isFileTarget reports whether t is a file target that has a name to hide.
 func isFileTarget(t protocol.Target) bool { return t.Kind == protocol.TargetFile && t.Name != "" }
 
-// minHiddenName is the shortest name that hideName replaces in a text. "(target)" is longer than a
-// shorter name, and a text full of it (a file named "a") would outgrow the limits of Validate.
+// minHiddenName is the shortest name, in runes, that hideName replaces in a text. "(target)" is longer
+// than a shorter name, and a text full of it (a file named "a") would outgrow the limits of Validate.
 const minHiddenName = 3
 
 // hideName replaces every occurrence of the name of a file target in text by "(target)".
 func hideName(t protocol.Target, text string) string {
-	if !isFileTarget(t) || len(t.Name) < minHiddenName {
+	if !isFileTarget(t) || utf8.RuneCountInString(t.Name) < minHiddenName {
 		return text
 	}
 	return strings.ReplaceAll(text, t.Name, targetName)
 }
 
-// targetPath replaces the name of a file target at the start of an evidence path by "(target)": the
-// path of the file itself, or of a member after "!/".
+// targetPath replaces the name of a file target in an evidence path by "(target)": the path of the
+// file itself, the start of the path of a member after "!/", and any later occurrence of the name.
 func targetPath(t protocol.Target, path string) string {
 	if !isFileTarget(t) {
 		return path
@@ -158,7 +175,7 @@ func targetPath(t protocol.Target, path string) string {
 		return targetName
 	}
 	if rest, ok := strings.CutPrefix(path, t.Name+"!/"); ok {
-		return targetName + "!/" + rest
+		return targetName + "!/" + hideName(t, rest)
 	}
-	return path
+	return hideName(t, path)
 }

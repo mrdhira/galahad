@@ -126,7 +126,7 @@ func TestSelect(t *testing.T) {
 			wantInput: inputOf(protocol.TargetFile, []protocol.DecisionFinding{
 				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", "(target)", 1, "a"),
 				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", "(target)!/a.js", 2, "b"),
-				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", marker+"x!/b.js", 4, "d"),
+				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", "(target)x!/b.js", 4, "d"),
 				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", "other.js", 3, "c"),
 			}, 0),
 		},
@@ -145,6 +145,33 @@ func TestSelect(t *testing.T) {
 				{RuleID: "GAL-SCRIPT-001", Severity: protocol.SeverityMedium, Title: "Opens (target)", Analyzer: "script", Path: "(target)!/a.js", Line: 1, Snippet: "open (target) and (target)"},
 			}, 0),
 			wantAbsent: marker,
+		},
+		{
+			name: "the name of a file target after the start of a member path becomes (target)",
+			res: resultOf(protocol.TargetFile, "Invoice-ACME.zip",
+				finding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", ev("Invoice-ACME.zip!/Invoice-ACME.zip.lnk", 1, "a")),
+				finding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", ev("Invoice-ACME.zip!/inner.zip!/Invoice-ACME.zip", 2, "b")),
+			),
+			model:  "test/model-1",
+			wantOK: true,
+			wantInput: inputOf(protocol.TargetFile, []protocol.DecisionFinding{
+				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", "(target)!/(target).lnk", 1, "a"),
+				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", "(target)!/inner.zip!/(target)", 2, "b"),
+			}, 0),
+			wantAbsent: "Invoice-ACME",
+		},
+		{
+			name: "a name of fewer than three runes is not replaced in a snippet, even when it has three bytes",
+			res: resultOf(protocol.TargetFile, "\u20ac",
+				finding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", ev("\u20ac", 1, strings.Repeat("\u20ac", protocol.MaxSnippet))),
+				finding("GAL-SCRIPT-002", protocol.SeverityLow, "script", ev("a.js", 2, "b")),
+			),
+			model:  "test/model-1",
+			wantOK: true,
+			wantInput: inputOf(protocol.TargetFile, []protocol.DecisionFinding{
+				dfinding("GAL-SCRIPT-001", protocol.SeverityMedium, "script", "(target)", 1, strings.Repeat("\u20ac", protocol.MaxSnippet)),
+				dfinding("GAL-SCRIPT-002", protocol.SeverityLow, "script", "a.js", 2, "b"),
+			}, 0),
 		},
 		{
 			name: "the snippet of the filename analyzer for the target itself is left out",
@@ -204,6 +231,24 @@ func TestSelect(t *testing.T) {
 			res:     resultOf(protocol.TargetDir, "project", finding("GAL-SCRIPT-001", protocol.SeverityLow, "script", ev("a.js", 3, "eval(x)"))),
 			model:   "not a model",
 			wantErr: true,
+		},
+		{
+			name: "a finding that is not valid once redacted is left out and counted",
+			res: resultOf(protocol.TargetDir, "project",
+				finding("GAL-SCRIPT-001", protocol.SeverityHigh, "script", ev("a.js", 1, "bidi \u202e text")),
+				finding("GAL-SCRIPT-002", protocol.SeverityLow, "script", ev("b.js", 2, "b")),
+			),
+			model:     "test/model-1",
+			wantOK:    true,
+			wantInput: inputOf(protocol.TargetDir, []protocol.DecisionFinding{dfinding("GAL-SCRIPT-002", protocol.SeverityLow, "script", "b.js", 2, "b")}, 1),
+		},
+		{
+			name: "no valid guest finding gives nothing to send, even when a finding of the host is valid",
+			res: resultOf(protocol.TargetDir, "project",
+				finding("GAL-SCRIPT-001", protocol.SeverityHigh, "script", ev("a.js", 1, "bidi \u202e text")),
+				finding("GAL-NET-001", protocol.SeverityHigh, "network", ev("(network)", 0, "CONNECT host:443 denied")),
+			),
+			model: "test/model-1",
 		},
 	}
 	for _, tt := range tests {
