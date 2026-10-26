@@ -1,18 +1,21 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/mrdhira/galahad/internal/config"
+	"github.com/mrdhira/galahad/internal/decision"
 	"github.com/mrdhira/galahad/internal/protocol"
 )
 
-// runProvider manages the decision providers in config.json: "provider add|list|remove".
+// runProvider manages the decision providers in config.json: "provider add|list|remove|test".
 func runProvider(args []string, stdout, stderr io.Writer, env Env) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -22,9 +25,11 @@ func runProvider(args []string, stdout, stderr io.Writer, env Env) int {
 			return runProviderList(args[1:], stdout, stderr, env)
 		case "remove":
 			return runProviderRemove(args[1:], stdout, stderr, env)
+		case "test":
+			return runProviderTest(args[1:], stdout, stderr, env)
 		}
 	}
-	fmt.Fprintf(stderr, "galahad provider: want add, list or remove\n\n%s", usage)
+	fmt.Fprintf(stderr, "galahad provider: want add, list, remove or test\n\n%s", usage)
 	return ExitUsage
 }
 
@@ -179,4 +184,99 @@ func runProviderRemove(args []string, stdout, stderr io.Writer, env Env) int {
 	}
 	fmt.Fprintf(stdout, "removed provider %s\n", pos[0])
 	return ExitClean
+}
+
+// runProviderTest sends the fixed sample input to a provider and prints what came back. The sample
+// holds no user data (docs/decision-api.md).
+func runProviderTest(args []string, stdout, stderr io.Writer, env Env) int {
+	pos, code, done := parseArgs("provider test", flag.NewFlagSet("provider test", flag.ContinueOnError), args, stdout, stderr)
+	if done {
+		return code
+	}
+	if len(pos) != 1 {
+		fmt.Fprintf(stderr, "galahad provider test: want one provider name\n\n%s", usage)
+		return ExitUsage
+	}
+	home, err := env.home()
+	if err != nil {
+		fmt.Fprintf(stderr, "galahad provider test: %v\n", err)
+		return ExitError
+	}
+	cfg, err := config.Load(home)
+	if err != nil {
+		fmt.Fprintf(stderr, "galahad provider test: %s\n", protocol.CleanPath(err.Error()))
+		return ExitError
+	}
+	p, ok := cfg.Find(pos[0])
+	if !ok {
+		fmt.Fprintf(stderr, "galahad provider test: no provider %s\n", protocol.CleanPath(pos[0]))
+		return ExitUsage
+	}
+	var key string
+	if p.KeyEnv != "" {
+		if key = os.Getenv(p.KeyEnv); key == "" {
+			fmt.Fprintf(stderr, "galahad provider test: provider %s needs the key in $%s, which is not set\n", p.Name, p.KeyEnv)
+			return ExitUsage
+		}
+	}
+
+	reply := decision.Send(context.Background(), p, key, env.version(), sampleRequest(p.Model))
+	if reply.Error != nil {
+		fmt.Fprintf(stderr, "galahad provider test: %s failed: %s", p.Name, reply.Error.Code)
+		if reply.Error.HTTPStatus != 0 {
+			fmt.Fprintf(stderr, " %d", reply.Error.HTTPStatus)
+		}
+		fmt.Fprintf(stderr, ": %s (attempts %d, latency %d ms", reply.Error.Message, reply.Attempts, reply.LatencyMS)
+		if reply.RequestID != "" {
+			fmt.Fprintf(stderr, ", request id %s", reply.RequestID)
+		}
+		fmt.Fprintln(stderr, ")")
+		return ExitError
+	}
+
+	fmt.Fprintf(stdout, "provider %s: ok\n", p.Name)
+	for _, q := range protocol.DecisionQuestions() {
+		a := reply.Answers.Questions[q.ID]
+		var labels []string
+		for i, l := range q.Labels() {
+			name := l
+			if q.Type == protocol.QuestionScore {
+				name = q.Levels[i]
+			}
+			labels = append(labels, fmt.Sprintf("%s %.2f", name, a.Probabilities[l]))
+		}
+		fmt.Fprintf(stdout, "  %-15s %s", q.ID, strings.Join(labels, ", "))
+		if a.Choice != "" {
+			fmt.Fprintf(stdout, "; choice %s", a.Choice)
+		}
+		if a.Score != nil {
+			fmt.Fprintf(stdout, "; expected level %.2f", *a.Score)
+		}
+		fmt.Fprintf(stdout, "; label_mass %.2f (diagnostic)\n", a.LabelMass)
+	}
+	fmt.Fprintf(stdout, "input tokens: %d\n", reply.Usage.PromptTokens)
+	if reply.RequestID != "" {
+		fmt.Fprintf(stdout, "request id: %s\n", reply.RequestID)
+	}
+	fmt.Fprintf(stdout, "latency: %d ms (attempts %d)\n", reply.LatencyMS, reply.Attempts)
+	return ExitClean
+}
+
+// sampleRequest is the fixed input of "provider test": one made-up finding, no user data.
+func sampleRequest(model string) protocol.DecisionRequest {
+	return protocol.DecisionRequest{
+		Model:               model,
+		PromptFormatVersion: protocol.PromptFormatVersion,
+		Input: protocol.DecisionInput{
+			Schema:   protocol.DecisionSchema,
+			Notice:   protocol.DecisionNotice,
+			Target:   protocol.DecisionTarget{Kind: protocol.TargetDir, FileCount: 1},
+			Coverage: protocol.DecisionCoverage{FilesSeen: 1, FilesAnalyzed: 1},
+			Findings: []protocol.DecisionFinding{{
+				RuleID: "GAL-TEST-001", Severity: protocol.SeverityLow, Title: "Sample finding for provider test", Analyzer: "test",
+				Path: "sample.txt", Line: 1, Snippet: "echo hello",
+			}},
+		},
+		Questions: protocol.DecisionQuestions(),
+	}
 }
