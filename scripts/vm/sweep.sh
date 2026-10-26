@@ -7,7 +7,7 @@
 # The text of a report comes from a VM, so it never goes into a workflow command as it is: an annotation is one
 # printable line that starts with this script's own text.
 #   GALAHAD_HOME=DIR SWEEP_DIR=DIR [GALAHAD=bin/galahad] scripts/vm/sweep.sh GROUP TARGET [scan flags]
-# GROUP is clean, suspicious or binary. TARGET is a link or a path, and the flags (for example --image re) follow it.
+# GROUP is clean, suspicious, new or binary. TARGET is a link or a path, and the flags (for example --image re) follow it.
 set -euo pipefail
 
 : "${GALAHAD_HOME:?GALAHAD_HOME is not set}"
@@ -36,6 +36,7 @@ pkill -KILL -x firecracker || true
 job=$(find "$jobs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
 verdict=error
 score=null
+rest=null
 findings='[]'
 analyzers='[]'
 reasons='[]'
@@ -46,6 +47,10 @@ error=
 if [ -n "$job" ] && [ -s "$job/report.json" ]; then
 	verdict=$(jq -r '.verdict | gsub("[^ -~]"; "")' "$job/report.json")
 	score=$(jq -r '.score' "$job/report.json")
+	# The score without GAL-INJECT-001, by the model of internal/scoring (each rule ID once, at its highest severity),
+	# so sweep-check.sh can tell a verdict that only that rule causes.
+	rest=$(jq -r '[.findings[]? | select(.rule_id != "GAL-INJECT-001")] | group_by(.rule_id)
+		| map(map({info: 0, low: 5, medium: 15, high: 35, critical: 100}[.severity] // 0) | max) | add // 0 | [., 100] | min' "$job/report.json")
 	findings=$(jq -c '[.findings[]?.rule_id | gsub("[^ -~]"; "")] | unique' "$job/report.json")
 	analyzers=$(jq -c '[.coverage.analyzers[]? | gsub("[^ -~]"; "")]' "$job/report.json")
 	reasons=$(jq -c '[.reasons[:3][]? | gsub("[^ -~]"; "")]' "$job/report.json")
@@ -67,9 +72,9 @@ fi
 
 name=${target#https://github.com/}
 jq -cn --arg group "$group" --arg target "$name" --argjson code "$code" --arg verdict "$verdict" --argjson score "$score" \
-	--argjson findings "$findings" --argjson analyzers "$analyzers" --argjson reasons "$reasons" \
+	--argjson rest "$rest" --argjson findings "$findings" --argjson analyzers "$analyzers" --argjson reasons "$reasons" \
 	--argjson duration "$duration" --arg error "$error" --arg tools "$tools" --arg capa "$capa" --arg hits "$hits" \
-	'{group: $group, target: $target, exit_code: $code, verdict: $verdict, score: $score, findings: $findings,
+	'{group: $group, target: $target, exit_code: $code, verdict: $verdict, score: $score, rest_score: $rest, findings: $findings,
 	  analyzers: $analyzers, reasons: $reasons, duration_seconds: $duration, error: $error, tools: $tools,
 	  capa: $capa, hits: $hits}' >>"$SWEEP_DIR/results.jsonl"
 
